@@ -1,0 +1,376 @@
+{% extends "base.html" %}
+{% block title %}分析 | {{ project.name }}{% endblock %}
+
+{% block content %}
+<!-- パンくず -->
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a>
+  <span class="mx-1">/</span>
+  <span class="text-gray-700">分析</span>
+</nav>
+
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold text-brand-900">分析</h1>
+  <div class="flex gap-2">
+    <a href="{{ url_for('outputs.index', project_id=project.id) }}"
+       class="text-sm text-gray-500 border border-gray-300 rounded px-3 py-1.5 hover:border-gray-400 transition">
+      出力管理 →
+    </a>
+  </div>
+</div>
+
+<!-- ステータスメッセージ -->
+<div id="status-msg" class="hidden mb-4 p-3 rounded text-sm"></div>
+
+<!-- ═══════════════════════════════════════════════
+     ① 参加者別考察
+═══════════════════════════════════════════════ -->
+<section class="mb-10">
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="text-lg font-semibold text-brand-900 flex items-center gap-2">
+      <span class="w-6 h-6 rounded-full bg-brand-500 text-white text-xs flex items-center justify-center font-bold">1</span>
+      参加者別考察
+    </h2>
+    <span class="text-xs text-gray-400">{{ per_participant|length }} 件</span>
+  </div>
+
+  {% if per_participant %}
+    <div class="space-y-4">
+    {% for item in per_participant %}
+    {% set a = item.obj %}
+    {% set c = item.content %}
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+      <div class="bg-brand-50 px-5 py-3 flex items-center justify-between border-b border-gray-200">
+        <h3 class="font-semibold text-brand-900">{{ a.title }}</h3>
+        <span class="text-xs text-gray-400">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+      </div>
+      <div class="p-5 space-y-4">
+
+        {% if c.get('findings') %}
+        <div>
+          <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">発見事項</h4>
+          <div class="space-y-3">
+          {% for f in c.findings %}
+          <div class="border-l-4 {% if f.confidence == 'high' %}border-green-400{% elif f.confidence == 'medium' %}border-yellow-400{% else %}border-gray-300{% endif %} pl-4">
+            <p class="text-sm font-medium text-gray-800">{{ f.point }}</p>
+            <blockquote class="mt-1 text-sm text-gray-600 bg-gray-50 rounded px-3 py-2 italic">
+              "{{ f.evidence_quote }}"
+            </blockquote>
+            <div class="mt-1 flex gap-2 text-xs text-gray-400">
+              <span>参加者: {{ f.participant_codes | join(', ') }}</span>
+              {% if f.question_codes %}
+              <span>|</span>
+              <span>質問: {{ f.question_codes | join(', ') }}</span>
+              {% endif %}
+              <span>|</span>
+              <span class="{% if f.confidence == 'high' %}text-green-600{% elif f.confidence == 'medium' %}text-yellow-600{% else %}text-gray-400{% endif %} font-medium">
+                信頼度: {{ {'high':'高','medium':'中','low':'低'}.get(f.confidence, f.confidence) }}
+              </span>
+            </div>
+          </div>
+          {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if c.get('implications') %}
+        <div class="bg-blue-50 rounded-lg px-4 py-3">
+          <h4 class="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">示唆</h4>
+          <p class="text-sm text-blue-800">{{ c.implications }}</p>
+        </div>
+        {% endif %}
+
+        {% if c.get('unresolved') %}
+        <div class="bg-orange-50 rounded-lg px-4 py-3">
+          <h4 class="text-xs font-semibold text-orange-700 uppercase tracking-wide mb-1">積み残し課題</h4>
+          <p class="text-sm text-orange-800">{{ c.unresolved }}</p>
+        </div>
+        {% endif %}
+
+      </div>
+    </div>
+    {% endfor %}
+    </div>
+  {% else %}
+    <div class="text-center py-10 text-gray-400 bg-white rounded-lg border border-dashed border-gray-300">
+      <p class="text-sm">参加者別考察はまだありません</p>
+      <p class="text-xs mt-1">各インタビュー詳細画面から「③ AI考察生成」を実行してください</p>
+    </div>
+  {% endif %}
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ② 質問別横断分析
+═══════════════════════════════════════════════ -->
+<section class="mb-10">
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="text-lg font-semibold text-brand-900 flex items-center gap-2">
+      <span class="w-6 h-6 rounded-full bg-brand-500 text-white text-xs flex items-center justify-center font-bold">2</span>
+      質問別横断分析
+    </h2>
+    <span class="text-xs text-gray-400">{{ cross_participant|length }} 件</span>
+  </div>
+
+  {% if questions %}
+  <div class="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+    <p class="text-xs text-gray-500 mb-3">質問を選択して横断分析を実行してください（全参加者の回答を比較します）</p>
+    <div class="flex flex-wrap gap-2">
+    {% for q in questions %}
+    <button onclick="runCross({{ q.obj.id }}, this)"
+            class="text-xs border border-brand-300 text-brand-700 rounded px-2 py-1 hover:bg-brand-50 transition"
+            data-qid="{{ q.obj.id }}">
+      [{{ q.obj.question_code }}] {{ q.obj.question_text[:30] }}{% if q.obj.question_text|length > 30 %}…{% endif %}
+    </button>
+    {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if cross_participant %}
+    <div class="space-y-4">
+    {% for item in cross_participant %}
+    {% set a = item.obj %}
+    {% set c = item.content %}
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+      <div class="bg-purple-50 px-5 py-3 flex items-center justify-between border-b border-purple-100">
+        <h3 class="font-semibold text-purple-900">{{ a.title }}</h3>
+        <span class="text-xs text-gray-400">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+      </div>
+      <div class="p-5 space-y-4">
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {% if c.get('common_points') %}
+          <div class="bg-green-50 rounded-lg px-4 py-3">
+            <h4 class="text-xs font-semibold text-green-700 uppercase tracking-wide mb-1">共通点</h4>
+            <p class="text-sm text-green-800">{{ c.common_points }}</p>
+          </div>
+          {% endif %}
+          {% if c.get('differences') %}
+          <div class="bg-orange-50 rounded-lg px-4 py-3">
+            <h4 class="text-xs font-semibold text-orange-700 uppercase tracking-wide mb-1">相違点</h4>
+            <p class="text-sm text-orange-800">{{ c.differences }}</p>
+          </div>
+          {% endif %}
+          {% if c.get('notable_responses') %}
+          <div class="bg-yellow-50 rounded-lg px-4 py-3">
+            <h4 class="text-xs font-semibold text-yellow-700 uppercase tracking-wide mb-1">注目発言</h4>
+            <p class="text-sm text-yellow-800">{{ c.notable_responses }}</p>
+          </div>
+          {% endif %}
+        </div>
+
+        {% if c.get('findings') %}
+        <div>
+          <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">発見事項（根拠引用付き）</h4>
+          <div class="space-y-3">
+          {% for f in c.findings %}
+          <div class="border-l-4 {% if f.confidence == 'high' %}border-green-400{% elif f.confidence == 'medium' %}border-yellow-400{% else %}border-gray-300{% endif %} pl-4">
+            <p class="text-sm font-medium text-gray-800">{{ f.point }}</p>
+            <blockquote class="mt-1 text-sm text-gray-600 bg-gray-50 rounded px-3 py-2 italic">
+              "{{ f.evidence_quote }}"
+            </blockquote>
+            <div class="mt-1 flex gap-2 text-xs text-gray-400">
+              <span>参加者: {{ f.participant_codes | join(', ') }}</span>
+              <span>|</span>
+              <span class="{% if f.confidence == 'high' %}text-green-600{% elif f.confidence == 'medium' %}text-yellow-600{% else %}text-gray-400{% endif %} font-medium">
+                信頼度: {{ {'high':'高','medium':'中','low':'低'}.get(f.confidence, f.confidence) }}
+              </span>
+            </div>
+          </div>
+          {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        {% if c.get('implications') %}
+        <div class="bg-blue-50 rounded-lg px-4 py-3">
+          <h4 class="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-1">示唆</h4>
+          <p class="text-sm text-blue-800">{{ c.implications }}</p>
+        </div>
+        {% endif %}
+
+      </div>
+    </div>
+    {% endfor %}
+    </div>
+  {% else %}
+    <div class="text-center py-8 text-gray-400 bg-white rounded-lg border border-dashed border-gray-300">
+      <p class="text-sm">横断分析はまだありません</p>
+    </div>
+  {% endif %}
+</section>
+
+<!-- ═══════════════════════════════════════════════
+     ③ プロジェクト統合分析
+═══════════════════════════════════════════════ -->
+<section class="mb-10">
+  <div class="flex items-center justify-between mb-4">
+    <h2 class="text-lg font-semibold text-brand-900 flex items-center gap-2">
+      <span class="w-6 h-6 rounded-full bg-brand-500 text-white text-xs flex items-center justify-center font-bold">3</span>
+      プロジェクト統合分析
+    </h2>
+    <button onclick="runIntegrated()"
+            class="bg-brand-500 text-white text-sm px-4 py-2 rounded hover:bg-brand-700 transition"
+            id="btn-integrated">
+      {% if integrated %}再実行{% else %}統合分析を実行{% endif %}
+    </button>
+  </div>
+
+  {% if integrated %}
+  {% set a = integrated.obj %}
+  {% set c = integrated.content %}
+  <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+    <div class="bg-brand-900 px-5 py-3 flex items-center justify-between">
+      <h3 class="font-semibold text-white">{{ a.title }}</h3>
+      <span class="text-xs text-brand-200">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+    </div>
+    <div class="p-5 space-y-5">
+
+      {% if c.get('common_themes') or c.get('key_differences') %}
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {% if c.get('common_themes') %}
+        <div class="bg-green-50 rounded-lg px-4 py-3">
+          <h4 class="text-xs font-semibold text-green-700 uppercase tracking-wide mb-2">共通テーマ</h4>
+          <p class="text-sm text-green-800">{{ c.common_themes }}</p>
+        </div>
+        {% endif %}
+        {% if c.get('key_differences') %}
+        <div class="bg-orange-50 rounded-lg px-4 py-3">
+          <h4 class="text-xs font-semibold text-orange-700 uppercase tracking-wide mb-2">主要な違い</h4>
+          <p class="text-sm text-orange-800">{{ c.key_differences }}</p>
+        </div>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      {% if c.get('representative_quotes') %}
+      <div>
+        <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">代表発言</h4>
+        <div class="space-y-2">
+        {% for quote in c.representative_quotes %}
+        <blockquote class="text-sm text-gray-700 bg-gray-50 border-l-4 border-brand-300 rounded-r px-4 py-2 italic">
+          "{{ quote }}"
+        </blockquote>
+        {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      {% if c.get('findings') %}
+      <div>
+        <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">発見事項（根拠引用付き）</h4>
+        <div class="space-y-3">
+        {% for f in c.findings %}
+        <div class="border-l-4 {% if f.confidence == 'high' %}border-green-400{% elif f.confidence == 'medium' %}border-yellow-400{% else %}border-gray-300{% endif %} pl-4">
+          <p class="text-sm font-medium text-gray-800">{{ f.point }}</p>
+          <blockquote class="mt-1 text-sm text-gray-600 bg-gray-50 rounded px-3 py-2 italic">
+            "{{ f.evidence_quote }}"
+          </blockquote>
+          <div class="mt-1 flex gap-2 text-xs text-gray-400">
+            <span>参加者: {{ f.participant_codes | join(', ') }}</span>
+            {% if f.question_codes %}<span>| 質問: {{ f.question_codes | join(', ') }}</span>{% endif %}
+            <span>|</span>
+            <span class="{% if f.confidence == 'high' %}text-green-600{% elif f.confidence == 'medium' %}text-yellow-600{% else %}text-gray-400{% endif %} font-medium">
+              信頼度: {{ {'high':'高','medium':'中','low':'低'}.get(f.confidence, f.confidence) }}
+            </span>
+          </div>
+        </div>
+        {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {% if c.get('implications') %}
+        <div class="bg-blue-50 rounded-lg px-4 py-3">
+          <h4 class="text-xs font-semibold text-blue-700 uppercase tracking-wide mb-2">マーケティング示唆</h4>
+          <p class="text-sm text-blue-800">{{ c.implications }}</p>
+        </div>
+        {% endif %}
+        {% if c.get('cautions') %}
+        <div class="bg-red-50 rounded-lg px-4 py-3">
+          <h4 class="text-xs font-semibold text-red-700 uppercase tracking-wide mb-2">注意点</h4>
+          <p class="text-sm text-red-800">{{ c.cautions }}</p>
+        </div>
+        {% endif %}
+      </div>
+
+      {% if c.get('unresolved') %}
+      <div class="bg-gray-50 rounded-lg px-4 py-3">
+        <h4 class="text-xs font-semibold text-gray-600 uppercase tracking-wide mb-1">積み残し課題</h4>
+        <p class="text-sm text-gray-700">{{ c.unresolved }}</p>
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+  {% else %}
+    <div class="text-center py-10 text-gray-400 bg-white rounded-lg border border-dashed border-gray-300">
+      <p class="text-sm">統合分析はまだ実行されていません</p>
+      <p class="text-xs mt-1">先に全インタビューのマッピングを完了させてから実行してください</p>
+    </div>
+  {% endif %}
+</section>
+
+<script>
+const projectId = {{ project.id }};
+
+function showMsg(text, type='info'){
+  const el = document.getElementById('status-msg');
+  el.className = `mb-4 p-3 rounded text-sm flash-${type}`;
+  el.textContent = text;
+  el.classList.remove('hidden');
+  el.scrollIntoView({behavior:'smooth', block:'nearest'});
+}
+
+async function runCross(questionId, btn){
+  btn.disabled = true;
+  btn.textContent = '実行中…';
+  showMsg('横断分析を実行中です（数分かかる場合があります）…', 'info');
+  try {
+    const r = await fetch(`/api/projects/${projectId}/analyze/cross/${questionId}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:'{}',
+    }).then(r => r.json());
+    if(r.ok){
+      showMsg('横断分析が完了しました', 'success');
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      showMsg('エラー: ' + (r.error || '不明'), 'error');
+      btn.disabled = false;
+      btn.textContent = btn.getAttribute('data-original') || '横断分析';
+    }
+  } catch(e){
+    showMsg('通信エラー: ' + e.message, 'error');
+    btn.disabled = false;
+  }
+}
+
+async function runIntegrated(){
+  const btn = document.getElementById('btn-integrated');
+  btn.disabled = true;
+  btn.textContent = '実行中…';
+  showMsg('統合分析を実行中です（数分かかる場合があります）…', 'info');
+  try {
+    const r = await fetch(`/api/projects/${projectId}/analyze/integrated`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:'{}',
+    }).then(r => r.json());
+    if(r.ok){
+      showMsg('統合分析が完了しました', 'success');
+      setTimeout(() => location.reload(), 1500);
+    } else {
+      showMsg('エラー: ' + (r.error || '不明'), 'error');
+      btn.disabled = false;
+      btn.textContent = '統合分析を実行';
+    }
+  } catch(e){
+    showMsg('通信エラー: ' + e.message, 'error');
+    btn.disabled = false;
+    btn.textContent = '統合分析を実行';
+  }
+}
+</script>
+{% endblock %}

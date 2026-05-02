@@ -10,6 +10,8 @@ class Project(db.Model):
     client             = db.Column(db.Text)
     research_objective = db.Column(db.Text)
     description        = db.Column(db.Text)
+    method             = db.Column(db.Text, default="DI")     # DI / FGI
+    status             = db.Column(db.Text, default="draft")  # draft / in_progress / completed
     created_at         = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at         = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc),
                                    onupdate=lambda: datetime.now(timezone.utc))
@@ -27,5 +29,7 @@ class Project(db.Model):
             "client": self.client,
             "research_objective": self.research_objective,
             "description": self.description,
+            "method": self.method,
+            "status": self.status,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }

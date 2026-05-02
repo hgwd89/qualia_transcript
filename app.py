@@ -4,7 +4,6 @@ from flask import Flask, render_template, g
 import config
 from models import db
 
-# ── モデルの import（全テーブルを db に登録するために必要）
 from models.project        import Project
 from models.participant    import Participant, ParticipantAttribute
 from models.interview_flow import InterviewFlow, InterviewFlowSection, InterviewFlowQuestion
@@ -14,7 +13,6 @@ from models.analysis       import AIAnalysis
 from models.generated_file import GeneratedFile
 from models.setting        import AppSetting
 
-# ── Blueprint の import
 from routes.projects      import bp as projects_bp
 from routes.participants  import bp as participants_bp
 from routes.flows         import bp as flows_bp
@@ -23,14 +21,34 @@ from routes.transcribe    import bp as transcribe_bp
 from routes.analyze       import bp as analyze_bp
 from routes.outputs       import bp as outputs_bp
 from routes.settings      import bp as settings_bp
+from routes.analysis_view import bp as analysis_view_bp
+
+
+def _run_migrations(app):
+    """
+    既存 SQLite DB への後付けカラム追加。
+    inspect でカラム存在を確認してから ALTER TABLE を実行するため冪等。
+    """
+    from sqlalchemy import text, inspect as sa_inspect
+    with app.app_context():
+        inspector = sa_inspect(db.engine)
+        existing_cols = {c["name"] for c in inspector.get_columns("projects")}
+        pending = [
+            ("method", "ALTER TABLE projects ADD COLUMN method TEXT DEFAULT 'DI'"),
+            ("status", "ALTER TABLE projects ADD COLUMN status TEXT DEFAULT 'draft'"),
+        ]
+        for col_name, stmt in pending:
+            if col_name not in existing_cols:
+                db.session.execute(text(stmt))
+                db.session.commit()
 
 
 def create_app():
     app = Flask(__name__)
-    app.config["SECRET_KEY"]        = config.SECRET_KEY
-    app.config["SQLALCHEMY_DATABASE_URI"] = config.DATABASE_URI
+    app.config["SECRET_KEY"]                    = config.SECRET_KEY
+    app.config["SQLALCHEMY_DATABASE_URI"]       = config.DATABASE_URI
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-    app.config["MAX_CONTENT_LENGTH"] = config.MAX_UPLOAD_BYTES
+    app.config["MAX_CONTENT_LENGTH"]            = config.MAX_UPLOAD_BYTES
 
     db.init_app(app)
 
@@ -42,8 +60,8 @@ def create_app():
     app.register_blueprint(analyze_bp)
     app.register_blueprint(outputs_bp)
     app.register_blueprint(settings_bp)
+    app.register_blueprint(analysis_view_bp)
 
-    # テンプレート全体で SERVICE_NAME を利用可能にする
     @app.context_processor
     def inject_globals():
         return {"SERVICE_NAME": config.SERVICE_NAME, "now": datetime.now()}
@@ -52,6 +70,8 @@ def create_app():
         db.create_all()
         os.makedirs(config.UPLOAD_DIR, exist_ok=True)
         os.makedirs(config.OUTPUT_DIR, exist_ok=True)
+
+    _run_migrations(app)
 
     return app
 

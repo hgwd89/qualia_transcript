@@ -2,7 +2,6 @@
 {% block title %}{{ project.name }}{% endblock %}
 
 {% block content %}
-<!-- パンくず -->
 <nav class="text-sm text-gray-400 mb-4">
   <a href="{{ url_for('projects.index') }}" class="hover:underline">プロジェクト</a>
   <span class="mx-1">/</span>
@@ -11,7 +10,21 @@
 
 <div class="flex items-start justify-between mb-6">
   <div>
-    <h1 class="text-2xl font-bold text-brand-900">{{ project.name }}</h1>
+    <div class="flex items-center gap-3">
+      <h1 class="text-2xl font-bold text-brand-900">{{ project.name }}</h1>
+      {% set method_color = 'blue' if project.method == 'DI' else 'purple' %}
+      <span class="text-xs px-2 py-1 rounded font-medium
+                   bg-{{ method_color }}-100 text-{{ method_color }}-700">
+        {{ project.method or 'DI' }}
+      </span>
+      {% set sc = {'draft':'gray','in_progress':'yellow','completed':'green'} %}
+      {% set sl = {'draft':'準備中','in_progress':'進行中','completed':'完了'} %}
+      {% set s = project.status or 'draft' %}
+      <span class="text-xs px-2 py-1 rounded-full font-medium
+                   bg-{{ sc.get(s,'gray') }}-100 text-{{ sc.get(s,'gray') }}-700">
+        {{ sl.get(s, s) }}
+      </span>
+    </div>
     {% if project.client %}
       <p class="text-sm text-gray-500 mt-1">{{ project.client }}</p>
     {% endif %}
@@ -26,7 +39,7 @@
 </div>
 
 <!-- アクションバー -->
-<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+<div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-8">
   <a href="{{ url_for('participants.index', project_id=project.id) }}"
      class="bg-white border border-gray-200 rounded-lg p-4 text-center hover:shadow-md hover:border-brand-300 transition">
     <div class="text-2xl font-bold text-brand-700">{{ project.participants|length }}</div>
@@ -42,12 +55,38 @@
     <div class="text-2xl font-bold">＋</div>
     <div class="text-xs mt-1">インタビュー登録</div>
   </a>
+  <a href="{{ url_for('analysis_view.index', project_id=project.id) }}"
+     class="bg-white border border-gray-200 rounded-lg p-4 text-center hover:shadow-md hover:border-brand-300 transition">
+    <div class="text-2xl font-bold text-brand-700">{{ project.ai_analyses|length }}</div>
+    <div class="text-xs text-gray-500 mt-1">分析</div>
+  </a>
   <a href="{{ url_for('outputs.index', project_id=project.id) }}"
      class="bg-white border border-gray-200 rounded-lg p-4 text-center hover:shadow-md hover:border-brand-300 transition">
     <div class="text-2xl font-bold text-brand-700">{{ project.generated_files|length }}</div>
     <div class="text-xs text-gray-500 mt-1">生成済みファイル</div>
   </a>
 </div>
+
+<!-- 一括処理バナー -->
+{% set pending_count = project.interviews | selectattr('status', 'in', ['pending', 'transcribed', 'mapped']) | list | length %}
+{% if pending_count > 0 %}
+<div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6 flex items-center justify-between">
+  <div>
+    <p class="text-sm font-medium text-blue-800">
+      {{ pending_count }} 件のインタビューが処理待ちです
+    </p>
+    <p class="text-xs text-blue-600 mt-1">文字起こし → 話者ロール自動割り当て → マッピング → 考察生成 を一括実行します</p>
+  </div>
+  <button onclick="processAll()"
+          class="bg-blue-600 text-white text-sm px-4 py-2 rounded hover:bg-blue-700 transition whitespace-nowrap ml-4"
+          id="btn-process-all">
+    一括処理を実行
+  </button>
+</div>
+{% endif %}
+
+<!-- ステータスメッセージ -->
+<div id="status-msg" class="hidden mb-4 p-3 rounded text-sm"></div>
 
 <!-- インタビュー一覧 -->
 <h2 class="text-lg font-semibold text-brand-900 mb-3">インタビュー一覧</h2>
@@ -74,9 +113,10 @@
       <td class="px-4 py-3 text-gray-500">{{ iv.interview_date or '日付未設定' }}</td>
       <td class="px-4 py-3">
         {% set sc = {'pending':'gray','transcribed':'blue','mapped':'yellow','analyzed':'green','done':'green','error':'red'} %}
+        {% set sl = {'pending':'未処理','transcribed':'文字起こし済','mapped':'マッピング済','analyzed':'分析済','done':'完了','error':'エラー'} %}
         <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
               bg-{{ sc.get(iv.status,'gray') }}-100 text-{{ sc.get(iv.status,'gray') }}-700">
-          {{ iv.status }}
+          {{ sl.get(iv.status, iv.status) }}
         </span>
       </td>
       <td class="px-4 py-3 text-gray-500">{{ iv.segments|length }}</td>
@@ -96,4 +136,38 @@
        class="mt-2 inline-block text-brand-500 hover:underline text-sm">登録する →</a>
   </div>
 {% endif %}
+
+<script>
+const projectId = {{ project.id }};
+
+function showMsg(text, type='info'){
+  const el = document.getElementById('status-msg');
+  el.className = `mb-4 p-3 rounded text-sm flash-${type}`;
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+async function processAll(){
+  const btn = document.getElementById('btn-process-all');
+  if(btn) btn.disabled = true;
+  showMsg('一括処理中…完了まで数分かかる場合があります', 'info');
+  try {
+    const r = await fetch(`/api/projects/${projectId}/process/all`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    }).then(r => r.json());
+    if(r.ok){
+      showMsg('一括処理が完了しました', 'success');
+      setTimeout(() => location.reload(), 2000);
+    } else {
+      showMsg('エラー: ' + (r.error || '不明'), 'error');
+      if(btn) btn.disabled = false;
+    }
+  } catch(e){
+    showMsg('通信エラー: ' + e.message, 'error');
+    if(btn) btn.disabled = false;
+  }
+}
+</script>
 {% endblock %}

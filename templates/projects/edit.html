@@ -15,6 +15,25 @@
       <input name="client" type="text" value="{{ project.client or '' }}"
              class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
     </div>
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">調査手法</label>
+        <select name="method"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          <option value="DI" {% if project.method == 'DI' %}selected{% endif %}>DI（デプスインタビュー）</option>
+          <option value="FGI" {% if project.method == 'FGI' %}selected{% endif %}>FGI（グループインタビュー）</option>
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">ステータス</label>
+        <select name="status"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          {% for val, label in status_labels.items() %}
+          <option value="{{ val }}" {% if project.status == val %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
     <div>
       <label class="block text-sm font-medium text-gray-700 mb-1">調査目的</label>
       <textarea name="research_objective" rows="3"

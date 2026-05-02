@@ -1,6 +1,5 @@
 """
-faster-whisper による音声文字起こしサービス。
-run_transcription() を呼ぶと segments と transcription レコードを生成する。
+faster-whisper による音声文字起こし＋話者ロール自動推定。
 """
 import os
 from datetime import datetime, timezone
@@ -45,12 +44,11 @@ def run_transcription(transcription_id: int) -> dict:
             word_timestamps=False,
         )
 
-        interview    = media.interview
-        seq          = Segment.query.filter_by(interview_id=interview.id).count()
-        word_count   = 0
-        seg_count    = 0
+        interview  = media.interview
+        seq        = Segment.query.filter_by(interview_id=interview.id).count()
+        word_count = 0
+        seg_count  = 0
 
-        # faster-whisper はジェネレータを返す — 逐次コミットで大容量対応
         speaker_labels: dict[str, str] = {}
         for seg in segments_gen:
             speaker = getattr(seg, "speaker", None) or "SPEAKER_00"
@@ -73,9 +71,9 @@ def run_transcription(transcription_id: int) -> dict:
             seg_count  += 1
             word_count += len(seg.text.split())
 
-        tr.status       = "done"
-        tr.word_count   = word_count
-        tr.completed_at = datetime.now(timezone.utc)
+        tr.status        = "done"
+        tr.word_count    = word_count
+        tr.completed_at  = datetime.now(timezone.utc)
         interview.status = "transcribed"
         db.session.commit()
         return {"segment_count": seg_count, "word_count": word_count}
@@ -85,3 +83,36 @@ def run_transcription(transcription_id: int) -> dict:
         tr.error_message = str(e)
         db.session.commit()
         raise
+
+
+def auto_assign_speaker_roles(interview_id: int) -> None:
+    """
+    DI インタビュー向けヒューリスティック話者ロール自動割り当て。
+    - 1話者: 全員 respondent
+    - 2話者以上: 発話語数が最も少ない話者 = interviewer、それ以外 = respondent
+    """
+    segments = Segment.query.filter_by(interview_id=interview_id).all()
+    if not segments:
+        return
+
+    # すでに手動設定済みの場合はスキップ
+    manual_set = any(s.speaker_role != "unknown" for s in segments)
+    if manual_set:
+        return
+
+    # 話者ごとの語数を集計
+    word_counts: dict[str, int] = {}
+    for seg in segments:
+        label = seg.speaker_label or "SPEAKER_00"
+        word_counts[label] = word_counts.get(label, 0) + len(seg.text.split())
+
+    if len(word_counts) <= 1:
+        for seg in segments:
+            seg.speaker_role = "respondent"
+    else:
+        interviewer_label = min(word_counts, key=word_counts.get)
+        for seg in segments:
+            label = seg.speaker_label or "SPEAKER_00"
+            seg.speaker_role = "interviewer" if label == interviewer_label else "respondent"
+
+    db.session.commit()
