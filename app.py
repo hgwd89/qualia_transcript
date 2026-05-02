@@ -49,6 +49,7 @@ def create_app():
     app.config["SQLALCHEMY_DATABASE_URI"]       = config.DATABASE_URI
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["MAX_CONTENT_LENGTH"]            = config.MAX_UPLOAD_BYTES
+    app.config["MAX_UPLOAD_BYTES"]              = config.MAX_UPLOAD_BYTES
 
     db.init_app(app)
 
