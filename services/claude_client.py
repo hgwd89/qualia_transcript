@@ -19,7 +19,7 @@ def call_structured(
     system: str,
     user: str,
     json_schema: dict,
-    schema_name: str = "result",
+    schema_name: str = "result",  # API には渡さない（ログ・デバッグ用途で保持）
     use_thinking: bool = True,
 ) -> dict:
     """
@@ -28,10 +28,7 @@ def call_structured(
     output_config: dict = {
         "format": {
             "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "schema": json_schema,
-            },
+            "schema": json_schema,
         }
     }
     kwargs: dict = {
