@@ -19,4 +19,6 @@ class AIAnalysis(db.Model):
     model_used    = db.Column(db.Text)
     created_at    = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
-    interview = db.relationship("Interview", back_populates="ai_analyses")
+    interview = db.relationship("Interview",              back_populates="ai_analyses")
+    project   = db.relationship("Project",               back_populates="ai_analyses")
+    question  = db.relationship("InterviewFlowQuestion")

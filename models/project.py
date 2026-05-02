@@ -18,6 +18,7 @@ class Project(db.Model):
     interview_flows = db.relationship("InterviewFlow", back_populates="project", cascade="all, delete-orphan")
     interviews      = db.relationship("Interview",     back_populates="project", cascade="all, delete-orphan")
     generated_files = db.relationship("GeneratedFile", back_populates="project", cascade="all, delete-orphan")
+    ai_analyses     = db.relationship("AIAnalysis",    back_populates="project", cascade="all, delete-orphan")
 
     def to_dict(self):
         return {
