@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}インタビュー登録{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl">
+  <nav class="text-sm text-gray-400 mb-4">
+    <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a> /
+    <span class="text-gray-700">インタビュー登録</span>
+  </nav>
+  <h1 class="text-2xl font-bold text-brand-900 mb-6">インタビューを登録</h1>
+
+  <form method="POST" enctype="multipart/form-data"
+        class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-5">
+
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">参加者</label>
+        <select name="participant_id"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          <option value="">未設定</option>
+          {% for p in participants %}
+          <option value="{{ p.id }}">{{ p.participant_code }} {{ p.display_name or '' }}</option>
+          {% endfor %}
+        </select>
+        {% if not participants %}
+          <p class="text-xs text-orange-500 mt-1">
+            <a href="{{ url_for('participants.new', project_id=project.id) }}" class="underline">参加者を先に登録</a>してください
+          </p>
+        {% endif %}
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">インタビューフロー</label>
+        <select name="flow_id"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          <option value="">未設定</option>
+          {% for f in flows %}
+          <option value="{{ f.id }}">{{ f.title }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">実施日</label>
+        <input name="interview_date" type="date"
+               class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">インタビュアー名</label>
+        <input name="interviewer_name" type="text"
+               class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+      </div>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">実施場所</label>
+      <input name="location" type="text" placeholder="例：オンライン / 東京オフィス"
+             class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">音声・動画ファイル</label>
+      <div id="drop-zone"
+           class="border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-brand-400 transition">
+        <p class="text-gray-400 text-sm">クリックまたはドラッグ＆ドロップ</p>
+        <p class="text-xs text-gray-400 mt-1">MP3, M4A, WAV, MP4, MOV 等 (最大 {{ config.MAX_UPLOAD_BYTES // 1024 // 1024 }}MB)</p>
+        <input id="audio_file" name="audio_file" type="file"
+               accept=".mp3,.m4a,.wav,.ogg,.flac,.mp4,.mov,.webm" class="hidden">
+      </div>
+      <p id="file-name" class="text-sm text-gray-600 mt-2"></p>
+    </div>
+
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">備考</label>
+      <textarea name="notes" rows="2"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"></textarea>
+    </div>
+
+    <div class="flex gap-3 pt-2">
+      <button type="submit"
+              class="bg-brand-500 text-white px-6 py-2 rounded hover:bg-brand-700 transition text-sm font-medium">
+        登録する
+      </button>
+      <a href="{{ url_for('projects.detail', project_id=project.id) }}"
+         class="text-gray-500 px-4 py-2 text-sm hover:underline">キャンセル</a>
+    </div>
+  </form>
+</div>
+
+<script>
+const zone = document.getElementById('drop-zone');
+const input = document.getElementById('audio_file');
+const label = document.getElementById('file-name');
+
+zone.addEventListener('click', () => input.click());
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('border-brand-500'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('border-brand-500'));
+zone.addEventListener('drop', e => {
+  e.preventDefault();
+  zone.classList.remove('border-brand-500');
+  if (e.dataTransfer.files.length) {
+    input.files = e.dataTransfer.files;
+    label.textContent = '選択中: ' + input.files[0].name;
+  }
+});
+input.addEventListener('change', () => {
+  if (input.files.length) label.textContent = '選択中: ' + input.files[0].name;
+});
+</script>
+{% endblock %}

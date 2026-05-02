@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}プロジェクト編集{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl">
+  <h1 class="text-2xl font-bold text-brand-900 mb-6">プロジェクト編集</h1>
+  <form method="POST" class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-5">
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">プロジェクト名 <span class="text-red-500">*</span></label>
+      <input name="name" type="text" required value="{{ project.name }}"
+             class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">クライアント名</label>
+      <input name="client" type="text" value="{{ project.client or '' }}"
+             class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">調査目的</label>
+      <textarea name="research_objective" rows="3"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">{{ project.research_objective or '' }}</textarea>
+    </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">備考</label>
+      <textarea name="description" rows="2"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">{{ project.description or '' }}</textarea>
+    </div>
+    <div class="flex gap-3 pt-2">
+      <button type="submit"
+              class="bg-brand-500 text-white px-6 py-2 rounded hover:bg-brand-700 transition text-sm font-medium">
+        保存する
+      </button>
+      <a href="{{ url_for('projects.detail', project_id=project.id) }}"
+         class="text-gray-500 px-4 py-2 text-sm hover:underline">キャンセル</a>
+    </div>
+  </form>
+  <form method="POST" action="{{ url_for('projects.delete', project_id=project.id) }}"
+        onsubmit="return confirm('このプロジェクトと全データを削除しますか？');"
+        class="mt-6">
+    <button type="submit" class="text-red-500 text-sm hover:underline">
+      このプロジェクトを削除する
+    </button>
+  </form>
+</div>
+{% endblock %}

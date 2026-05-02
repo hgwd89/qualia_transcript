@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}参加者管理 | {{ project.name }}{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.index') }}" class="hover:underline">プロジェクト</a> /
+  <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a> /
+  <span class="text-gray-700">参加者</span>
+</nav>
+
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold text-brand-900">参加者管理</h1>
+  <a href="{{ url_for('participants.new', project_id=project.id) }}"
+     class="bg-brand-500 text-white px-4 py-2 rounded hover:bg-brand-700 transition text-sm font-medium">
+    ＋ 参加者を追加
+  </a>
+</div>
+
+{% if participants %}
+<div class="space-y-3">
+{% for p in participants %}
+<div class="bg-white rounded-lg shadow-sm border border-gray-200 p-5">
+  <div class="flex items-start justify-between">
+    <div>
+      <span class="font-bold text-brand-700 text-lg">{{ p.participant_code }}</span>
+      <span class="ml-2 text-gray-700">{{ p.display_name or '名前未設定' }}</span>
+    </div>
+    <div class="flex gap-2 text-sm">
+      <a href="{{ url_for('participants.edit', project_id=project.id, participant_id=p.id) }}"
+         class="text-brand-500 hover:underline">編集</a>
+      <form method="POST"
+            action="{{ url_for('participants.delete', project_id=project.id, participant_id=p.id) }}"
+            onsubmit="return confirm('削除しますか？');">
+        <button type="submit" class="text-red-400 hover:underline">削除</button>
+      </form>
+    </div>
+  </div>
+  {% if p.attributes %}
+  <div class="mt-3 flex flex-wrap gap-2">
+    {% for a in p.attributes %}
+    <span class="bg-gray-100 text-gray-600 text-xs px-2 py-1 rounded">
+      {{ a.attribute_key }}：{{ a.attribute_value }}
+    </span>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+</div>
+{% else %}
+<div class="text-center py-12 text-gray-400 bg-white rounded-lg border border-gray-200">
+  <p>参加者がまだ登録されていません</p>
+  <a href="{{ url_for('participants.new', project_id=project.id) }}"
+     class="mt-2 inline-block text-brand-500 hover:underline text-sm">追加する →</a>
+</div>
+{% endif %}
+{% endblock %}

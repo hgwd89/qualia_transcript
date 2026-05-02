@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}設定{% endblock %}
+
+{% block content %}
+<h1 class="text-2xl font-bold text-brand-900 mb-6">設定</h1>
+
+<div class="max-w-xl space-y-6">
+  <!-- サービス情報 -->
+  <div class="bg-white rounded-lg border border-gray-200 p-5">
+    <h2 class="font-semibold text-gray-800 mb-3">サービス情報</h2>
+    <dl class="space-y-2 text-sm">
+      <div class="flex justify-between">
+        <dt class="text-gray-500">サービス名</dt>
+        <dd class="font-medium">{{ service_name }}</dd>
+      </div>
+      <div class="flex justify-between">
+        <dt class="text-gray-500">変更方法</dt>
+        <dd class="text-gray-400 text-xs">.env の SERVICE_NAME を編集して再起動</dd>
+      </div>
+    </dl>
+  </div>
+
+  <!-- API・モデル設定 -->
+  <form method="POST" class="bg-white rounded-lg border border-gray-200 p-5">
+    <h2 class="font-semibold text-gray-800 mb-4">API・モデル設定</h2>
+    <div class="space-y-4">
+      {% for key, label, input_type in setting_keys %}
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">{{ label }}</label>
+        <input name="{{ key }}" type="{{ input_type }}"
+               value="{% if input_type != 'password' %}{{ values.get(key, '') }}{% endif %}"
+               placeholder="{% if input_type == 'password' and values.get(key) %}設定済み（変更する場合のみ入力）{% endif %}"
+               class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 font-mono">
+      </div>
+      {% endfor %}
+    </div>
+    <button type="submit"
+            class="mt-5 bg-brand-500 text-white px-6 py-2 rounded hover:bg-brand-700 transition text-sm font-medium">
+      保存する
+    </button>
+  </form>
+</div>
+{% endblock %}

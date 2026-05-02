@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}プロジェクト一覧{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold text-brand-900">プロジェクト一覧</h1>
+  <a href="{{ url_for('projects.new') }}"
+     class="bg-brand-500 text-white px-4 py-2 rounded hover:bg-brand-700 transition text-sm font-medium">
+    ＋ 新規作成
+  </a>
+</div>
+
+{% if projects %}
+  <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    {% for p in projects %}
+    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-5 hover:shadow-md transition flex flex-col">
+      <div class="flex items-start justify-between">
+        <div>
+          <h2 class="font-semibold text-brand-900 text-base">{{ p.name }}</h2>
+          {% if p.client %}
+            <p class="text-xs text-gray-500 mt-1">{{ p.client }}</p>
+          {% endif %}
+        </div>
+        <span class="text-xs text-gray-400 whitespace-nowrap ml-2">
+          {{ p.created_at.strftime('%Y/%m/%d') if p.created_at }}
+        </span>
+      </div>
+      {% if p.research_objective %}
+        <p class="text-sm text-gray-600 mt-3 flex-1">{{ p.research_objective[:80] }}{% if p.research_objective|length > 80 %}…{% endif %}</p>
+      {% endif %}
+      <div class="mt-4 flex items-center gap-3 text-sm">
+        <span class="text-gray-500">
+          <span class="font-medium text-brand-700">{{ p.interviews|length }}</span> 件のインタビュー
+        </span>
+        <span class="text-gray-300">|</span>
+        <span class="text-gray-500">
+          <span class="font-medium text-brand-700">{{ p.participants|length }}</span> 名の参加者
+        </span>
+      </div>
+      <a href="{{ url_for('projects.detail', project_id=p.id) }}"
+         class="mt-4 block text-center text-sm text-brand-500 border border-brand-500 rounded py-1.5 hover:bg-brand-50 transition">
+        開く →
+      </a>
+    </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="text-center py-20 text-gray-400">
+    <p class="text-4xl mb-4">📋</p>
+    <p class="text-lg">プロジェクトがまだありません</p>
+    <a href="{{ url_for('projects.new') }}" class="mt-4 inline-block text-brand-500 hover:underline">
+      最初のプロジェクトを作成する
+    </a>
+  </div>
+{% endif %}
+{% endblock %}

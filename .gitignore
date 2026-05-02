@@ -1,0 +1,34 @@
+# 環境・秘匿情報
+.env
+*.env.*
+
+# データベース
+*.db
+*.sqlite3
+
+# アップロード・出力ファイル
+uploads/
+outputs/
+
+# Python キャッシュ
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# 仮想環境
+venv/
+.venv/
+env/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

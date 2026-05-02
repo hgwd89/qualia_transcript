@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}インタビューフロー | {{ project.name }}{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a> /
+  <span class="text-gray-700">インタビューフロー</span>
+</nav>
+
+<div class="flex items-center justify-between mb-6">
+  <h1 class="text-2xl font-bold text-brand-900">インタビューフロー</h1>
+  <a href="{{ url_for('flows.new', project_id=project.id) }}"
+     class="bg-brand-500 text-white px-4 py-2 rounded hover:bg-brand-700 transition text-sm font-medium">
+    ＋ フローを作成
+  </a>
+</div>
+
+{% if flows %}
+<div class="space-y-3">
+{% for flow in flows %}
+<div class="bg-white rounded-lg shadow-sm border border-gray-200 p-5 flex items-center justify-between">
+  <div>
+    <span class="font-semibold text-brand-900">{{ flow.title }}</span>
+    <span class="ml-2 text-xs text-gray-400">v{{ flow.version }}</span>
+    <span class="ml-3 text-sm text-gray-500">{{ flow.sections|length }} セクション</span>
+  </div>
+  <div class="flex gap-3 text-sm">
+    <a href="{{ url_for('flows.detail', project_id=project.id, flow_id=flow.id) }}"
+       class="text-brand-500 hover:underline">編集</a>
+    <form method="POST"
+          action="{{ url_for('flows.delete', project_id=project.id, flow_id=flow.id) }}"
+          onsubmit="return confirm('削除しますか？');">
+      <button type="submit" class="text-red-400 hover:underline">削除</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+</div>
+{% else %}
+<div class="text-center py-12 text-gray-400 bg-white rounded-lg border border-gray-200">
+  <p>インタビューフローがまだ作成されていません</p>
+  <a href="{{ url_for('flows.new', project_id=project.id) }}"
+     class="mt-2 inline-block text-brand-500 hover:underline text-sm">作成する →</a>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}{% endblock %} | {{ SERVICE_NAME }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#f0f4ff', 100:'#dce6fd', 500:'#4B72D6', 700:'#2E4FB3', 900:'#1a2d6e' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    [x-cloak]{display:none}
+    .flash-success{background:#d1fae5;color:#065f46;border-left:4px solid #10b981}
+    .flash-error  {background:#fee2e2;color:#991b1b;border-left:4px solid #ef4444}
+    .flash-info   {background:#dbeafe;color:#1e40af;border-left:4px solid #3b82f6}
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen flex flex-col text-gray-800">
+
+  <!-- ナビゲーション -->
+  <nav class="bg-brand-900 text-white shadow-md">
+    <div class="max-w-7xl mx-auto px-4 flex items-center justify-between h-14">
+      <a href="{{ url_for('projects.index') }}"
+         class="font-bold text-lg tracking-wide hover:text-brand-100 transition">
+        {{ SERVICE_NAME }}
+      </a>
+      <div class="flex items-center gap-6 text-sm">
+        <a href="{{ url_for('projects.index') }}" class="hover:text-brand-100">プロジェクト</a>
+        <a href="{{ url_for('settings.index') }}" class="hover:text-brand-100">設定</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- フラッシュメッセージ -->
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="max-w-7xl mx-auto w-full px-4 pt-4 space-y-2">
+        {% for category, message in messages %}
+          <div class="flash-{{ category }} px-4 py-3 rounded text-sm">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <!-- メインコンテンツ -->
+  <main class="flex-1 max-w-7xl mx-auto w-full px-4 py-8">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="text-center text-xs text-gray-400 py-4 border-t border-gray-200">
+    {{ SERVICE_NAME }} &copy; {{ now.year if now else 2025 }}
+  </footer>
+</body>
+</html>

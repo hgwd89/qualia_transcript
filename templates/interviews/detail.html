@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+{% block title %}{{ interview.participant.display_name if interview.participant else 'インタビュー' }} 詳細{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a> /
+  <span class="text-gray-700">
+    インタビュー #{{ interview.id }}
+    {% if interview.participant %} — {{ interview.participant.participant_code }}{% endif %}
+  </span>
+</nav>
+
+<!-- ヘッダー -->
+<div class="flex items-start justify-between mb-6">
+  <div>
+    <h1 class="text-2xl font-bold text-brand-900">
+      {% if interview.participant %}
+        {{ interview.participant.participant_code }} {{ interview.participant.display_name or '' }}
+      {% else %}
+        インタビュー #{{ interview.id }}
+      {% endif %}
+    </h1>
+    <div class="flex gap-4 mt-1 text-sm text-gray-500">
+      {% if interview.interview_date %}<span>{{ interview.interview_date }}</span>{% endif %}
+      {% if interview.location %}<span>{{ interview.location }}</span>{% endif %}
+      {% if interview.interviewer_name %}<span>インタビュアー: {{ interview.interviewer_name }}</span>{% endif %}
+    </div>
+  </div>
+  <div class="flex gap-2">
+    {% set sc = {'pending':'gray','transcribed':'blue','mapped':'yellow','analyzed':'green','done':'green','error':'red'} %}
+    <span class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium
+          bg-{{ sc.get(interview.status,'gray') }}-100 text-{{ sc.get(interview.status,'gray') }}-700">
+      {{ interview.status }}
+    </span>
+  </div>
+</div>
+
+<!-- アクションパネル -->
+<div class="grid grid-cols-1 md:grid-cols-3 gap-3 mb-8">
+  <!-- 文字起こし -->
+  <div class="bg-white rounded-lg border border-gray-200 p-4">
+    <h3 class="font-medium text-sm text-gray-700 mb-3">① 文字起こし</h3>
+    {% if interview.media_files %}
+      <p class="text-xs text-gray-500 mb-3">{{ interview.media_files[-1].original_filename }}</p>
+      <button onclick="runTranscribe()"
+              class="w-full bg-brand-500 text-white text-sm py-2 rounded hover:bg-brand-700 transition"
+              id="btn-transcribe">
+        文字起こし実行
+      </button>
+    {% else %}
+      <p class="text-xs text-orange-500">音声ファイルが未登録です</p>
+    {% endif %}
+  </div>
+
+  <!-- AIマッピング -->
+  <div class="bg-white rounded-lg border border-gray-200 p-4">
+    <h3 class="font-medium text-sm text-gray-700 mb-3">② フロー項目へ自動マッピング</h3>
+    <p class="text-xs text-gray-500 mb-3">発言をインタビューフローの質問項目に紐づけます</p>
+    <button onclick="runMapping()"
+            class="w-full bg-brand-500 text-white text-sm py-2 rounded hover:bg-brand-700 transition
+                   {% if interview.status == 'pending' %}opacity-50 cursor-not-allowed{% endif %}"
+            id="btn-map"
+            {% if interview.status == 'pending' %}disabled{% endif %}>
+      マッピング実行
+    </button>
+  </div>
+
+  <!-- AI考察 -->
+  <div class="bg-white rounded-lg border border-gray-200 p-4">
+    <h3 class="font-medium text-sm text-gray-700 mb-3">③ AI考察生成</h3>
+    <p class="text-xs text-gray-500 mb-3">インタビュー全体の考察を Claude が生成します</p>
+    <button onclick="runAnalyze()"
+            class="w-full bg-brand-500 text-white text-sm py-2 rounded hover:bg-brand-700 transition
+                   {% if interview.status not in ['mapped','analyzed','done'] %}opacity-50 cursor-not-allowed{% endif %}"
+            id="btn-analyze"
+            {% if interview.status not in ['mapped','analyzed','done'] %}disabled{% endif %}>
+      考察を生成
+    </button>
+  </div>
+</div>
+
+<!-- ステータスメッセージ -->
+<div id="status-msg" class="hidden mb-4 p-3 rounded text-sm"></div>
+
+<!-- 発言録 -->
+<div class="flex items-center justify-between mb-3">
+  <h2 class="text-lg font-semibold text-brand-900">発言セグメント（{{ interview.segments|length }} 件）</h2>
+  {% if interview.segments %}
+  <button onclick="genVerbatim()"
+          class="text-sm text-brand-500 border border-brand-500 rounded px-3 py-1.5 hover:bg-brand-50 transition">
+    発言録.docx を生成
+  </button>
+  {% endif %}
+</div>
+
+{% if interview.segments %}
+<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+  {% set participants = interview.project.participants %}
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="px-4 py-3 text-left w-20">時刻</th>
+          <th class="px-4 py-3 text-left w-32">話者</th>
+          <th class="px-4 py-3 text-left">発言テキスト</th>
+          <th class="px-4 py-3 text-left w-40">マッピング先</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+      {% for seg in interview.segments %}
+      <tr class="hover:bg-gray-50 {% if seg.speaker_role == 'interviewer' %}opacity-60{% endif %}">
+        <td class="px-4 py-2 text-xs text-gray-400 font-mono whitespace-nowrap">
+          {% if seg.start_sec is not none %}
+            {{ '%02d:%02d'|format((seg.start_sec|int) // 60, (seg.start_sec|int) % 60) }}
+          {% endif %}
+        </td>
+        <td class="px-4 py-2">
+          <select onchange="updateRole({{ seg.id }}, this)"
+                  class="text-xs border border-gray-200 rounded px-1 py-0.5 w-full">
+            <option value="unknown" {% if seg.speaker_role == 'unknown' %}selected{% endif %}>不明</option>
+            <option value="interviewer" {% if seg.speaker_role == 'interviewer' %}selected{% endif %}>インタビュアー</option>
+            {% for p in participants %}
+            <option value="respondent_{{ p.id }}"
+              {% if seg.speaker_role == 'respondent' and seg.participant_id == p.id %}selected{% endif %}>
+              {{ p.participant_code }}
+            </option>
+            {% endfor %}
+          </select>
+        </td>
+        <td class="px-4 py-2 text-gray-800">{{ seg.text }}</td>
+        <td class="px-4 py-2 text-xs text-gray-400">
+          {% for um in seg.utterance_mappings %}
+            {% if um.is_unclassified %}
+              <span class="text-orange-400">未分類</span>
+            {% elif um.question %}
+              <span class="font-mono">{{ um.question.question_code }}</span>
+              {% if um.confidence %}
+                <span class="text-gray-300">({{ '%.0f'|format(um.confidence * 100) }}%)</span>
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+  <div class="text-center py-12 text-gray-400 bg-white rounded-lg border border-gray-200">
+    <p>発言セグメントがありません。文字起こしを実行してください。</p>
+  </div>
+{% endif %}
+
+<script>
+const interviewId = {{ interview.id }};
+
+function showMsg(text, type='info'){
+  const el = document.getElementById('status-msg');
+  el.className = `mb-4 p-3 rounded text-sm flash-${type}`;
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+async function postApi(url){
+  const r = await fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  return r.json();
+}
+
+async function runTranscribe(){
+  document.getElementById('btn-transcribe').disabled = true;
+  showMsg('文字起こし中…しばらくお待ちください', 'info');
+  const r = await postApi(`/api/interviews/${interviewId}/transcribe`);
+  if(r.ok){
+    showMsg(`完了: ${r.segment_count} セグメント生成`, 'success');
+    setTimeout(() => location.reload(), 1500);
+  } else {
+    showMsg('エラー: ' + (r.error || '不明'), 'error');
+    document.getElementById('btn-transcribe').disabled = false;
+  }
+}
+
+async function runMapping(){
+  document.getElementById('btn-map').disabled = true;
+  showMsg('AIマッピング中…', 'info');
+  const r = await postApi(`/api/interviews/${interviewId}/map`);
+  if(r.ok){
+    showMsg(`完了: ${r.mapped_count} 件マッピングしました`, 'success');
+    setTimeout(() => location.reload(), 1500);
+  } else {
+    showMsg('エラー: ' + (r.error || '不明'), 'error');
+    document.getElementById('btn-map').disabled = false;
+  }
+}
+
+async function runAnalyze(){
+  document.getElementById('btn-analyze').disabled = true;
+  showMsg('AI考察生成中…（数分かかる場合があります）', 'info');
+  const r = await postApi(`/api/interviews/${interviewId}/analyze`);
+  if(r.ok){
+    showMsg('考察を生成しました', 'success');
+    setTimeout(() => location.reload(), 1500);
+  } else {
+    showMsg('エラー: ' + (r.error || '不明'), 'error');
+    document.getElementById('btn-analyze').disabled = false;
+  }
+}
+
+async function genVerbatim(){
+  showMsg('発言録.docx を生成中…', 'info');
+  const r = await fetch(`/api/projects/{{ project.id }}/generate/verbatim`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({interview_id: interviewId}),
+  }).then(r=>r.json());
+  if(r.ok){
+    showMsg('生成完了: ' + r.filename, 'success');
+    window.open(`/api/outputs/${r.file_id}/download`, '_blank');
+  } else {
+    showMsg('エラー: ' + (r.error || '不明'), 'error');
+  }
+}
+
+async function updateRole(segId, sel){
+  const val = sel.value;
+  const body = val.startsWith('respondent_')
+    ? {speaker_role:'respondent', participant_id: parseInt(val.split('_')[1])}
+    : {speaker_role: val, participant_id: null};
+  await fetch(`/interviews/${interviewId}/segments/${segId}/role`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body),
+  });
+}
+</script>
+{% endblock %}

@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }}{% endblock %}
+
+{% block content %}
+<!-- パンくず -->
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.index') }}" class="hover:underline">プロジェクト</a>
+  <span class="mx-1">/</span>
+  <span class="text-gray-700">{{ project.name }}</span>
+</nav>
+
+<div class="flex items-start justify-between mb-6">
+  <div>
+    <h1 class="text-2xl font-bold text-brand-900">{{ project.name }}</h1>
+    {% if project.client %}
+      <p class="text-sm text-gray-500 mt-1">{{ project.client }}</p>
+    {% endif %}
+    {% if project.research_objective %}
+      <p class="text-sm text-gray-600 mt-2 max-w-2xl">{{ project.research_objective }}</p>
+    {% endif %}
+  </div>
+  <a href="{{ url_for('projects.edit', project_id=project.id) }}"
+     class="text-sm text-gray-400 hover:text-brand-500 border border-gray-300 rounded px-3 py-1.5 hover:border-brand-500 transition">
+    編集
+  </a>
+</div>
+
+<!-- アクションバー -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+  <a href="{{ url_for('participants.index', project_id=project.id) }}"
+     class="bg-white border border-gray-200 rounded-lg p-4 text-center hover:shadow-md hover:border-brand-300 transition">
+    <div class="text-2xl font-bold text-brand-700">{{ project.participants|length }}</div>
+    <div class="text-xs text-gray-500 mt-1">参加者</div>
+  </a>
+  <a href="{{ url_for('flows.index', project_id=project.id) }}"
+     class="bg-white border border-gray-200 rounded-lg p-4 text-center hover:shadow-md hover:border-brand-300 transition">
+    <div class="text-2xl font-bold text-brand-700">{{ project.interview_flows|length }}</div>
+    <div class="text-xs text-gray-500 mt-1">インタビューフロー</div>
+  </a>
+  <a href="{{ url_for('interviews.new', project_id=project.id) }}"
+     class="bg-brand-500 text-white rounded-lg p-4 text-center hover:bg-brand-700 transition">
+    <div class="text-2xl font-bold">＋</div>
+    <div class="text-xs mt-1">インタビュー登録</div>
+  </a>
+  <a href="{{ url_for('outputs.index', project_id=project.id) }}"
+     class="bg-white border border-gray-200 rounded-lg p-4 text-center hover:shadow-md hover:border-brand-300 transition">
+    <div class="text-2xl font-bold text-brand-700">{{ project.generated_files|length }}</div>
+    <div class="text-xs text-gray-500 mt-1">生成済みファイル</div>
+  </a>
+</div>
+
+<!-- インタビュー一覧 -->
+<h2 class="text-lg font-semibold text-brand-900 mb-3">インタビュー一覧</h2>
+{% if project.interviews %}
+<div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+  <table class="w-full text-sm">
+    <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+      <tr>
+        <th class="px-4 py-3 text-left">参加者</th>
+        <th class="px-4 py-3 text-left">実施日</th>
+        <th class="px-4 py-3 text-left">ステータス</th>
+        <th class="px-4 py-3 text-left">発言数</th>
+        <th class="px-4 py-3"></th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-gray-100">
+    {% for iv in project.interviews | sort(attribute='interview_date') %}
+    {% set p = iv.participant %}
+    <tr class="hover:bg-gray-50">
+      <td class="px-4 py-3 font-medium">
+        {% if p %}{{ p.participant_code }}｜{{ p.display_name or '名前未設定' }}
+        {% else %}参加者未設定{% endif %}
+      </td>
+      <td class="px-4 py-3 text-gray-500">{{ iv.interview_date or '日付未設定' }}</td>
+      <td class="px-4 py-3">
+        {% set sc = {'pending':'gray','transcribed':'blue','mapped':'yellow','analyzed':'green','done':'green','error':'red'} %}
+        <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium
+              bg-{{ sc.get(iv.status,'gray') }}-100 text-{{ sc.get(iv.status,'gray') }}-700">
+          {{ iv.status }}
+        </span>
+      </td>
+      <td class="px-4 py-3 text-gray-500">{{ iv.segments|length }}</td>
+      <td class="px-4 py-3 text-right">
+        <a href="{{ url_for('interviews.detail', interview_id=iv.id) }}"
+           class="text-brand-500 hover:underline text-xs">詳細 →</a>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+  <div class="text-center py-12 text-gray-400 bg-white rounded-lg border border-gray-200">
+    <p>インタビューがまだ登録されていません</p>
+    <a href="{{ url_for('interviews.new', project_id=project.id) }}"
+       class="mt-2 inline-block text-brand-500 hover:underline text-sm">登録する →</a>
+  </div>
+{% endif %}
+{% endblock %}
