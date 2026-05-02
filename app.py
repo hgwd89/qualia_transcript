@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from flask import Flask, render_template, g
 import config
 from models import db
@@ -45,7 +46,7 @@ def create_app():
     # テンプレート全体で SERVICE_NAME を利用可能にする
     @app.context_processor
     def inject_globals():
-        return {"SERVICE_NAME": config.SERVICE_NAME}
+        return {"SERVICE_NAME": config.SERVICE_NAME, "now": datetime.now()}
 
     with app.app_context():
         db.create_all()
