@@ -3,7 +3,11 @@ import config
 from models import db
 from models.interview import Interview, MediaFile, Transcription
 from models.interview_flow import InterviewFlow
-from services.transcription import run_transcription, auto_assign_speaker_roles
+from services.transcription import (
+    run_transcription,
+    auto_assign_speaker_roles,
+    get_default_transcription_model,
+)
 from services.mapper import run_mapping
 from services.analyzer import analyze_interview_summary
 
@@ -26,7 +30,7 @@ def start_transcription(interview_id):
 
     tr = Transcription(
         media_file_id=media.id,
-        whisper_model=config.WHISPER_MODEL,
+        whisper_model=get_default_transcription_model(),
         language="ja",
         status="pending",
     )
@@ -99,7 +103,7 @@ def process_all(project_id):
                 if not existing_done:
                     tr = Transcription(
                         media_file_id=media.id,
-                        whisper_model=config.WHISPER_MODEL,
+                        whisper_model=get_default_transcription_model(),
                         language="ja",
                         status="pending",
                     )

@@ -1,15 +1,57 @@
 """
-faster-whisper による音声文字起こし＋話者ロール自動推定。
+音声文字起こしサービス。
+
+- OpenAI transcription API
+- ローカル faster-whisper（開発・フォールバック用）
 """
 import os
+import re
 from datetime import datetime, timezone
+
 from faster_whisper import WhisperModel
+from openai import OpenAI
+
 import config
 from models import db
-from models.interview import Interview, MediaFile, Transcription
+from models.interview import Transcription
 from models.segment import Segment
+from models.setting import AppSetting
 
 _model_cache: dict = {}
+_KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
+
+
+def _sanitize_error_message(message: str) -> str:
+    """例外文中のAPIキーらしき文字列をマスクする。"""
+    return _KEY_RE.sub("[REDACTED_KEY]", message or "")
+
+
+def _normalize_provider(name: str) -> str:
+    v = (name or "").strip().lower()
+    if v in {"openai", "local_whisper"}:
+        return v
+    return "openai"
+
+
+def get_transcription_provider() -> str:
+    return _normalize_provider(config.TRANSCRIPTION_PROVIDER)
+
+
+def get_fallback_provider() -> str:
+    v = _normalize_provider(config.TRANSCRIPTION_FALLBACK_PROVIDER)
+    return v if v != get_transcription_provider() else ""
+
+
+def get_default_transcription_model(provider: str | None = None) -> str:
+    p = _normalize_provider(provider or get_transcription_provider())
+    if p == "openai":
+        return config.OPENAI_TRANSCRIBE_MODEL
+    return config.WHISPER_MODEL
+
+
+def _openai_client() -> OpenAI:
+    api_key = AppSetting.get("openai_api_key") or config.OPENAI_API_KEY
+    return OpenAI(api_key=api_key)
 
 
 def _get_model(model_name: str) -> WhisperModel:
@@ -20,21 +62,106 @@ def _get_model(model_name: str) -> WhisperModel:
 
 def run_transcription(transcription_id: int) -> dict:
     """
-    Transcription レコードを処理し、Segment を生成して返す。
-    戻り値: {"segment_count": int, "word_count": int}
+    設定された provider に応じて文字起こしを実行するディスパッチャ。
+    """
+    provider = get_transcription_provider()
+
+    if provider == "openai":
+        try:
+            return run_openai_transcription(transcription_id)
+        except Exception:
+            if get_fallback_provider() == "local_whisper":
+                return run_local_whisper_transcription(transcription_id)
+            raise
+
+    return run_local_whisper_transcription(transcription_id)
+
+
+def run_openai_transcription(transcription_id: int) -> dict:
+    """
+    OpenAI transcription API で文字起こしし、Segment を保存する。
+    まずは全文1セグメント保存を採用する。
     """
     tr = Transcription.query.get(transcription_id)
     if not tr:
         return {"error": "transcription not found"}
 
-    tr.status     = "running"
+    tr.status = "running"
     tr.started_at = datetime.now(timezone.utc)
+    tr.error_message = None
     db.session.commit()
 
     try:
-        media     = tr.media_file
+        media = tr.media_file
         full_path = os.path.join(config.UPLOAD_DIR, media.stored_path)
-        model     = _get_model(tr.whisper_model or config.WHISPER_MODEL)
+        model_name = tr.whisper_model or config.OPENAI_TRANSCRIBE_MODEL
+
+        client = _openai_client()
+        with open(full_path, "rb") as audio_file:
+            resp = client.audio.transcriptions.create(
+                model=model_name,
+                file=audio_file,
+                language=tr.language or "ja",
+            )
+
+        text = getattr(resp, "text", "") or ""
+        text = text.strip()
+        if not text:
+            raise RuntimeError("OpenAI transcription returned empty text")
+
+        interview = media.interview
+        seq = Segment.query.filter_by(interview_id=interview.id).count()
+
+        db.session.add(Segment(
+            transcription_id=transcription_id,
+            interview_id=interview.id,
+            speaker_label="SPEAKER_00",
+            speaker_role="unknown",
+            start_sec=0.0,
+            end_sec=media.duration_sec,
+            text=text,
+            seq=seq,
+        ))
+
+        word_count = len(text.split())
+        tr.status = "done"
+        tr.word_count = word_count
+        tr.completed_at = datetime.now(timezone.utc)
+        interview.status = "transcribed"
+        db.session.commit()
+
+        return {"segment_count": 1, "word_count": word_count}
+
+    except Exception as e:
+        tr.status = "error"
+        tr.error_message = _sanitize_error_message(str(e))
+        db.session.commit()
+        raise
+
+
+def run_local_whisper_transcription(transcription_id: int) -> dict:
+    """
+    faster-whisper（ローカルCPU）で文字起こしし、Segment を保存する。
+    """
+    tr = Transcription.query.get(transcription_id)
+    if not tr:
+        return {"error": "transcription not found"}
+
+    tr.status = "running"
+    tr.started_at = datetime.now(timezone.utc)
+    tr.error_message = None
+    db.session.commit()
+
+    try:
+        media = tr.media_file
+        full_path = os.path.join(config.UPLOAD_DIR, media.stored_path)
+
+        model_name = tr.whisper_model or config.WHISPER_MODEL
+        # OpenAI用モデル名が入っていた場合はローカルWhisperモデルにフォールバック
+        if model_name.startswith("gpt-4o") or model_name == "whisper-1":
+            model_name = config.WHISPER_MODEL
+
+        model = _get_model(model_name)
 
         segments_gen, info = model.transcribe(
             full_path,
@@ -44,10 +171,10 @@ def run_transcription(transcription_id: int) -> dict:
             word_timestamps=False,
         )
 
-        interview  = media.interview
-        seq        = Segment.query.filter_by(interview_id=interview.id).count()
+        interview = media.interview
+        seq = Segment.query.filter_by(interview_id=interview.id).count()
         word_count = 0
-        seg_count  = 0
+        seg_count = 0
 
         speaker_labels: dict[str, str] = {}
         for seg in segments_gen:
@@ -67,20 +194,20 @@ def run_transcription(transcription_id: int) -> dict:
                 seq=seq,
             )
             db.session.add(s)
-            seq        += 1
-            seg_count  += 1
+            seq += 1
+            seg_count += 1
             word_count += len(seg.text.split())
 
-        tr.status        = "done"
-        tr.word_count    = word_count
-        tr.completed_at  = datetime.now(timezone.utc)
+        tr.status = "done"
+        tr.word_count = word_count
+        tr.completed_at = datetime.now(timezone.utc)
         interview.status = "transcribed"
         db.session.commit()
         return {"segment_count": seg_count, "word_count": word_count}
 
     except Exception as e:
-        tr.status        = "error"
-        tr.error_message = str(e)
+        tr.status = "error"
+        tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()
         raise
 
