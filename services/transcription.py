@@ -7,6 +7,7 @@
 import os
 import re
 from datetime import datetime, timezone
+from typing import Any
 
 from faster_whisper import WhisperModel
 from openai import OpenAI
@@ -21,6 +22,7 @@ _model_cache: dict = {}
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？\?])")
 _SOFT_BREAK_CHARS = ["。", "？", "?", "！", "、", ",", " "]
+_DIARIZE_MODEL_NAMES = {"gpt-4o-transcribe-diarize"}
 _MODERATOR_HINTS = [
     "ですか",
     "ますか",
@@ -72,6 +74,81 @@ def _get_model(model_name: str) -> WhisperModel:
     if model_name not in _model_cache:
         _model_cache[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
     return _model_cache[model_name]
+
+
+def _is_diarize_model(model_name: str) -> bool:
+    return (model_name or "").strip() in _DIARIZE_MODEL_NAMES
+
+
+def _to_dict(value: Any) -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        try:
+            dumped = value.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+    if hasattr(value, "to_dict"):
+        try:
+            dumped = value.to_dict()
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            pass
+
+    result: dict[str, Any] = {}
+    for key in ["id", "speaker", "start", "end", "text", "segments", "duration"]:
+        if hasattr(value, key):
+            result[key] = getattr(value, key)
+    return result
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _parse_diarized_segments(response: Any) -> list[dict]:
+    """
+    diarized_json レスポンスから [{speaker_label,start_sec,end_sec,text}] を抽出する。
+    形式差分に耐えるため、dict/object の両方を許容する。
+    """
+    resp_dict = _to_dict(response)
+    raw_segments = resp_dict.get("segments")
+    if raw_segments is None and hasattr(response, "segments"):
+        raw_segments = getattr(response, "segments")
+
+    if not isinstance(raw_segments, list):
+        return []
+
+    parsed: list[dict] = []
+    for idx, raw in enumerate(raw_segments):
+        seg = _to_dict(raw)
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+
+        speaker = seg.get("speaker")
+        speaker_label = str(speaker).strip() if speaker is not None else ""
+        if not speaker_label:
+            speaker_label = "SPEAKER_00"
+
+        parsed.append({
+            "speaker_label": speaker_label,
+            "start_sec": _float_or_none(seg.get("start")),
+            "end_sec": _float_or_none(seg.get("end")),
+            "text": text,
+            "seq_order": idx,
+        })
+    return parsed
 
 
 def _split_long_chunk(text: str, max_chars: int) -> list[str]:
@@ -183,14 +260,14 @@ def _estimate_segment_times(chunks: list[str], duration_sec: float | None) -> li
     return out
 
 
-def guess_speaker_role(text: str) -> str:
+def guess_speaker_role(text: str, allow_unknown: bool = False) -> str:
     """
     OpenAI transcription（単一話者ラベル）向けの暫定ロール推定。
     質問者/調査者らしい文は moderator、それ以外は respondent。
     """
     t = (text or "").strip()
     if not t:
-        return "respondent"
+        return "unknown" if allow_unknown else "respondent"
 
     if t.endswith("?") or t.endswith("？"):
         return "moderator"
@@ -198,7 +275,45 @@ def guess_speaker_role(text: str) -> str:
     if any(hint in t for hint in _MODERATOR_HINTS):
         return "moderator"
 
+    if allow_unknown and len(t) <= 2:
+        return "unknown"
+
     return "respondent"
+
+
+def infer_speaker_roles_from_diarized_segments(segments: list[dict]) -> dict[str, str]:
+    """
+    diarization で得た speaker_label ごとの役割を推定する。
+    - モデレーターらしい発話が多い話者: moderator
+    - それ以外: respondent
+    - 判定不能: unknown
+    """
+    by_speaker: dict[str, dict[str, int]] = {}
+    for seg in segments:
+        label = seg.get("speaker_label") or "SPEAKER_00"
+        text = seg.get("text") or ""
+        role = guess_speaker_role(text, allow_unknown=True)
+
+        if label not in by_speaker:
+            by_speaker[label] = {"moderator": 0, "respondent": 0, "unknown": 0}
+        by_speaker[label][role] = by_speaker[label].get(role, 0) + 1
+
+    role_map: dict[str, str] = {}
+    for label, counts in by_speaker.items():
+        mod_n = counts.get("moderator", 0)
+        resp_n = counts.get("respondent", 0)
+        unk_n = counts.get("unknown", 0)
+
+        if mod_n > resp_n:
+            role_map[label] = "moderator"
+        elif resp_n > mod_n:
+            role_map[label] = "respondent"
+        elif mod_n == 0 and resp_n == 0 and unk_n > 0:
+            role_map[label] = "unknown"
+        else:
+            role_map[label] = "unknown"
+
+    return role_map
 
 
 def run_transcription(transcription_id: int) -> dict:
@@ -238,38 +353,76 @@ def run_openai_transcription(transcription_id: int) -> dict:
         model_name = tr.whisper_model or config.OPENAI_TRANSCRIBE_MODEL
 
         client = _openai_client()
+        req_kwargs = {
+            "model": model_name,
+            "language": tr.language or "ja",
+        }
+        if _is_diarize_model(model_name):
+            req_kwargs["response_format"] = "diarized_json"
+            req_kwargs["chunking_strategy"] = "auto"
+
         with open(full_path, "rb") as audio_file:
             resp = client.audio.transcriptions.create(
-                model=model_name,
                 file=audio_file,
-                language=tr.language or "ja",
+                **req_kwargs,
             )
 
-        text = getattr(resp, "text", "") or ""
-        text = text.strip()
+        text = (getattr(resp, "text", "") or "").strip()
+        if not text:
+            resp_dict = _to_dict(resp)
+            text = (resp_dict.get("text") or "").strip()
         if not text:
             raise RuntimeError("OpenAI transcription returned empty text")
 
         interview = media.interview
         seq = Segment.query.filter_by(interview_id=interview.id).count()
-        chunks = split_transcript_text(text)
-        if not chunks:
-            raise RuntimeError("OpenAI transcription split resulted in empty segments")
 
-        timings = _estimate_segment_times(chunks, media.duration_sec)
-        for idx, chunk in enumerate(chunks):
-            start_sec, end_sec = timings[idx]
-            db.session.add(Segment(
-                transcription_id=transcription_id,
-                interview_id=interview.id,
-                speaker_label="SPEAKER_00",
-                speaker_role=guess_speaker_role(chunk),
-                start_sec=start_sec,
-                end_sec=end_sec,
-                text=chunk,
-                seq=seq,
-            ))
-            seq += 1
+        diarized_segments: list[dict] = []
+        if _is_diarize_model(model_name):
+            diarized_segments = _parse_diarized_segments(resp)
+
+        if diarized_segments:
+            speaker_role_map = infer_speaker_roles_from_diarized_segments(diarized_segments)
+            for seg in diarized_segments:
+                label = seg["speaker_label"]
+                text_part = seg["text"]
+                role = speaker_role_map.get(label, "unknown")
+                if role == "unknown":
+                    role = guess_speaker_role(text_part, allow_unknown=True)
+
+                db.session.add(Segment(
+                    transcription_id=transcription_id,
+                    interview_id=interview.id,
+                    speaker_label=label,
+                    speaker_role=role,
+                    start_sec=seg.get("start_sec"),
+                    end_sec=seg.get("end_sec"),
+                    text=text_part,
+                    seq=seq,
+                ))
+                seq += 1
+            seg_count = len(diarized_segments)
+        else:
+            # diarized_json が得られない場合は従来の簡易分割へフォールバック
+            chunks = split_transcript_text(text)
+            if not chunks:
+                raise RuntimeError("OpenAI transcription split resulted in empty segments")
+
+            timings = _estimate_segment_times(chunks, media.duration_sec)
+            for idx, chunk in enumerate(chunks):
+                start_sec, end_sec = timings[idx]
+                db.session.add(Segment(
+                    transcription_id=transcription_id,
+                    interview_id=interview.id,
+                    speaker_label="SPEAKER_00",
+                    speaker_role=guess_speaker_role(chunk),
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    text=chunk,
+                    seq=seq,
+                ))
+                seq += 1
+            seg_count = len(chunks)
 
         word_count = len(text.split())
         tr.status = "done"
@@ -278,7 +431,7 @@ def run_openai_transcription(transcription_id: int) -> dict:
         interview.status = "transcribed"
         db.session.commit()
 
-        return {"segment_count": len(chunks), "word_count": word_count}
+        return {"segment_count": seg_count, "word_count": word_count}
 
     except Exception as e:
         tr.status = "error"

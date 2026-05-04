@@ -13,7 +13,7 @@ OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 WHISPER_MODEL     = os.getenv("WHISPER_MODEL", "small")
 TRANSCRIPTION_PROVIDER = os.getenv("TRANSCRIPTION_PROVIDER", "openai")
 TRANSCRIPTION_FALLBACK_PROVIDER = os.getenv("TRANSCRIPTION_FALLBACK_PROVIDER", "")
-OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe-diarize")
 MAX_UPLOAD_BYTES  = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".mp4", ".mov", ".webm"}
