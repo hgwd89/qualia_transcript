@@ -88,6 +88,10 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 - Do not mix them into safe checks.
 - Do not run them unless the user explicitly asks.
 
+`scripts/check_transcription.ps1` / `tests/smoke_transcription.py` are paid API checks.
+- Do not mix them into safe checks.
+- Do not run them unless the user explicitly asks.
+
 ## Do not run
 
 - full `compileall`

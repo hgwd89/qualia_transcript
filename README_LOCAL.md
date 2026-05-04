@@ -85,3 +85,12 @@ powershell -ExecutionPolicy Bypass -File scripts/check_analysis.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_mapping.ps1
 ```
+
+## Transcription Smoke Check（有料API）
+
+- Transcription Smoke Check は OpenAI transcription API を1回呼びます。必要時のみ実行してください。
+- Safe Smoke Check には含めません。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
+```
