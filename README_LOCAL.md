@@ -76,3 +76,12 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_analysis.ps1
 ```
+
+## Mapping Smoke Check（有料API）
+
+- Mapping Smoke Check は OpenAI API を1回呼びます。必要時のみ実行してください。
+- Safe Smoke Check には含めません。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_mapping.ps1
+```
