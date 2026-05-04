@@ -6,7 +6,7 @@ from models import db
 from models.interview import Interview
 from models.interview_flow import InterviewFlowQuestion, InterviewFlowSection, InterviewFlow
 from models.segment import Segment, UtteranceMapping
-from services.claude_client import call_structured
+from services.ai_client import call_structured
 
 SCHEMA = {
     "type": "object",

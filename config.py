@@ -9,7 +9,7 @@ SECRET_KEY        = os.getenv("SECRET_KEY", "dev-secret-key")
 DATABASE_URI      = f"sqlite:///{SERVICE_SLUG}.db"
 UPLOAD_DIR        = os.path.join(os.path.dirname(__file__), "uploads")
 OUTPUT_DIR        = os.path.join(os.path.dirname(__file__), "outputs")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
 WHISPER_MODEL     = os.getenv("WHISPER_MODEL", "large-v3")
 MAX_UPLOAD_BYTES  = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 

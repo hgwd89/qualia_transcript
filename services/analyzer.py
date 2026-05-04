@@ -8,7 +8,7 @@ from models.interview import Interview
 from models.interview_flow import InterviewFlowQuestion
 from models.segment import Segment, UtteranceMapping
 from models.analysis import AIAnalysis
-from services.claude_client import call_structured, MODEL
+from services.ai_client import call_structured, MODEL
 
 # ── 共通スキーマ定義 ──────────────────────────────────────────
 

@@ -5,7 +5,7 @@ from models.setting import AppSetting
 bp = Blueprint("settings", __name__)
 
 SETTING_KEYS = [
-    ("anthropic_api_key", "Anthropic APIキー", "password"),
+    ("openai_api_key", "OpenAI APIキー", "password"),
     ("whisper_model",     "Whisperモデル",      "text"),
 ]
 
