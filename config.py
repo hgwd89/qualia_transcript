@@ -10,7 +10,7 @@ DATABASE_URI      = f"sqlite:///{SERVICE_SLUG}.db"
 UPLOAD_DIR        = os.path.join(os.path.dirname(__file__), "uploads")
 OUTPUT_DIR        = os.path.join(os.path.dirname(__file__), "outputs")
 OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY", "")
-WHISPER_MODEL     = os.getenv("WHISPER_MODEL", "large-v3")
+WHISPER_MODEL     = os.getenv("WHISPER_MODEL", "small")
 MAX_UPLOAD_BYTES  = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
 
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".mp4", ".mov", ".webm"}

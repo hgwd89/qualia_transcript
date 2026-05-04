@@ -39,8 +39,8 @@ def run_transcription(transcription_id: int) -> dict:
         segments_gen, info = model.transcribe(
             full_path,
             language=tr.language or "ja",
-            beam_size=5,
-            vad_filter=True,
+            beam_size=1,
+            vad_filter=False,
             word_timestamps=False,
         )
 
