@@ -6,6 +6,8 @@
 """
 import os
 import re
+import json
+import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
@@ -37,6 +39,11 @@ _MODERATOR_HINTS = [
     "なるほど",
     "そっか",
 ]
+_OPENAI_TRANSCRIBE_VERBATIM_PROMPT = (
+    "逐語で書き起こしてください。"
+    "フィラー（えー、あの、えっと、うーん等）、言い淀み、言い直し、重複、崩れた語尾を省略・要約・正規化しないでください。"
+    "聞き取れない箇所は [inaudible] を使ってください。"
+)
 
 
 def _sanitize_error_message(message: str) -> str:
@@ -70,6 +77,46 @@ def get_default_transcription_model(provider: str | None = None) -> str:
 def _openai_client() -> OpenAI:
     api_key = AppSetting.get("openai_api_key") or config.OPENAI_API_KEY
     return OpenAI(api_key=api_key)
+
+
+def _write_raw_transcript_snapshot(
+    transcription_id: int,
+    interview_id: int,
+    model_name: str,
+    language: str,
+    text: str,
+) -> tuple[str, str]:
+    """
+    API返却の全文テキストを不変スナップショットとして保存する。
+    既存ファイルは上書きしない（immutable）。
+    """
+    raw_dir = os.path.join(config.OUTPUT_DIR, "raw_transcripts")
+    os.makedirs(raw_dir, exist_ok=True)
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    digest = hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+    payload = {
+        "transcription_id": transcription_id,
+        "interview_id": interview_id,
+        "model": model_name,
+        "language": language,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "sha256": digest,
+        "text": text or "",
+    }
+
+    base_name = f"transcription_{transcription_id}_{ts}"
+    suffix = 0
+    while True:
+        file_name = f"{base_name}.json" if suffix == 0 else f"{base_name}_{suffix}.json"
+        abs_path = os.path.join(raw_dir, file_name)
+        try:
+            with open(abs_path, "x", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            rel_path = os.path.relpath(abs_path, config.OUTPUT_DIR)
+            return rel_path, digest
+        except FileExistsError:
+            suffix += 1
 
 
 def _get_model(model_name: str) -> WhisperModel:
@@ -445,6 +492,7 @@ def run_openai_transcription(transcription_id: int) -> dict:
         req_kwargs = {
             "model": model_name,
             "language": tr.language or "ja",
+            "prompt": _OPENAI_TRANSCRIBE_VERBATIM_PROMPT,
         }
         if _is_diarize_model(model_name):
             req_kwargs["response_format"] = "diarized_json"
@@ -456,14 +504,23 @@ def run_openai_transcription(transcription_id: int) -> dict:
                 **req_kwargs,
             )
 
-        text = (getattr(resp, "text", "") or "").strip()
-        if not text:
+        raw_text = getattr(resp, "text", "")
+        if not raw_text:
             resp_dict = _to_dict(resp)
-            text = (resp_dict.get("text") or "").strip()
+            raw_text = resp_dict.get("text") or ""
+
+        text = raw_text.strip()
         if not text:
             raise RuntimeError("OpenAI transcription returned empty text")
 
         interview = media.interview
+        raw_snapshot_path, raw_text_sha256 = _write_raw_transcript_snapshot(
+            transcription_id=transcription_id,
+            interview_id=interview.id,
+            model_name=model_name,
+            language=tr.language or "ja",
+            text=raw_text,
+        )
         seq = Segment.query.filter_by(interview_id=interview.id).count()
 
         diarized_segments: list[dict] = []
@@ -530,7 +587,12 @@ def run_openai_transcription(transcription_id: int) -> dict:
         interview.status = "transcribed"
         db.session.commit()
 
-        return {"segment_count": seg_count, "word_count": word_count}
+        return {
+            "segment_count": seg_count,
+            "word_count": word_count,
+            "raw_snapshot_path": raw_snapshot_path,
+            "raw_text_sha256": raw_text_sha256,
+        }
 
     except Exception as e:
         tr.status = "error"

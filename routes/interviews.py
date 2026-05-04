@@ -11,6 +11,7 @@ from models.participant import Participant
 from models.interview_flow import InterviewFlow
 from models.interview import Interview, MediaFile, Transcription
 from models.segment import Segment, UtteranceMapping
+from services.product_hint import lookup_product_hints, render_inline_hint
 
 bp = Blueprint("interviews", __name__)
 
@@ -84,3 +85,23 @@ def update_segment_role(interview_id, segment_id):
     seg.participant_id  = data.get("participant_id") or None
     db.session.commit()
     return jsonify({"ok": True})
+
+
+@bp.route("/api/interviews/<int:interview_id>/segments/<int:segment_id>/product-hint")
+def segment_product_hint(interview_id, segment_id):
+    seg = Segment.query.get_or_404(segment_id)
+    if seg.interview_id != interview_id:
+        return jsonify({"error": "segment does not belong to interview"}), 400
+
+    try:
+        hints = lookup_product_hints(seg.text, max_hints=1)
+        inline_hint = render_inline_hint(hints[0]) if hints else ""
+        return jsonify({
+            "ok": True,
+            "segment_id": seg.id,
+            "hints": hints,
+            "inline_hint": inline_hint,
+        })
+    except Exception as e:
+        # UI利用時の検索失敗は致命にしない
+        return jsonify({"ok": False, "segment_id": seg.id, "hints": [], "error": str(e)}), 200

@@ -123,6 +123,7 @@ The current provider is OpenAI / GPT API.
 - Do not call the OpenAI API unless the user explicitly asks for API testing.
 - For structured outputs, preserve evidence fields such as `evidence_quote`.
 - Do not fabricate interview statements or analysis findings not supported by source utterances.
+- Product-hint enrichment may use Rakuten API, but must not alter raw verbatim transcript text.
 
 ## Transcription rules
 

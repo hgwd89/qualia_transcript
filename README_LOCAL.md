@@ -95,6 +95,16 @@ powershell -ExecutionPolicy Bypass -File scripts/check_mapping.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
 ```
 
+## 商品候補補足（楽天API）
+
+- 逐語本文は変更せず、`/interviews/<id>` 画面でセグメントごとに「候補を照合」を押すと補足候補を表示します。
+- 表示例: `（この商品と思われる: ...）`
+- 設定画面で以下を設定してください。
+  - `product_hint_provider`: `rakuten` または `none`
+  - `rakuten_application_id`
+  - `rakuten_access_key`（任意）
+  - `rakuten_affiliate_id`（任意）
+
 ## Check Runner（1コマンド実行）
 
 - デフォルトは safe check のみ実行します。

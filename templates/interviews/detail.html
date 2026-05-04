@@ -103,6 +103,7 @@
           <th class="px-4 py-3 text-left w-20">時刻</th>
           <th class="px-4 py-3 text-left w-32">話者</th>
           <th class="px-4 py-3 text-left">発言テキスト</th>
+          <th class="px-4 py-3 text-left w-40">商品候補補足</th>
           <th class="px-4 py-3 text-left w-40">マッピング先</th>
         </tr>
       </thead>
@@ -127,7 +128,16 @@
             {% endfor %}
           </select>
         </td>
-        <td class="px-4 py-2 text-gray-800">{{ seg.text }}</td>
+        <td class="px-4 py-2 text-gray-800">
+          <div>{{ seg.text }}</div>
+          <div id="product-hint-{{ seg.id }}" class="text-xs text-gray-500 mt-1"></div>
+        </td>
+        <td class="px-4 py-2">
+          <button onclick="fetchProductHint({{ seg.id }})"
+                  class="text-xs border border-gray-300 rounded px-2 py-1 hover:bg-gray-50">
+            候補を照合
+          </button>
+        </td>
         <td class="px-4 py-2 text-xs text-gray-400">
           {% for um in seg.utterance_mappings %}
             {% if um.is_unclassified %}
@@ -231,6 +241,35 @@ async function updateRole(segId, sel){
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify(body),
   });
+}
+
+async function fetchProductHint(segId){
+  const el = document.getElementById(`product-hint-${segId}`);
+  el.textContent = '照合中…';
+  try {
+    const r = await fetch(`/api/interviews/${interviewId}/segments/${segId}/product-hint`);
+    const data = await r.json();
+    if(!data.ok || !data.inline_hint){
+      el.textContent = '候補なし';
+      return;
+    }
+
+    const h = data.hints && data.hints[0] ? data.hints[0] : null;
+    el.textContent = data.inline_hint;
+    if(h && h.item_url){
+      const spacer = document.createTextNode(' ');
+      const link = document.createElement('a');
+      link.href = h.item_url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.className = 'text-brand-500 underline';
+      link.textContent = '詳細';
+      el.appendChild(spacer);
+      el.appendChild(link);
+    }
+  } catch (e){
+    el.textContent = '照合失敗';
+  }
 }
 </script>
 {% endblock %}

@@ -7,6 +7,10 @@ bp = Blueprint("settings", __name__)
 SETTING_KEYS = [
     ("openai_api_key", "OpenAI APIキー", "password"),
     ("whisper_model",     "Whisperモデル",      "text"),
+    ("product_hint_provider", "商品照合プロバイダ (rakuten/none)", "text"),
+    ("rakuten_application_id", "楽天API applicationId", "password"),
+    ("rakuten_access_key", "楽天API accessKey (任意)", "password"),
+    ("rakuten_affiliate_id", "楽天 affiliateId (任意)", "text"),
 ]
 
 
