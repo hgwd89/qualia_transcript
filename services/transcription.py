@@ -21,6 +21,18 @@ _model_cache: dict = {}
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？\?])")
 _SOFT_BREAK_CHARS = ["。", "？", "?", "！", "、", ",", " "]
+_MODERATOR_HINTS = [
+    "ですか",
+    "ますか",
+    "教えてください",
+    "どれぐらい",
+    "ちなみに",
+    "大丈夫ですか",
+    "聞こえます",
+    "わかりました",
+    "なるほど",
+    "そっか",
+]
 
 
 def _sanitize_error_message(message: str) -> str:
@@ -171,6 +183,24 @@ def _estimate_segment_times(chunks: list[str], duration_sec: float | None) -> li
     return out
 
 
+def guess_speaker_role(text: str) -> str:
+    """
+    OpenAI transcription（単一話者ラベル）向けの暫定ロール推定。
+    質問者/調査者らしい文は moderator、それ以外は respondent。
+    """
+    t = (text or "").strip()
+    if not t:
+        return "respondent"
+
+    if t.endswith("?") or t.endswith("？"):
+        return "moderator"
+
+    if any(hint in t for hint in _MODERATOR_HINTS):
+        return "moderator"
+
+    return "respondent"
+
+
 def run_transcription(transcription_id: int) -> dict:
     """
     設定された provider に応じて文字起こしを実行するディスパッチャ。
@@ -233,7 +263,7 @@ def run_openai_transcription(transcription_id: int) -> dict:
                 transcription_id=transcription_id,
                 interview_id=interview.id,
                 speaker_label="SPEAKER_00",
-                speaker_role="respondent",
+                speaker_role=guess_speaker_role(chunk),
                 start_sec=start_sec,
                 end_sec=end_sec,
                 text=chunk,
