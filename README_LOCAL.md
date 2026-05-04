@@ -94,3 +94,13 @@ powershell -ExecutionPolicy Bypass -File scripts/check_mapping.ps1
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
 ```
+
+## Output Smoke Check（外部APIなし）
+
+- Output Smoke Check は OpenAI API を呼びません。
+- Word/Excel 生成の最低限動作を確認します。
+- Safe Smoke Check には含めません。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_outputs.ps1
+```

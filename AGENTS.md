@@ -92,6 +92,11 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 - Do not mix them into safe checks.
 - Do not run them unless the user explicitly asks.
 
+`scripts/check_outputs.ps1` / `tests/smoke_outputs.py` are output generation checks.
+- OpenAI API must not be called.
+- Do not mix them into safe checks.
+- Do not run large/repeated generations without explicit user request.
+
 ## Do not run
 
 - full `compileall`
