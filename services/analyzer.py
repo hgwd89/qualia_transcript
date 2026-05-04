@@ -103,14 +103,33 @@ def analyze_per_question(interview_id: int, question_id: int) -> AIAnalysis:
 
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="analysis_result")
 
+    # メタ情報はモデル出力に依存せず、アプリ側で正規化する
+    canonical_q_code = question.question_code or f"Q{question.id}"
+    normalized_findings = []
+    for finding in (result.get("findings") or []):
+        if not isinstance(finding, dict):
+            continue
+        f = dict(finding)
+        f["question_codes"] = [canonical_q_code]
+        normalized_findings.append(f)
+
+    normalized_result = {
+        "question_id": question.id,
+        "question_code": canonical_q_code,
+        "question_text": question.question_text,
+        "findings": normalized_findings,
+        "implications": result.get("implications", ""),
+        "unresolved": result.get("unresolved", ""),
+    }
+
     analysis = AIAnalysis(
         project_id=interview.project_id,
         interview_id=interview_id,
         question_id=question_id,
         analysis_type="per_question",
         title=f"{question.question_code} 考察",
-        summary_text=result.get("implications", ""),
-        content_json=json.dumps(result, ensure_ascii=False),
+        summary_text=normalized_result.get("implications", ""),
+        content_json=json.dumps(normalized_result, ensure_ascii=False),
         model_used=MODEL,
     )
     db.session.add(analysis)
