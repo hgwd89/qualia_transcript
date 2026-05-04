@@ -56,3 +56,12 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 `start_app.ps1` が使用中プロセスを表示します。HTTP 200 でなければ `logs/flask_err.log` を確認し、必要なら競合プロセスを停止して再実行してください。
 - PowerShell の実行ポリシーで拒否される  
 管理者権限 PowerShell で `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を設定後に再実行してください。
+
+## Safe Smoke Check（非破壊）
+
+外部API呼び出し・Whisper実行・マッピング/分析実行なしで、最低限の状態確認だけ行うには以下を使います。
+
+```powershell
+python tests/smoke_safe.py
+powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
+```

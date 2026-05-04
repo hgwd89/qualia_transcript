@@ -73,6 +73,13 @@ git status
 git diff --stat
 ```
 
+For safe non-destructive regression checks, run:
+
+```powershell
+python tests/smoke_safe.py
+powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
+```
+
 ## Do not run
 
 - full `compileall`
