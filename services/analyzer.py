@@ -88,13 +88,17 @@ def analyze_per_question(interview_id: int, question_id: int) -> AIAnalysis:
     system = (
         "あなたは定性調査の専門アナリストです。"
         "インタビューの発言から重要な発見を抽出してください。"
+        "出力は必ず日本語で記述してください。"
         "evidence_quote は必ず実際の発言テキストをそのまま引用し、参加者コードを添えてください。"
         "発言にない内容を断定しないでください。推測は推測として明記してください。"
+        "単一または少数の発言だけを根拠に、一般化した市場傾向や因果を断定しないでください。"
+        "implications と unresolved も、提示された発言根拠から言える範囲に限定してください。"
     )
     user = (
         f"【質問】{question.question_text}\n\n"
         f"【発言】\n{utterances or '（発言なし）'}\n\n"
         "この質問に対する回答から発見事項、マーケティング示唆、積み残し課題を抽出してください。"
+        "回答は日本語で返してください。"
     )
 
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="analysis_result")
