@@ -80,6 +80,10 @@ python tests/smoke_safe.py
 powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
 
+`scripts/check_analysis.ps1` / `tests/smoke_analysis.py` are paid API checks.
+- Do not mix them into safe checks.
+- Do not run them unless the user explicitly asks.
+
 ## Do not run
 
 - full `compileall`

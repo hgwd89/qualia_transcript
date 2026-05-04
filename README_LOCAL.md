@@ -65,3 +65,14 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 python tests/smoke_safe.py
 powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
+
+- Safe Smoke Check は無料・非破壊（外部API呼び出しなし）です。
+
+## Analysis Smoke Check（有料API）
+
+- Analysis Smoke Check は OpenAI API を1回呼びます。必要時のみ実行してください。
+- Safe Smoke Check には含めません。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_analysis.ps1
+```
