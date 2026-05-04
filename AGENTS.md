@@ -97,6 +97,11 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 - Do not mix them into safe checks.
 - Do not run large/repeated generations without explicit user request.
 
+`scripts/check_all.ps1` is a runner.
+- Default: safe check only.
+- Paid checks run only when explicit flags are provided.
+- Stop at first failed check.
+
 ## Do not run
 
 - full `compileall`

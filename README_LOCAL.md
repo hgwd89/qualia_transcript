@@ -95,6 +95,20 @@ powershell -ExecutionPolicy Bypass -File scripts/check_mapping.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
 ```
 
+## Check Runner（1コマンド実行）
+
+- デフォルトは safe check のみ実行します。
+- 有料APIチェックはオプション指定時のみ実行します。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Mapping
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Analysis
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Transcription
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Outputs
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllPaid
+```
+
 ## Output Smoke Check（外部APIなし）
 
 - Output Smoke Check は OpenAI API を呼びません。
