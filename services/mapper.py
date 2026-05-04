@@ -8,6 +8,8 @@ from models.interview_flow import InterviewFlowQuestion, InterviewFlowSection, I
 from models.segment import Segment, UtteranceMapping
 from services.ai_client import call_structured
 
+MIN_CONFIDENCE_CLASSIFIED = 0.65
+
 SCHEMA = {
     "type": "object",
     "properties": {
@@ -70,14 +72,18 @@ def run_mapping(interview_id: int) -> int:
 
     system = (
         "あなたは定性調査の専門家です。"
-        "インタビューの発言セグメントを、最も関連するインタビューフローの質問項目に割り当ててください。"
-        "明らかに対応する質問がない発言は is_unclassified=true, question_id=null とします。"
+        "発言セグメントを、質問に直接答えている場合にのみ質問項目へ割り当ててください。"
+        "関連が弱い・文脈不足・推測が必要な場合は is_unclassified=true, question_id=null を選んでください。"
+        "複数候補がある場合は最も具体的に一致する質問を1つだけ選んでください。"
+        "「睡眠・休暇の確保」と「休日行動・趣味・一人行動」を混同しないでください。"
+        "調査者発話、確認発話、音声確認（聞こえ方確認）は分類しないでください。"
         "confidence は 0.0〜1.0 で表してください。"
     )
     user = (
         f"【質問項目一覧】\n{q_list}\n\n"
         f"【発言セグメント一覧】\n{seg_list}\n\n"
         "各発言を最も適切な質問項目 id に割り当ててください。"
+        "回答が質問に直接答えていない場合は必ず unclassified にしてください。"
     )
 
     result = call_structured(system, user, SCHEMA, schema_name="utterance_mapping_result")
@@ -89,7 +95,29 @@ def run_mapping(interview_id: int) -> int:
         synchronize_session=False
     )
 
+    normalized_mappings = []
     for m in mappings:
+        segment_id = m["segment_id"]
+        question_id = m.get("question_id")
+        confidence = float(m.get("confidence", 0.0) or 0.0)
+        is_unclassified = bool(m.get("is_unclassified", False))
+
+        # 弱い分類は unclassified 側へ寄せる
+        if question_id is None:
+            is_unclassified = True
+            confidence = min(confidence, 0.49)
+        elif confidence < MIN_CONFIDENCE_CLASSIFIED:
+            question_id = None
+            is_unclassified = True
+
+        normalized_mappings.append({
+            "segment_id": segment_id,
+            "question_id": question_id,
+            "confidence": confidence,
+            "is_unclassified": is_unclassified,
+        })
+
+    for m in normalized_mappings:
         db.session.add(UtteranceMapping(
             segment_id=m["segment_id"],
             question_id=m.get("question_id"),
@@ -100,4 +128,4 @@ def run_mapping(interview_id: int) -> int:
 
     interview.status = "mapped"
     db.session.commit()
-    return len(mappings)
+    return len(normalized_mappings)

@@ -23,6 +23,8 @@ _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？\?])")
 _SOFT_BREAK_CHARS = ["。", "？", "?", "！", "、", ",", " "]
 _DIARIZE_MODEL_NAMES = {"gpt-4o-transcribe-diarize"}
+_SENTENCE_ENDINGS = ("。", "？", "?", "！", "!", "。\"", "？」", "。」")
+_CONTINUATION_HEAD_CHARS = set("ぁぃぅぇぉゃゅょっゎーりるれろ")
 _MODERATOR_HINTS = [
     "ですか",
     "ますか",
@@ -149,6 +151,93 @@ def _parse_diarized_segments(response: Any) -> list[dict]:
             "seq_order": idx,
         })
     return parsed
+
+
+def _is_sentence_complete(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if any(t.endswith(end) for end in _SENTENCE_ENDINGS):
+        return True
+    # 体言止めや文末助詞で終わる場合は未完扱い
+    if t.endswith(("が", "けど", "ので", "から", "で", "と")):
+        return False
+    return False
+
+
+def _starts_like_continuation(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    head = t[0]
+    return head in _CONTINUATION_HEAD_CHARS
+
+
+def merge_short_adjacent_segments(
+    segments: list[dict],
+    max_gap_sec: float = 1.2,
+    short_chars: int = 12,
+) -> tuple[list[dict], list[dict]]:
+    """
+    diarization 断片化対策:
+    同一 speaker_label / speaker_role の短い連続セグメントを結合する。
+    """
+    if not segments:
+        return [], []
+
+    merged: list[dict] = []
+    merge_examples: list[dict] = []
+
+    for seg in segments:
+        if not merged:
+            merged.append(dict(seg))
+            continue
+
+        prev = merged[-1]
+        same_speaker = (prev.get("speaker_label") == seg.get("speaker_label"))
+        same_role = (prev.get("speaker_role") == seg.get("speaker_role"))
+
+        prev_end = _float_or_none(prev.get("end_sec"))
+        cur_start = _float_or_none(seg.get("start_sec"))
+        gap = 0.0
+        if prev_end is not None and cur_start is not None:
+            gap = max(0.0, cur_start - prev_end)
+
+        prev_text = (prev.get("text") or "").strip()
+        cur_text = (seg.get("text") or "").strip()
+        should_merge = (
+            same_speaker
+            and same_role
+            and gap <= max_gap_sec
+            and (
+                len(prev_text) <= short_chars
+                or len(cur_text) <= short_chars
+                or not _is_sentence_complete(prev_text)
+                or _starts_like_continuation(cur_text)
+            )
+        )
+
+        if not should_merge:
+            merged.append(dict(seg))
+            continue
+
+        merged_text = f"{prev_text}{cur_text}".strip()
+        prev["text"] = merged_text
+        if prev.get("start_sec") is None:
+            prev["start_sec"] = seg.get("start_sec")
+        prev["end_sec"] = seg.get("end_sec") if seg.get("end_sec") is not None else prev.get("end_sec")
+
+        if len(merge_examples) < 20:
+            merge_examples.append({
+                "speaker_label": prev.get("speaker_label"),
+                "speaker_role": prev.get("speaker_role"),
+                "gap_sec": round(gap, 3),
+                "before_prev": prev_text,
+                "before_curr": cur_text,
+                "after": merged_text,
+            })
+
+    return merged, merge_examples
 
 
 def _split_long_chunk(text: str, max_chars: int) -> list[str]:
@@ -383,25 +472,35 @@ def run_openai_transcription(transcription_id: int) -> dict:
 
         if diarized_segments:
             speaker_role_map = infer_speaker_roles_from_diarized_segments(diarized_segments)
+            prepared: list[dict] = []
             for seg in diarized_segments:
                 label = seg["speaker_label"]
                 text_part = seg["text"]
                 role = speaker_role_map.get(label, "unknown")
                 if role == "unknown":
                     role = guess_speaker_role(text_part, allow_unknown=True)
+                prepared.append({
+                    "speaker_label": label,
+                    "speaker_role": role,
+                    "start_sec": seg.get("start_sec"),
+                    "end_sec": seg.get("end_sec"),
+                    "text": text_part,
+                })
 
+            merged_segments, _ = merge_short_adjacent_segments(prepared)
+            for seg in merged_segments:
                 db.session.add(Segment(
                     transcription_id=transcription_id,
                     interview_id=interview.id,
-                    speaker_label=label,
-                    speaker_role=role,
+                    speaker_label=seg["speaker_label"],
+                    speaker_role=seg["speaker_role"],
                     start_sec=seg.get("start_sec"),
                     end_sec=seg.get("end_sec"),
-                    text=text_part,
+                    text=seg["text"],
                     seq=seq,
                 ))
                 seq += 1
-            seg_count = len(diarized_segments)
+            seg_count = len(merged_segments)
         else:
             # diarized_json が得られない場合は従来の簡易分割へフォールバック
             chunks = split_transcript_text(text)
