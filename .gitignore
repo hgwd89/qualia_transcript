@@ -35,5 +35,6 @@ Thumbs.db
 
 # ローカル一時ログ
 *.log
+logs/*.log
 flask_out.txt
 flask_err.txt
