@@ -19,6 +19,8 @@ from models.setting import AppSetting
 
 _model_cache: dict = {}
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？\?])")
+_SOFT_BREAK_CHARS = ["。", "？", "?", "！", "、", ",", " "]
 
 
 def _sanitize_error_message(message: str) -> str:
@@ -60,6 +62,115 @@ def _get_model(model_name: str) -> WhisperModel:
     return _model_cache[model_name]
 
 
+def _split_long_chunk(text: str, max_chars: int) -> list[str]:
+    """
+    長文チャンクを max_chars 以内に緩く分割する。
+    可能な限り句読点や空白で区切り、難しい場合は固定長で切る。
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    remain = text
+    while len(remain) > max_chars:
+        window = remain[:max_chars]
+
+        cut = -1
+        for marker in _SOFT_BREAK_CHARS:
+            pos = window.rfind(marker)
+            cut = max(cut, pos + 1 if pos >= 0 else -1)
+
+        # あまりに先頭寄りでしか切れない場合は固定長で分割
+        if cut < int(max_chars * 0.5):
+            cut = max_chars
+
+        piece = remain[:cut].strip()
+        if piece:
+            chunks.append(piece)
+        remain = remain[cut:].strip()
+
+    if remain:
+        chunks.append(remain)
+    return chunks
+
+
+def split_transcript_text(text: str, min_chars: int = 3, max_chars: int = 120) -> list[str]:
+    """
+    OpenAI transcription の全文を簡易的に複数セグメントへ分割する。
+    - 区切り: 改行 / 。 / ？ / ? / ！
+    - 短すぎる断片は前後と結合
+    - 長すぎる断片は max_chars を目安に再分割
+    """
+    normalized = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.strip():
+        return []
+
+    # 1) 改行 + 文末記号で一次分割
+    raw_chunks: list[str] = []
+    for line in normalized.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        for part in _SENTENCE_SPLIT_RE.split(line):
+            part = part.strip()
+            if part:
+                raw_chunks.append(part)
+
+    if not raw_chunks:
+        return []
+
+    # 2) 短すぎる断片を前後へ結合
+    merged: list[str] = []
+    for part in raw_chunks:
+        if len(part) < min_chars:
+            if merged:
+                merged[-1] = f"{merged[-1]}{part}"
+            else:
+                merged.append(part)
+            continue
+
+        if merged and len(merged[-1]) < min_chars:
+            merged[-1] = f"{merged[-1]}{part}"
+        else:
+            merged.append(part)
+
+    # 末尾が短すぎる場合は直前に結合
+    if len(merged) >= 2 and len(merged[-1]) < min_chars:
+        merged[-2] = f"{merged[-2]}{merged[-1]}"
+        merged.pop()
+
+    # 3) 長すぎる断片を分割
+    final_chunks: list[str] = []
+    for chunk in merged:
+        final_chunks.extend(_split_long_chunk(chunk, max_chars=max_chars))
+
+    return [c.strip() for c in final_chunks if c and c.strip()]
+
+
+def _estimate_segment_times(chunks: list[str], duration_sec: float | None) -> list[tuple[float | None, float | None]]:
+    """
+    タイムスタンプが得られない OpenAI transcription 向けに、
+    文字量比例で概算 start/end を付与する。
+    """
+    if not chunks:
+        return []
+    if not duration_sec or duration_sec <= 0:
+        return [(None, None) for _ in chunks]
+
+    total_chars = sum(max(len(c), 1) for c in chunks)
+    cursor = 0.0
+    out: list[tuple[float, float]] = []
+    for i, chunk in enumerate(chunks):
+        if i == len(chunks) - 1:
+            end = duration_sec
+        else:
+            ratio = max(len(chunk), 1) / total_chars
+            end = min(duration_sec, cursor + duration_sec * ratio)
+        out.append((round(cursor, 3), round(end, 3)))
+        cursor = end
+    return out
+
+
 def run_transcription(transcription_id: int) -> dict:
     """
     設定された provider に応じて文字起こしを実行するディスパッチャ。
@@ -80,7 +191,7 @@ def run_transcription(transcription_id: int) -> dict:
 def run_openai_transcription(transcription_id: int) -> dict:
     """
     OpenAI transcription API で文字起こしし、Segment を保存する。
-    まずは全文1セグメント保存を採用する。
+    返却全文を簡易分割して複数Segment保存する。
     """
     tr = Transcription.query.get(transcription_id)
     if not tr:
@@ -111,17 +222,24 @@ def run_openai_transcription(transcription_id: int) -> dict:
 
         interview = media.interview
         seq = Segment.query.filter_by(interview_id=interview.id).count()
+        chunks = split_transcript_text(text)
+        if not chunks:
+            raise RuntimeError("OpenAI transcription split resulted in empty segments")
 
-        db.session.add(Segment(
-            transcription_id=transcription_id,
-            interview_id=interview.id,
-            speaker_label="SPEAKER_00",
-            speaker_role="unknown",
-            start_sec=0.0,
-            end_sec=media.duration_sec,
-            text=text,
-            seq=seq,
-        ))
+        timings = _estimate_segment_times(chunks, media.duration_sec)
+        for idx, chunk in enumerate(chunks):
+            start_sec, end_sec = timings[idx]
+            db.session.add(Segment(
+                transcription_id=transcription_id,
+                interview_id=interview.id,
+                speaker_label="SPEAKER_00",
+                speaker_role="respondent",
+                start_sec=start_sec,
+                end_sec=end_sec,
+                text=chunk,
+                seq=seq,
+            ))
+            seq += 1
 
         word_count = len(text.split())
         tr.status = "done"
@@ -130,7 +248,7 @@ def run_openai_transcription(transcription_id: int) -> dict:
         interview.status = "transcribed"
         db.session.commit()
 
-        return {"segment_count": 1, "word_count": word_count}
+        return {"segment_count": len(chunks), "word_count": word_count}
 
     except Exception as e:
         tr.status = "error"
