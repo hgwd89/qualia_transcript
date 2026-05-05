@@ -204,10 +204,36 @@ _SUMMARY_SCHEMA = {
                     "theme": {"type": "string"},
                     "summary": {"type": "string"},
                     "evidence_quote": {"type": "string"},
+                    "evidence_source_segment_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                    "source_segment_quotes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "evidence_quote_mode": {
+                        "type": "string",
+                        "enum": [
+                            "exact_segment_quote",
+                            "normalized_fragment_quote",
+                            "ai_generated_summary_quote",
+                        ],
+                    },
                     "implication": {"type": "string"},
                     "caution": {"type": "string"},
                 },
-                "required": ["cluster_id", "theme", "summary", "evidence_quote", "implication", "caution"],
+                "required": [
+                    "cluster_id",
+                    "theme",
+                    "summary",
+                    "evidence_quote",
+                    "evidence_source_segment_ids",
+                    "source_segment_quotes",
+                    "evidence_quote_mode",
+                    "implication",
+                    "caution",
+                ],
                 "additionalProperties": False,
             },
         },
@@ -224,7 +250,13 @@ def summarize_clusters_with_ai(clusters: list[dict[str, Any]]) -> dict[str, Any]
         "因果関係を断定せず、『寄与している』『影響している』等の断定的因果表現は避けてください。"
         "根拠発話が少ない場合は示唆を限定的に書き、caution に不確実性を明示してください。"
         "代表発話にない行動・動機・効果を推測しないでください。"
-        "各クラスタで evidence_quote を1つ必ず示し、ASR誤認識の可能性があれば caution に書いてください。"
+        "evidence_quote は必ず与えられた source_segment_quotes から完全一致で1つ選んでください。"
+        "引用を言い換えたり新規作成してはいけません。"
+        "evidence_source_segment_ids には引用元IDを入れてください。"
+        "evidence_quote_mode は exact_segment_quote または normalized_fragment_quote を選んでください。"
+        "ASR誤認識の可能性があれば caution に書いてください。"
+        "市場全体や他者一般への波及（認知度向上・使用率向上など）を推測しないでください。"
+        "implication は『この参加者において示唆されること』に限定してください。"
     )
     user = (
         "以下は respondent 発話のクラスタ代表切片です。"
@@ -267,6 +299,13 @@ def run_semantic_cluster_analysis(
     labels = cluster_embeddings(embeddings)
     cluster_counter = Counter(labels)
     reps = select_representative_fragments(fragments, embeddings, labels, per_cluster=4)
+    # トレース補強: source_segment_id -> 元Segment.text
+    source_id_to_quote: dict[int, str] = {}
+    for fr in fragments:
+        for sid, quote in zip(fr.get("source_segment_ids") or [], fr.get("source_segment_quotes") or []):
+            if sid is None:
+                continue
+            source_id_to_quote[int(sid)] = quote
 
     clusters: list[dict[str, Any]] = []
     eligible_clusters: list[dict[str, Any]] = []
@@ -281,6 +320,12 @@ def run_semantic_cluster_analysis(
             "cluster_id": int(cid),
             "count": int(cluster_counter[cid]),
             "representative_fragments": rep_frags,
+            "representative_source_segment_quotes": list(dict.fromkeys([
+                source_id_to_quote.get(int(sid), "")
+                for rf in rep_frags
+                for sid in (rf.get("source_segment_ids") or [])
+                if sid is not None and source_id_to_quote.get(int(sid), "")
+            ])),
             "eligible_for_summary": eligible,
             "ineligible_reason": ineligible_reason,
             "eligibility_stats": eligibility_stats,
@@ -290,6 +335,28 @@ def run_semantic_cluster_analysis(
             eligible_clusters.append(cluster_item)
         elif ineligible_reason:
             excluded_cluster_reasons[ineligible_reason] += 1
+
+    cluster_source_quotes_map: dict[int, list[tuple[int, str]]] = {}
+    for c in clusters:
+        pairs: list[tuple[int, str]] = []
+        for rf in c.get("representative_fragments") or []:
+            for sid in (rf.get("source_segment_ids") or []):
+                if sid is None:
+                    continue
+                sid_i = int(sid)
+                q = source_id_to_quote.get(sid_i, "")
+                if q:
+                    pairs.append((sid_i, q))
+        # dedupe keep order
+        seen = set()
+        deduped = []
+        for sid, q in pairs:
+            key = (sid, q)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((sid, q))
+        cluster_source_quotes_map[int(c["cluster_id"])] = deduped
 
     summary_api_call_count = 0
     cluster_summaries = None
@@ -302,6 +369,46 @@ def run_semantic_cluster_analysis(
             overall_summary = ai_out.get("overall_summary")
             cluster_summaries = ai_out.get("cluster_summaries")
             if isinstance(cluster_summaries, list):
+                normalized_summaries = []
+                for item in cluster_summaries:
+                    if not isinstance(item, dict):
+                        continue
+                    cid = int(item.get("cluster_id", -1))
+                    candidates = cluster_source_quotes_map.get(cid, [])
+                    ids = [int(x) for x in (item.get("evidence_source_segment_ids") or []) if str(x).isdigit()]
+                    ev = (item.get("evidence_quote") or "").strip()
+
+                    if not ids and ev:
+                        # evidence_quote が候補引用に含まれる/部分一致する場合はそのsidを採用
+                        matched = [(sid, q) for sid, q in candidates if (ev == q or ev in q or q in ev)]
+                        if matched:
+                            ids = [matched[0][0]]
+                    if not ids and candidates:
+                        ids = [candidates[0][0]]
+
+                    src_quotes = [
+                        source_id_to_quote.get(sid, "")
+                        for sid in ids
+                        if source_id_to_quote.get(sid, "")
+                    ]
+                    mode = item.get("evidence_quote_mode") or "ai_generated_summary_quote"
+                    ev = item.get("evidence_quote") or ""
+                    # 元Segment完全一致引用を優先。なければ mode を補正。
+                    if src_quotes:
+                        if ev not in src_quotes:
+                            ev = src_quotes[0]
+                            mode = "exact_segment_quote"
+                        elif mode == "ai_generated_summary_quote":
+                            mode = "exact_segment_quote"
+                    else:
+                        mode = "ai_generated_summary_quote"
+
+                    item["evidence_quote"] = ev
+                    item["evidence_source_segment_ids"] = ids
+                    item["source_segment_quotes"] = src_quotes
+                    item["evidence_quote_mode"] = mode
+                    normalized_summaries.append(item)
+                cluster_summaries = normalized_summaries
                 evidence_quotes = [x.get("evidence_quote", "") for x in cluster_summaries if isinstance(x, dict)]
         else:
             overall_summary = "要約対象クラスタがありません。"
@@ -322,6 +429,12 @@ def run_semantic_cluster_analysis(
         "cluster_summaries": cluster_summaries,
         "overall_summary": overall_summary,
         "source_segment_ids": sorted({sid for f in fragments for sid in (f.get("source_segment_ids") or [])}),
+        "source_segment_quotes": list(dict.fromkeys([
+            q
+            for f in fragments
+            for q in (f.get("source_segment_quotes") or [])
+            if q
+        ])),
         "evidence_quotes": evidence_quotes,
         "models": {
             "embedding_model": EMBEDDING_MODEL,

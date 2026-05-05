@@ -59,6 +59,7 @@ def collect_candidate_segments(interview_id: int) -> list[dict[str, Any]]:
         out.append({
             "text": (s.text or "").strip(),
             "source_segment_ids": [s.id],
+            "source_segment_quotes": [(s.text or "").strip()],
             "start_sec": s.start_sec,
             "end_sec": s.end_sec,
             "speaker_label": s.speaker_label,
@@ -133,6 +134,7 @@ def merge_short_fragments(
         if should_merge:
             prev["text"] = f"{prev_text}{cur_text}"
             prev["source_segment_ids"] = list(dict.fromkeys((prev.get("source_segment_ids") or []) + (fr.get("source_segment_ids") or [])))
+            prev["source_segment_quotes"] = list(dict.fromkeys((prev.get("source_segment_quotes") or []) + (fr.get("source_segment_quotes") or [])))
             prev["end_sec"] = fr.get("end_sec")
         else:
             out.append(dict(fr))
