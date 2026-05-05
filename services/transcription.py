@@ -492,11 +492,13 @@ def run_openai_transcription(transcription_id: int) -> dict:
         req_kwargs = {
             "model": model_name,
             "language": tr.language or "ja",
-            "prompt": _OPENAI_TRANSCRIBE_VERBATIM_PROMPT,
         }
         if _is_diarize_model(model_name):
             req_kwargs["response_format"] = "diarized_json"
             req_kwargs["chunking_strategy"] = "auto"
+        else:
+            # diarizeモデルは prompt 非対応のため、通常モデル時のみ付与する
+            req_kwargs["prompt"] = _OPENAI_TRANSCRIBE_VERBATIM_PROMPT
 
         with open(full_path, "rb") as audio_file:
             resp = client.audio.transcriptions.create(
