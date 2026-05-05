@@ -99,6 +99,11 @@ powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
 
 - 逐語本文は変更せず、`/interviews/<id>` 画面でセグメントごとに「候補を照合」を押すと補足候補を表示します。
 - 表示例: `（この商品と思われる: ...）`
+- 商品候補補足を使うと、発話から抽出された商品候補語（キーワード）が楽天APIへ送信されます。
+- 発言本文そのものは上書きしません（逐語本文は別扱いのまま保持します）。
+- 補足は「この商品と思われる」という推定情報であり、逐語本文と同一扱いにはしません。
+- `rakuten_application_id` / `rakuten_access_key` は秘匿情報として扱ってください。
+- `rakuten_affiliate_id` は比較的秘匿度が低いIDですが、運用上は公開前提でない限り設定画面・ログで不用意に共有しない方針を推奨します。
 - 設定画面で以下を設定してください。
   - `product_hint_provider`: `rakuten` または `none`
   - `rakuten_application_id`

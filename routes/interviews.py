@@ -102,6 +102,11 @@ def segment_product_hint(interview_id, segment_id):
             "hints": hints,
             "inline_hint": inline_hint,
         })
-    except Exception as e:
+    except Exception:
         # UI利用時の検索失敗は致命にしない
-        return jsonify({"ok": False, "segment_id": seg.id, "hints": [], "error": str(e)}), 200
+        return jsonify({
+            "ok": False,
+            "segment_id": seg.id,
+            "hints": [],
+            "error": "商品候補の取得に失敗しました",
+        }), 200
