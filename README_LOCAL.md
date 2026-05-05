@@ -80,6 +80,17 @@ python tests/smoke_flags.py
 powershell -ExecutionPolicy Bypass -File scripts/check_flags.ps1
 ```
 
+## Speaker Assignment Smoke Check（外部APIなし・可逆DB更新あり）
+
+- `speaker_assignments` の作成/重複upsert防止/復元を確認します。
+- 外部APIは呼びません。
+- 実行中に `speaker_assignments` を一時更新しますが、テスト終了時に元状態へ復元します。
+
+```powershell
+python tests/smoke_speaker_assignments.py
+powershell -ExecutionPolicy Bypass -File scripts/check_speaker_assignments.ps1
+```
+
 ## Analysis Smoke Check（有料API）
 
 - Analysis Smoke Check は OpenAI API を1回呼びます。必要時のみ実行してください。

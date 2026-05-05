@@ -106,6 +106,11 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 - They perform reversible DB writes (create/delete/restore flags), so they are not fully read-only.
 - Keep them out of default safe checks; run only when needed.
 
+`scripts/check_speaker_assignments.ps1` / `tests/smoke_speaker_assignments.py` are speaker-assignment checks.
+- OpenAI/Rakuten/Whisper APIs must not be called.
+- They perform reversible DB writes (upsert/restore speaker assignments).
+- Keep them out of default safe checks; run only when needed.
+
 `scripts/check_all.ps1` is a runner.
 - Default: safe check only.
 - Paid checks run only when explicit flags are provided.
