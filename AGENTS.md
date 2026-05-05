@@ -106,6 +106,11 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 - Paid checks run only when explicit flags are provided.
 - Stop at first failed check.
 
+`scripts/run_semantic_analysis.py` / `services/semantic_analysis.py` are semantic analysis tools.
+- Do not modify `Segment.text` or raw transcript snapshots.
+- Use `--dry-run --no-ai` first when validating clustering behavior.
+- Run with `--save` only when the user explicitly requests persistence.
+
 ## Do not run
 
 - full `compileall`

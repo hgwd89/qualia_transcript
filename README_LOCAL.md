@@ -144,3 +144,16 @@ powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllPaid
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_outputs.ps1
 ```
+
+## Semantic Cluster Analysis CLI
+
+- Flask UIに組み込む前の単体実行CLIです。
+- respondent発話を対象に、embedding + クラスタリングで自然発生テーマを抽出します。
+- `--no-ai` を付けると、OpenAI要約を呼ばずクラスタ結果のみ確認できます。
+
+```powershell
+python scripts/run_semantic_analysis.py --interview-id 10 --dry-run --max-segments 50 --no-ai
+python scripts/run_semantic_analysis.py --interview-id 10 --save
+```
+
+- 逐語本文（`Segment.text`）と `outputs/raw_transcripts` は変更しません。
