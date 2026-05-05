@@ -9,7 +9,7 @@ import config
 from models import db
 from models.project import Project
 from models.participant import Participant
-from models.interview_flow import InterviewFlow
+from models.interview_flow import InterviewFlow, InterviewFlowQuestion
 from models.interview import Interview, MediaFile, Transcription
 from models.segment import Segment, UtteranceMapping
 from models.segment_flag import SegmentFlag
@@ -24,6 +24,19 @@ FLAG_TYPES = ("favorite", "quote", "exclude", "needs_review")
 
 def _allowed(filename):
     return os.path.splitext(filename.lower())[1] in ALLOWED
+
+
+def _latest_mapping_for_segment(seg: Segment):
+    if not seg.utterance_mappings:
+        return None
+    return sorted(seg.utterance_mappings, key=lambda m: m.id or 0, reverse=True)[0]
+
+
+def _is_unclassified_segment(seg: Segment, mapping=None) -> bool:
+    mapping = mapping or _latest_mapping_for_segment(seg)
+    if mapping is None:
+        return True
+    return bool(mapping.is_unclassified or mapping.question_id is None)
 
 
 @bp.route("/projects/<int:project_id>/interviews/new", methods=["GET", "POST"])
@@ -81,6 +94,13 @@ def detail(interview_id):
         seg.id: [f.flag_type for f in seg.segment_flags]
         for seg in interview.segments
     }
+    unclassified_count = 0
+    for seg in interview.segments:
+        if seg.speaker_role != "respondent":
+            continue
+        if _is_unclassified_segment(seg):
+            unclassified_count += 1
+
     semantic_analysis = (
         AIAnalysis.query
         .filter_by(interview_id=interview.id, analysis_type="semantic_clusters")
@@ -98,9 +118,128 @@ def detail(interview_id):
                            project=interview.project,
                            segment_flag_map=segment_flag_map,
                            flag_types=FLAG_TYPES,
+                           unclassified_count=unclassified_count,
                            semantic_analysis=semantic_analysis,
                            semantic_payload=semantic_payload,
                            semantic_error=semantic_error)
+
+
+@bp.route("/interviews/<int:interview_id>/unclassified")
+def unclassified_review(interview_id):
+    interview = Interview.query.get_or_404(interview_id)
+    segment_flag_map = {
+        seg.id: [f.flag_type for f in seg.segment_flags]
+        for seg in interview.segments
+    }
+    questions = []
+    if interview.flow_id:
+        questions = (
+            InterviewFlowQuestion.query
+            .join(InterviewFlowQuestion.section)
+            .filter_by(flow_id=interview.flow_id)
+            .order_by(InterviewFlowQuestion.seq.asc())
+            .all()
+        )
+
+    review_rows = []
+    excluded_rows = []
+    respondent_segments = (
+        Segment.query
+        .filter_by(interview_id=interview.id, speaker_role="respondent")
+        .order_by(Segment.seq.asc())
+        .all()
+    )
+
+    for seg in respondent_segments:
+        latest_mapping = _latest_mapping_for_segment(seg)
+        if not _is_unclassified_segment(seg, latest_mapping):
+            continue
+        flags = segment_flag_map.get(seg.id, [])
+        row = {
+            "segment": seg,
+            "flags": flags,
+            "mapping": latest_mapping,
+        }
+        if "exclude" in flags:
+            excluded_rows.append(row)
+        else:
+            review_rows.append(row)
+
+    return render_template(
+        "interviews/unclassified_review.html",
+        interview=interview,
+        project=interview.project,
+        questions=questions,
+        review_rows=review_rows,
+        excluded_rows=excluded_rows,
+        segment_flag_map=segment_flag_map,
+        flag_types=FLAG_TYPES,
+    )
+
+
+@bp.route("/api/interviews/<int:interview_id>/segments/<int:segment_id>/mapping", methods=["POST"])
+def upsert_segment_mapping(interview_id, segment_id):
+    interview = Interview.query.get_or_404(interview_id)
+    seg = Segment.query.get_or_404(segment_id)
+    if seg.interview_id != interview.id:
+        return jsonify({"ok": False, "error": "segment does not belong to interview"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    raw_question_id = data.get("question_id")
+    notes = (data.get("notes") or "").strip() or None
+    mapped_by = "human"
+
+    question_id = None
+    if raw_question_id not in (None, "", "null"):
+        try:
+            question_id = int(raw_question_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid question_id"}), 400
+
+        if not interview.flow_id:
+            return jsonify({"ok": False, "error": "interview flow is not set"}), 400
+
+        question = (
+            InterviewFlowQuestion.query
+            .join(InterviewFlowQuestion.section)
+            .filter(InterviewFlowQuestion.id == question_id)
+            .filter_by(flow_id=interview.flow_id)
+            .first()
+        )
+        if not question:
+            return jsonify({"ok": False, "error": "question does not belong to interview flow"}), 400
+
+    mappings = (
+        UtteranceMapping.query
+        .filter_by(segment_id=seg.id)
+        .order_by(UtteranceMapping.id.asc())
+        .all()
+    )
+    primary = mappings[0] if mappings else None
+    if primary is None:
+        primary = UtteranceMapping(segment_id=seg.id)
+        db.session.add(primary)
+        mappings = [primary]
+
+    for extra in mappings[1:]:
+        db.session.delete(extra)
+
+    primary.question_id = question_id
+    primary.mapped_by = mapped_by
+    primary.confidence = 1.0
+    primary.is_unclassified = question_id is None
+    primary.notes = notes or ("manual_unclassified" if question_id is None else "manual_assign")
+
+    db.session.commit()
+    return jsonify({
+        "ok": True,
+        "segment_id": seg.id,
+        "mapping_id": primary.id,
+        "question_id": primary.question_id,
+        "is_unclassified": primary.is_unclassified,
+        "mapped_by": primary.mapped_by,
+        "confidence": primary.confidence,
+    })
 
 
 @bp.route("/api/segments/<int:segment_id>/flags", methods=["POST"])

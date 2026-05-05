@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% block title %}未分類レビュー | インタビュー #{{ interview.id }}{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a> /
+  <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}" class="hover:underline">インタビュー #{{ interview.id }}</a> /
+  <span class="text-gray-700">未分類レビュー</span>
+</nav>
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-2xl font-bold text-brand-900">未分類レビュー</h1>
+    <p class="text-sm text-gray-500 mt-1">
+      respondent 発話の未分類セグメントを手動で質問へ割り当てます。本文は変更されません。
+    </p>
+  </div>
+  <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}"
+     class="text-sm border border-gray-300 rounded px-3 py-1.5 hover:bg-gray-50">
+    インタビュー詳細へ戻る
+  </a>
+</div>
+
+<div id="status-msg" class="hidden mb-4 p-3 rounded text-sm"></div>
+
+{% if not questions %}
+<div class="bg-orange-50 border border-orange-200 text-orange-700 rounded p-3 mb-4 text-sm">
+  このインタビューには flow が未設定、または質問が存在しません。質問割当はできません。
+</div>
+{% endif %}
+
+<div class="bg-white rounded-lg border border-gray-200 overflow-hidden mb-6">
+  <div class="px-4 py-3 border-b border-gray-100">
+    <h2 class="font-semibold text-brand-900">レビュー対象（{{ review_rows|length }} 件）</h2>
+  </div>
+  {% if review_rows %}
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="px-3 py-2 text-left w-16">ID</th>
+          <th class="px-3 py-2 text-left w-24">時刻</th>
+          <th class="px-3 py-2 text-left w-28">話者</th>
+          <th class="px-3 py-2 text-left">発話</th>
+          <th class="px-3 py-2 text-left w-56">flags</th>
+          <th class="px-3 py-2 text-left w-56">現在の状態</th>
+          <th class="px-3 py-2 text-left w-72">手動割当</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+      {% for row in review_rows %}
+        {% set seg = row.segment %}
+        {% set mapping = row.mapping %}
+        {% set flags = row.flags %}
+        <tr id="segment-{{ seg.id }}" class="hover:bg-gray-50">
+          <td class="px-3 py-2 text-xs text-gray-500">#{{ seg.id }}</td>
+          <td class="px-3 py-2 text-xs text-gray-500 font-mono">
+            {% if seg.start_sec is not none and seg.end_sec is not none %}
+              {{ '%.1f'|format(seg.start_sec) }} - {{ '%.1f'|format(seg.end_sec) }}
+            {% elif seg.start_sec is not none %}
+              {{ '%.1f'|format(seg.start_sec) }} -
+            {% else %}
+              -
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-xs text-gray-600">
+            <div>{{ seg.speaker_label or '-' }}</div>
+            <div class="text-gray-400">{{ seg.speaker_role or '-' }}</div>
+          </td>
+          <td class="px-3 py-2 text-gray-800">{{ seg.text }}</td>
+          <td class="px-3 py-2">
+            <div class="flex flex-wrap gap-1 mb-2 text-[11px]">
+              {% if 'favorite' in flags %}<span class="rounded bg-yellow-100 text-yellow-800 px-1.5 py-0.5">★</span>{% endif %}
+              {% if 'quote' in flags %}<span class="rounded bg-blue-100 text-blue-800 px-1.5 py-0.5">引用</span>{% endif %}
+              {% if 'exclude' in flags %}<span class="rounded bg-red-100 text-red-800 px-1.5 py-0.5">除外</span>{% endif %}
+              {% if 'needs_review' in flags %}<span class="rounded bg-purple-100 text-purple-800 px-1.5 py-0.5">要確認</span>{% endif %}
+              {% if not flags %}<span class="text-gray-400">なし</span>{% endif %}
+            </div>
+            <div class="flex flex-wrap gap-1">
+              {% for ft in flag_types %}
+                {% set is_on = ft in flags %}
+                <button type="button"
+                        data-active="{{ '1' if is_on else '0' }}"
+                        onclick="toggleSegmentFlag({{ seg.id }}, '{{ ft }}', this)"
+                        class="text-xs rounded border px-2 py-1 {{ 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">
+                  {{ ft }}
+                </button>
+              {% endfor %}
+            </div>
+          </td>
+          <td class="px-3 py-2 text-xs text-gray-600">
+            {% if mapping %}
+              {% if mapping.is_unclassified or not mapping.question %}
+                <div class="text-orange-600 font-medium">未分類</div>
+              {% else %}
+                <div class="font-mono">{{ mapping.question.question_code }}</div>
+                <div>{{ mapping.question.question_text }}</div>
+              {% endif %}
+              <div class="text-gray-400 mt-1">confidence: {{ '%.2f'|format(mapping.confidence or 0.0) }}</div>
+            {% else %}
+              <div class="text-orange-600 font-medium">未分類（mapping未作成）</div>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2">
+            <select id="question-{{ seg.id }}" class="w-full text-xs border border-gray-300 rounded px-2 py-1 mb-2">
+              <option value="">-- 質問を選択 --</option>
+              {% for q in questions %}
+              <option value="{{ q.id }}"
+                {% if mapping and mapping.question_id == q.id and not mapping.is_unclassified %}selected{% endif %}>
+                {{ q.question_code or ('Q' ~ q.id) }}: {{ q.question_text }}
+              </option>
+              {% endfor %}
+            </select>
+            <div class="flex flex-wrap gap-1">
+              <button type="button"
+                      onclick="assignQuestion({{ seg.id }})"
+                      class="text-xs bg-brand-500 text-white rounded px-2 py-1 hover:bg-brand-700">
+                質問へ割当
+              </button>
+              <button type="button"
+                      onclick="setUnclassified({{ seg.id }})"
+                      class="text-xs border border-gray-300 rounded px-2 py-1 hover:bg-gray-50">
+                未分類へ戻す
+              </button>
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="p-6 text-sm text-gray-500">レビュー対象の未分類発話はありません。</div>
+  {% endif %}
+</div>
+
+{% if excluded_rows %}
+<div class="bg-white rounded-lg border border-red-200 overflow-hidden">
+  <div class="px-4 py-3 border-b border-red-100 bg-red-50">
+    <h2 class="font-semibold text-red-800">除外flag付き（{{ excluded_rows|length }} 件）</h2>
+  </div>
+  <div class="p-4 space-y-3">
+    {% for row in excluded_rows %}
+      <div class="text-sm text-gray-700">
+        <a href="#segment-{{ row.segment.id }}" class="font-mono text-brand-600 hover:underline">segment-{{ row.segment.id }}</a>
+        <span class="ml-2">{{ row.segment.text }}</span>
+      </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<script>
+const interviewId = {{ interview.id }};
+
+function showMsg(text, type='info'){
+  const el = document.getElementById('status-msg');
+  el.className = `mb-4 p-3 rounded text-sm flash-${type}`;
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+function setFlagButtonStyle(btn, flagType, active){
+  btn.dataset.active = active ? '1' : '0';
+  const onMap = {
+    favorite: 'bg-yellow-100 border-yellow-300 text-yellow-800',
+    quote: 'bg-blue-100 border-blue-300 text-blue-800',
+    exclude: 'bg-red-100 border-red-300 text-red-800',
+    needs_review: 'bg-purple-100 border-purple-300 text-purple-800',
+  };
+  const off = 'border-gray-300 text-gray-600 hover:bg-gray-50';
+  btn.className = `text-xs rounded border px-2 py-1 ${active ? onMap[flagType] : off}`;
+}
+
+document.querySelectorAll('button[data-active]').forEach((btn) => {
+  const ft = btn.getAttribute('onclick').match(/'([^']+)'/)[1];
+  setFlagButtonStyle(btn, ft, btn.dataset.active === '1');
+});
+
+async function toggleSegmentFlag(segId, flagType, btn){
+  const active = btn.dataset.active === '1';
+  try {
+    if(active){
+      const r = await fetch(`/api/segments/${segId}/flags/${flagType}`, {method: 'DELETE'});
+      const data = await r.json();
+      if(data.ok){
+        setFlagButtonStyle(btn, flagType, false);
+        showMsg(`flag解除: segment-${segId} ${flagType}`, 'success');
+      } else {
+        showMsg(data.error || 'flag解除に失敗しました', 'error');
+      }
+    } else {
+      const r = await fetch(`/api/segments/${segId}/flags`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({flag_type: flagType}),
+      });
+      const data = await r.json();
+      if(data.ok){
+        setFlagButtonStyle(btn, flagType, true);
+        showMsg(`flag設定: segment-${segId} ${flagType}`, 'success');
+      } else {
+        showMsg(data.error || 'flag設定に失敗しました', 'error');
+      }
+    }
+  } catch (e){
+    showMsg('flag更新に失敗しました', 'error');
+  }
+}
+
+async function assignQuestion(segId){
+  const sel = document.getElementById(`question-${segId}`);
+  const questionId = sel ? sel.value : '';
+  if(!questionId){
+    showMsg('質問を選択してください', 'error');
+    return;
+  }
+  try {
+    const r = await fetch(`/api/interviews/${interviewId}/segments/${segId}/mapping`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question_id: questionId}),
+    });
+    const data = await r.json();
+    if(data.ok){
+      showMsg(`segment-${segId} を質問に割り当てました`, 'success');
+      setTimeout(() => location.reload(), 600);
+    } else {
+      showMsg(data.error || '割当に失敗しました', 'error');
+    }
+  } catch (e){
+    showMsg('割当に失敗しました', 'error');
+  }
+}
+
+async function setUnclassified(segId){
+  try {
+    const r = await fetch(`/api/interviews/${interviewId}/segments/${segId}/mapping`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({question_id: null}),
+    });
+    const data = await r.json();
+    if(data.ok){
+      showMsg(`segment-${segId} を未分類に戻しました`, 'success');
+      setTimeout(() => location.reload(), 600);
+    } else {
+      showMsg(data.error || '未分類への更新に失敗しました', 'error');
+    }
+  } catch (e){
+    showMsg('未分類への更新に失敗しました', 'error');
+  }
+}
+</script>
+{% endblock %}

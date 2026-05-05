@@ -85,12 +85,18 @@
 <!-- 発言録 -->
 <div class="flex items-center justify-between mb-3">
   <h2 class="text-lg font-semibold text-brand-900">発言セグメント（{{ interview.segments|length }} 件）</h2>
-  {% if interview.segments %}
-  <button onclick="genVerbatim()"
-          class="text-sm text-brand-500 border border-brand-500 rounded px-3 py-1.5 hover:bg-brand-50 transition">
-    発言録.docx を生成
-  </button>
-  {% endif %}
+  <div class="flex items-center gap-2">
+    <a href="{{ url_for('interviews.unclassified_review', interview_id=interview.id) }}"
+       class="text-sm text-amber-700 border border-amber-300 rounded px-3 py-1.5 hover:bg-amber-50 transition">
+      未分類レビュー（{{ unclassified_count }}）
+    </a>
+    {% if interview.segments %}
+    <button onclick="genVerbatim()"
+            class="text-sm text-brand-500 border border-brand-500 rounded px-3 py-1.5 hover:bg-brand-50 transition">
+      発言録.docx を生成
+    </button>
+    {% endif %}
+  </div>
 </div>
 
 {% if interview.segments %}
