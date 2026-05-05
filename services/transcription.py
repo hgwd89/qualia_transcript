@@ -8,9 +8,13 @@ import os
 import re
 import json
 import hashlib
+import tempfile
+import wave
+import contextlib
 from datetime import datetime, timezone
 from typing import Any
 
+import av
 from faster_whisper import WhisperModel
 from openai import OpenAI
 
@@ -44,6 +48,9 @@ _OPENAI_TRANSCRIBE_VERBATIM_PROMPT = (
     "フィラー（えー、あの、えっと、うーん等）、言い淀み、言い直し、重複、崩れた語尾を省略・要約・正規化しないでください。"
     "聞き取れない箇所は [inaudible] を使ってください。"
 )
+_LONG_AUDIO_THRESHOLD_SEC = 360.0
+_OPENAI_CHUNK_DURATION_SEC = 300.0
+_OPENAI_CHUNK_OVERLAP_SEC = 0.0
 
 
 def _sanitize_error_message(message: str) -> str:
@@ -85,6 +92,8 @@ def _write_raw_transcript_snapshot(
     model_name: str,
     language: str,
     text: str,
+    snapshot_tag: str = "",
+    extra_meta: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """
     API返却の全文テキストを不変スナップショットとして保存する。
@@ -104,8 +113,13 @@ def _write_raw_transcript_snapshot(
         "sha256": digest,
         "text": text or "",
     }
+    if snapshot_tag:
+        payload["snapshot_tag"] = snapshot_tag
+    if extra_meta:
+        payload["meta"] = extra_meta
 
-    base_name = f"transcription_{transcription_id}_{ts}"
+    tag = f"_{snapshot_tag}" if snapshot_tag else ""
+    base_name = f"transcription_{transcription_id}{tag}_{ts}"
     suffix = 0
     while True:
         file_name = f"{base_name}.json" if suffix == 0 else f"{base_name}_{suffix}.json"
@@ -119,6 +133,46 @@ def _write_raw_transcript_snapshot(
             suffix += 1
 
 
+def _write_chunk_manifest(
+    transcription_id: int,
+    interview_id: int,
+    model_name: str,
+    language: str,
+    chunk_duration_sec: float,
+    overlap_sec: float,
+    chunks: list[dict[str, Any]],
+    status: str,
+    error_message: str = "",
+) -> str:
+    raw_dir = os.path.join(config.OUTPUT_DIR, "raw_transcripts")
+    os.makedirs(raw_dir, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    payload = {
+        "transcription_id": transcription_id,
+        "interview_id": interview_id,
+        "model": model_name,
+        "language": language,
+        "chunk_duration_sec": chunk_duration_sec,
+        "overlap_sec": overlap_sec,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "error_message": error_message or "",
+        "chunks": chunks,
+    }
+
+    base_name = f"transcription_{transcription_id}_manifest_{ts}"
+    suffix = 0
+    while True:
+        file_name = f"{base_name}.json" if suffix == 0 else f"{base_name}_{suffix}.json"
+        abs_path = os.path.join(raw_dir, file_name)
+        try:
+            with open(abs_path, "x", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            return os.path.relpath(abs_path, config.OUTPUT_DIR)
+        except FileExistsError:
+            suffix += 1
+
+
 def _get_model(model_name: str) -> WhisperModel:
     if model_name not in _model_cache:
         _model_cache[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
@@ -127,6 +181,117 @@ def _get_model(model_name: str) -> WhisperModel:
 
 def _is_diarize_model(model_name: str) -> bool:
     return (model_name or "").strip() in _DIARIZE_MODEL_NAMES
+
+
+def _probe_media_duration_sec(full_path: str) -> float | None:
+    try:
+        with av.open(full_path) as c:
+            if c.duration is not None:
+                return float(c.duration / av.time_base)
+            astream = next((s for s in c.streams if s.type == "audio"), None)
+            if astream and astream.duration is not None and astream.time_base is not None:
+                return float(astream.duration * astream.time_base)
+    except Exception:
+        return None
+    return None
+
+
+def _read_wav_duration_sec(wav_path: str) -> float:
+    with contextlib.closing(wave.open(wav_path, "rb")) as wf:
+        frames = wf.getnframes()
+        rate = wf.getframerate()
+        if not rate:
+            return 0.0
+        return frames / float(rate)
+
+
+def _export_audio_chunk_wav(
+    src_path: str,
+    out_path: str,
+    start_sec: float,
+    duration_sec: float,
+) -> float:
+    end_sec = start_sec + duration_sec
+    in_container = av.open(src_path)
+    audio_stream = next((s for s in in_container.streams if s.type == "audio"), None)
+    if audio_stream is None:
+        in_container.close()
+        raise RuntimeError("audio stream not found")
+
+    out_container = av.open(out_path, mode="w")
+    out_stream = out_container.add_stream("pcm_s16le", rate=16000)
+    out_stream.layout = "mono"
+    out_stream.sample_rate = 16000
+    resampler = av.audio.resampler.AudioResampler(format="s16", layout="mono", rate=16000)
+
+    frame_written = 0
+    for frame in in_container.decode(audio=0):
+        if frame.pts is None or frame.time_base is None:
+            continue
+        t0 = float(frame.pts * frame.time_base)
+        t1 = t0 + float(frame.samples) / float(frame.sample_rate)
+        if t1 <= start_sec:
+            continue
+        if t0 >= end_sec:
+            break
+
+        use = frame
+        if t0 < start_sec or t1 > end_sec:
+            s = max(0.0, start_sec - t0)
+            e = max(0.0, t1 - end_sec)
+            start_sample = int(round(s * frame.sample_rate))
+            end_trim = int(round(e * frame.sample_rate))
+            arr = frame.to_ndarray()
+            total = arr.shape[1]
+            left = min(max(start_sample, 0), total)
+            right = max(total - max(end_trim, 0), left)
+            arr = arr[:, left:right]
+            if arr.size == 0:
+                continue
+            use = av.AudioFrame.from_ndarray(arr, format=frame.format.name, layout=frame.layout.name)
+            use.sample_rate = frame.sample_rate
+
+        for r in resampler.resample(use):
+            for packet in out_stream.encode(r):
+                out_container.mux(packet)
+                frame_written += 1
+
+    for packet in out_stream.encode(None):
+        out_container.mux(packet)
+    out_container.close()
+    in_container.close()
+
+    if frame_written == 0:
+        raise RuntimeError("no audio frames exported for chunk")
+
+    return _read_wav_duration_sec(out_path)
+
+
+def _extract_response_text(response: Any) -> str:
+    txt = getattr(response, "text", "")
+    if txt:
+        return txt
+    resp_dict = _to_dict(response)
+    return resp_dict.get("text") or ""
+
+
+def _call_openai_transcription(client: OpenAI, audio_path: str, model_name: str, language: str) -> Any:
+    req_kwargs = {
+        "model": model_name,
+        "language": language or "ja",
+    }
+    if _is_diarize_model(model_name):
+        req_kwargs["response_format"] = "diarized_json"
+        req_kwargs["chunking_strategy"] = "auto"
+    else:
+        # diarizeモデルは prompt 非対応のため、通常モデル時のみ付与する
+        req_kwargs["prompt"] = _OPENAI_TRANSCRIBE_VERBATIM_PROMPT
+
+    with open(audio_path, "rb") as audio_file:
+        return client.audio.transcriptions.create(
+            file=audio_file,
+            **req_kwargs,
+        )
 
 
 def _to_dict(value: Any) -> dict:
@@ -487,113 +652,307 @@ def run_openai_transcription(transcription_id: int) -> dict:
         media = tr.media_file
         full_path = os.path.join(config.UPLOAD_DIR, media.stored_path)
         model_name = tr.whisper_model or config.OPENAI_TRANSCRIBE_MODEL
+        interview = media.interview
+        seq = Segment.query.filter_by(interview_id=interview.id).count()
+        language = tr.language or "ja"
+        media_duration = media.duration_sec or _probe_media_duration_sec(full_path) or 0.0
+        use_chunking = media_duration > _LONG_AUDIO_THRESHOLD_SEC
 
         client = _openai_client()
-        req_kwargs = {
-            "model": model_name,
-            "language": tr.language or "ja",
-        }
-        if _is_diarize_model(model_name):
-            req_kwargs["response_format"] = "diarized_json"
-            req_kwargs["chunking_strategy"] = "auto"
-        else:
-            # diarizeモデルは prompt 非対応のため、通常モデル時のみ付与する
-            req_kwargs["prompt"] = _OPENAI_TRANSCRIBE_VERBATIM_PROMPT
 
-        with open(full_path, "rb") as audio_file:
-            resp = client.audio.transcriptions.create(
-                file=audio_file,
-                **req_kwargs,
+        # ── 通常（非チャンク）処理 ────────────────────────────────
+        if not use_chunking:
+            resp = _call_openai_transcription(client, full_path, model_name, language)
+            raw_text = _extract_response_text(resp)
+            text = raw_text.strip()
+            if not text:
+                raise RuntimeError("OpenAI transcription returned empty text")
+
+            raw_snapshot_path, raw_text_sha256 = _write_raw_transcript_snapshot(
+                transcription_id=transcription_id,
+                interview_id=interview.id,
+                model_name=model_name,
+                language=language,
+                text=raw_text,
             )
 
-        raw_text = getattr(resp, "text", "")
-        if not raw_text:
-            resp_dict = _to_dict(resp)
-            raw_text = resp_dict.get("text") or ""
+            diarized_segments: list[dict] = []
+            if _is_diarize_model(model_name):
+                diarized_segments = _parse_diarized_segments(resp)
 
-        text = raw_text.strip()
-        if not text:
-            raise RuntimeError("OpenAI transcription returned empty text")
+            if diarized_segments:
+                speaker_role_map = infer_speaker_roles_from_diarized_segments(diarized_segments)
+                prepared: list[dict] = []
+                for seg in diarized_segments:
+                    label = seg["speaker_label"]
+                    text_part = seg["text"]
+                    role = speaker_role_map.get(label, "unknown")
+                    if role == "unknown":
+                        role = guess_speaker_role(text_part, allow_unknown=True)
+                    prepared.append({
+                        "speaker_label": label,
+                        "speaker_role": role,
+                        "start_sec": seg.get("start_sec"),
+                        "end_sec": seg.get("end_sec"),
+                        "text": text_part,
+                    })
 
-        interview = media.interview
-        raw_snapshot_path, raw_text_sha256 = _write_raw_transcript_snapshot(
+                merged_segments, _ = merge_short_adjacent_segments(prepared)
+                if merged_segments and any(s.get("start_sec") is None or s.get("end_sec") is None for s in merged_segments):
+                    local_timings = _estimate_segment_times(
+                        [s.get("text", "") for s in merged_segments],
+                        media_duration,
+                    )
+                    for i, s in enumerate(merged_segments):
+                        est_start, est_end = local_timings[i]
+                        if s.get("start_sec") is None:
+                            s["start_sec"] = est_start
+                        if s.get("end_sec") is None:
+                            s["end_sec"] = est_end
+
+                for seg in merged_segments:
+                    db.session.add(Segment(
+                        transcription_id=transcription_id,
+                        interview_id=interview.id,
+                        speaker_label=seg["speaker_label"],
+                        speaker_role=seg["speaker_role"],
+                        start_sec=seg.get("start_sec"),
+                        end_sec=seg.get("end_sec"),
+                        text=seg["text"],
+                        seq=seq,
+                    ))
+                    seq += 1
+                seg_count = len(merged_segments)
+            else:
+                chunks = split_transcript_text(text)
+                if not chunks:
+                    raise RuntimeError("OpenAI transcription split resulted in empty segments")
+                timings = _estimate_segment_times(chunks, media_duration)
+                for idx, chunk in enumerate(chunks):
+                    start_sec, end_sec = timings[idx]
+                    db.session.add(Segment(
+                        transcription_id=transcription_id,
+                        interview_id=interview.id,
+                        speaker_label="SPEAKER_00",
+                        speaker_role=guess_speaker_role(chunk),
+                        start_sec=start_sec,
+                        end_sec=end_sec,
+                        text=chunk,
+                        seq=seq,
+                    ))
+                    seq += 1
+                seg_count = len(chunks)
+
+            word_count = len(text.split())
+            tr.status = "done"
+            tr.word_count = word_count
+            tr.completed_at = datetime.now(timezone.utc)
+            interview.status = "transcribed"
+            db.session.commit()
+            return {
+                "segment_count": seg_count,
+                "word_count": word_count,
+                "raw_snapshot_path": raw_snapshot_path,
+                "raw_text_sha256": raw_text_sha256,
+                "chunk_count": 1,
+                "api_call_count": 1,
+                "manifest_path": "",
+                "raw_snapshot_files": [raw_snapshot_path],
+            }
+
+        # ── 長尺（チャンク）処理 ────────────────────────────────
+        chunk_duration = _OPENAI_CHUNK_DURATION_SEC
+        overlap = _OPENAI_CHUNK_OVERLAP_SEC
+        step = chunk_duration - overlap
+        if step <= 0:
+            raise RuntimeError("invalid chunk configuration: step must be > 0")
+
+        chunk_records: list[dict[str, Any]] = []
+        raw_snapshot_files: list[str] = []
+        seg_count = 0
+        word_count = 0
+        chunk_count = 0
+        api_call_count = 0
+        manifest_path = ""
+
+        with tempfile.TemporaryDirectory(prefix=f"qt_chunk_{transcription_id}_") as tmp_dir:
+            offset = 0.0
+            while offset < media_duration:
+                chunk_count += 1
+                chunk_label = f"C{chunk_count:02d}"
+                chunk_tag = f"chunk_{chunk_count:02d}"
+                target_duration = min(chunk_duration, media_duration - offset)
+                chunk_wav = os.path.join(tmp_dir, f"{chunk_tag}.wav")
+
+                actual_chunk_duration = _export_audio_chunk_wav(
+                    src_path=full_path,
+                    out_path=chunk_wav,
+                    start_sec=offset,
+                    duration_sec=target_duration,
+                )
+
+                record = {
+                    "chunk_index": chunk_count,
+                    "chunk_label": chunk_label,
+                    "offset_sec": round(offset, 3),
+                    "duration_sec": round(actual_chunk_duration, 3),
+                    "status": "running",
+                }
+
+                try:
+                    resp = _call_openai_transcription(client, chunk_wav, model_name, language)
+                    api_call_count += 1
+
+                    raw_text = _extract_response_text(resp)
+                    text = raw_text.strip()
+                    if not text:
+                        raise RuntimeError("empty transcription text")
+
+                    raw_snapshot_path, _ = _write_raw_transcript_snapshot(
+                        transcription_id=transcription_id,
+                        interview_id=interview.id,
+                        model_name=model_name,
+                        language=language,
+                        text=raw_text,
+                        snapshot_tag=chunk_tag,
+                        extra_meta={
+                            "chunk_index": chunk_count,
+                            "offset_sec": round(offset, 3),
+                            "duration_sec": round(actual_chunk_duration, 3),
+                        },
+                    )
+                    raw_snapshot_files.append(raw_snapshot_path)
+                    record["raw_snapshot_path"] = raw_snapshot_path
+                    record["word_count"] = len(text.split())
+
+                    diarized_segments: list[dict] = []
+                    if _is_diarize_model(model_name):
+                        diarized_segments = _parse_diarized_segments(resp)
+
+                    chunk_seg_count = 0
+                    if diarized_segments:
+                        speaker_role_map = infer_speaker_roles_from_diarized_segments(diarized_segments)
+                        prepared: list[dict] = []
+                        for seg in diarized_segments:
+                            raw_label = seg["speaker_label"]
+                            text_part = seg["text"]
+                            role = speaker_role_map.get(raw_label, "unknown")
+                            if role == "unknown":
+                                role = guess_speaker_role(text_part, allow_unknown=True)
+                            prepared.append({
+                                "speaker_label": f"{chunk_label}_{raw_label}",
+                                "speaker_role": role,
+                                "start_sec": seg.get("start_sec"),
+                                "end_sec": seg.get("end_sec"),
+                                "text": text_part,
+                            })
+
+                        merged_segments, _ = merge_short_adjacent_segments(prepared)
+                        if merged_segments and any(s.get("start_sec") is None or s.get("end_sec") is None for s in merged_segments):
+                            local_timings = _estimate_segment_times(
+                                [s.get("text", "") for s in merged_segments],
+                                actual_chunk_duration,
+                            )
+                            for i, s in enumerate(merged_segments):
+                                est_start, est_end = local_timings[i]
+                                if s.get("start_sec") is None:
+                                    s["start_sec"] = est_start
+                                if s.get("end_sec") is None:
+                                    s["end_sec"] = est_end
+
+                        for seg in merged_segments:
+                            start_local = seg.get("start_sec")
+                            end_local = seg.get("end_sec")
+                            start_global = (offset + start_local) if start_local is not None else None
+                            end_global = (offset + end_local) if end_local is not None else None
+                            db.session.add(Segment(
+                                transcription_id=transcription_id,
+                                interview_id=interview.id,
+                                speaker_label=seg["speaker_label"],
+                                speaker_role=seg["speaker_role"],
+                                start_sec=start_global,
+                                end_sec=end_global,
+                                text=seg["text"],
+                                seq=seq,
+                            ))
+                            seq += 1
+                            chunk_seg_count += 1
+                    else:
+                        chunks = split_transcript_text(text)
+                        if not chunks:
+                            raise RuntimeError("OpenAI transcription split resulted in empty segments")
+                        timings = _estimate_segment_times(chunks, actual_chunk_duration)
+                        for idx, chunk in enumerate(chunks):
+                            start_sec, end_sec = timings[idx]
+                            start_global = (offset + start_sec) if start_sec is not None else None
+                            end_global = (offset + end_sec) if end_sec is not None else None
+                            db.session.add(Segment(
+                                transcription_id=transcription_id,
+                                interview_id=interview.id,
+                                speaker_label=f"{chunk_label}_SPEAKER_00",
+                                speaker_role=guess_speaker_role(chunk),
+                                start_sec=start_global,
+                                end_sec=end_global,
+                                text=chunk,
+                                seq=seq,
+                            ))
+                            seq += 1
+                            chunk_seg_count += 1
+
+                    record["segment_count"] = chunk_seg_count
+                    record["status"] = "done"
+                    chunk_records.append(record)
+                    seg_count += chunk_seg_count
+                    word_count += int(record["word_count"])
+                    db.session.commit()
+
+                except Exception as chunk_error:
+                    err_type = type(chunk_error).__name__
+                    err_message = _sanitize_error_message(str(chunk_error))
+                    record["status"] = "error"
+                    record["error_type"] = err_type
+                    record["error_message"] = err_message
+                    chunk_records.append(record)
+                    manifest_path = _write_chunk_manifest(
+                        transcription_id=transcription_id,
+                        interview_id=interview.id,
+                        model_name=model_name,
+                        language=language,
+                        chunk_duration_sec=chunk_duration,
+                        overlap_sec=overlap,
+                        chunks=chunk_records,
+                        status="error",
+                        error_message=f"chunk={chunk_count} offset={round(offset,3)} {err_type}: {err_message}",
+                    )
+                    raise RuntimeError(
+                        f"chunk={chunk_count} offset={round(offset,3)} {err_type}: {err_message}"
+                    )
+
+                offset += step
+
+        manifest_path = _write_chunk_manifest(
             transcription_id=transcription_id,
             interview_id=interview.id,
             model_name=model_name,
-            language=tr.language or "ja",
-            text=raw_text,
+            language=language,
+            chunk_duration_sec=chunk_duration,
+            overlap_sec=overlap,
+            chunks=chunk_records,
+            status="done",
         )
-        seq = Segment.query.filter_by(interview_id=interview.id).count()
 
-        diarized_segments: list[dict] = []
-        if _is_diarize_model(model_name):
-            diarized_segments = _parse_diarized_segments(resp)
-
-        if diarized_segments:
-            speaker_role_map = infer_speaker_roles_from_diarized_segments(diarized_segments)
-            prepared: list[dict] = []
-            for seg in diarized_segments:
-                label = seg["speaker_label"]
-                text_part = seg["text"]
-                role = speaker_role_map.get(label, "unknown")
-                if role == "unknown":
-                    role = guess_speaker_role(text_part, allow_unknown=True)
-                prepared.append({
-                    "speaker_label": label,
-                    "speaker_role": role,
-                    "start_sec": seg.get("start_sec"),
-                    "end_sec": seg.get("end_sec"),
-                    "text": text_part,
-                })
-
-            merged_segments, _ = merge_short_adjacent_segments(prepared)
-            for seg in merged_segments:
-                db.session.add(Segment(
-                    transcription_id=transcription_id,
-                    interview_id=interview.id,
-                    speaker_label=seg["speaker_label"],
-                    speaker_role=seg["speaker_role"],
-                    start_sec=seg.get("start_sec"),
-                    end_sec=seg.get("end_sec"),
-                    text=seg["text"],
-                    seq=seq,
-                ))
-                seq += 1
-            seg_count = len(merged_segments)
-        else:
-            # diarized_json が得られない場合は従来の簡易分割へフォールバック
-            chunks = split_transcript_text(text)
-            if not chunks:
-                raise RuntimeError("OpenAI transcription split resulted in empty segments")
-
-            timings = _estimate_segment_times(chunks, media.duration_sec)
-            for idx, chunk in enumerate(chunks):
-                start_sec, end_sec = timings[idx]
-                db.session.add(Segment(
-                    transcription_id=transcription_id,
-                    interview_id=interview.id,
-                    speaker_label="SPEAKER_00",
-                    speaker_role=guess_speaker_role(chunk),
-                    start_sec=start_sec,
-                    end_sec=end_sec,
-                    text=chunk,
-                    seq=seq,
-                ))
-                seq += 1
-            seg_count = len(chunks)
-
-        word_count = len(text.split())
         tr.status = "done"
         tr.word_count = word_count
         tr.completed_at = datetime.now(timezone.utc)
         interview.status = "transcribed"
         db.session.commit()
-
         return {
             "segment_count": seg_count,
             "word_count": word_count,
-            "raw_snapshot_path": raw_snapshot_path,
-            "raw_text_sha256": raw_text_sha256,
+            "chunk_count": chunk_count,
+            "api_call_count": api_call_count,
+            "raw_snapshot_files": raw_snapshot_files,
+            "manifest_path": manifest_path,
         }
 
     except Exception as e:
