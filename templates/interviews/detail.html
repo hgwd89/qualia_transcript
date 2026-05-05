@@ -132,6 +132,12 @@
         </td>
         <td class="px-4 py-2 text-gray-800">
           <div>{{ seg.text }}</div>
+          <div class="mt-1 flex flex-wrap gap-1">
+            {% if 'favorite' in seg_flags %}<span class="text-[11px] rounded bg-yellow-100 text-yellow-800 px-1.5 py-0.5">★ favorite</span>{% endif %}
+            {% if 'quote' in seg_flags %}<span class="text-[11px] rounded bg-blue-100 text-blue-800 px-1.5 py-0.5">引用 quote</span>{% endif %}
+            {% if 'exclude' in seg_flags %}<span class="text-[11px] rounded bg-red-100 text-red-800 px-1.5 py-0.5">除外 exclude</span>{% endif %}
+            {% if 'needs_review' in seg_flags %}<span class="text-[11px] rounded bg-purple-100 text-purple-800 px-1.5 py-0.5">要確認 needs_review</span>{% endif %}
+          </div>
           <div id="product-hint-{{ seg.id }}" class="text-xs text-gray-500 mt-1"></div>
         </td>
         <td class="px-4 py-2">
@@ -244,6 +250,12 @@
                 <a href="#segment-{{ sid }}" class="text-xs border border-brand-300 text-brand-700 rounded px-2 py-1 hover:bg-brand-50">
                   segment-{{ sid }}
                 </a>
+                <div class="flex flex-wrap gap-1 text-[11px]">
+                  {% if 'favorite' in sid_flags %}<span class="rounded bg-yellow-100 text-yellow-800 px-1.5 py-0.5">★</span>{% endif %}
+                  {% if 'quote' in sid_flags %}<span class="rounded bg-blue-100 text-blue-800 px-1.5 py-0.5">引用</span>{% endif %}
+                  {% if 'exclude' in sid_flags %}<span class="rounded bg-red-100 text-red-800 px-1.5 py-0.5">除外</span>{% endif %}
+                  {% if 'needs_review' in sid_flags %}<span class="rounded bg-purple-100 text-purple-800 px-1.5 py-0.5">要確認</span>{% endif %}
+                </div>
                 <div class="flex flex-wrap gap-1">
                   <button type="button"
                           data-active="{{ '1' if 'favorite' in sid_flags else '0' }}"
