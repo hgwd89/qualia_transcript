@@ -9,6 +9,7 @@ from models.participant    import Participant, ParticipantAttribute
 from models.interview_flow import InterviewFlow, InterviewFlowSection, InterviewFlowQuestion
 from models.interview      import Interview, MediaFile, Transcription
 from models.segment        import Segment, UtteranceMapping
+from models.segment_flag   import SegmentFlag
 from models.analysis       import AIAnalysis
 from models.generated_file import GeneratedFile
 from models.setting        import AppSetting
@@ -32,6 +33,24 @@ def _run_migrations(app):
     from sqlalchemy import text, inspect as sa_inspect
     with app.app_context():
         inspector = sa_inspect(db.engine)
+        existing_tables = set(inspector.get_table_names())
+        if "segment_flags" not in existing_tables:
+            db.session.execute(text("""
+                CREATE TABLE IF NOT EXISTS segment_flags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    segment_id INTEGER NOT NULL,
+                    flag_type TEXT NOT NULL,
+                    note TEXT,
+                    created_at DATETIME,
+                    updated_at DATETIME,
+                    FOREIGN KEY(segment_id) REFERENCES segments(id)
+                )
+            """))
+            db.session.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_segment_flag_type ON segment_flags(segment_id, flag_type)"
+            ))
+            db.session.commit()
+            inspector = sa_inspect(db.engine)
         existing_cols = {c["name"] for c in inspector.get_columns("projects")}
         pending = [
             ("method", "ALTER TABLE projects ADD COLUMN method TEXT DEFAULT 'DI'"),

@@ -23,6 +23,8 @@ class Segment(db.Model):
     participant       = db.relationship("Participant",      back_populates="segments")
     utterance_mappings = db.relationship("UtteranceMapping", back_populates="segment",
                                          cascade="all, delete-orphan")
+    segment_flags      = db.relationship("SegmentFlag",      back_populates="segment",
+                                         cascade="all, delete-orphan")
 
     def to_dict(self):
         return {

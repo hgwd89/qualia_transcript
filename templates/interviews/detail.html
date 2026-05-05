@@ -103,12 +103,14 @@
           <th class="px-4 py-3 text-left w-20">時刻</th>
           <th class="px-4 py-3 text-left w-32">話者</th>
           <th class="px-4 py-3 text-left">発言テキスト</th>
+          <th class="px-4 py-3 text-left w-64">Flag</th>
           <th class="px-4 py-3 text-left w-40">商品候補補足</th>
           <th class="px-4 py-3 text-left w-40">マッピング先</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-100">
       {% for seg in interview.segments %}
+      {% set seg_flags = segment_flag_map.get(seg.id, []) %}
       <tr id="segment-{{ seg.id }}" class="hover:bg-gray-50 {% if seg.speaker_role == 'interviewer' %}opacity-60{% endif %}">
         <td class="px-4 py-2 text-xs text-gray-400 font-mono whitespace-nowrap">
           {% if seg.start_sec is not none %}
@@ -131,6 +133,26 @@
         <td class="px-4 py-2 text-gray-800">
           <div>{{ seg.text }}</div>
           <div id="product-hint-{{ seg.id }}" class="text-xs text-gray-500 mt-1"></div>
+        </td>
+        <td class="px-4 py-2">
+          <div class="flex flex-wrap gap-1" id="flags-{{ seg.id }}">
+            <button type="button"
+                    data-active="{{ '1' if 'favorite' in seg_flags else '0' }}"
+                    onclick="toggleSegmentFlag({{ seg.id }}, 'favorite', this)"
+                    class="text-xs rounded border px-2 py-1 {{ 'bg-yellow-100 border-yellow-300 text-yellow-800' if 'favorite' in seg_flags else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">★ favorite</button>
+            <button type="button"
+                    data-active="{{ '1' if 'quote' in seg_flags else '0' }}"
+                    onclick="toggleSegmentFlag({{ seg.id }}, 'quote', this)"
+                    class="text-xs rounded border px-2 py-1 {{ 'bg-blue-100 border-blue-300 text-blue-800' if 'quote' in seg_flags else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">引用 quote</button>
+            <button type="button"
+                    data-active="{{ '1' if 'exclude' in seg_flags else '0' }}"
+                    onclick="toggleSegmentFlag({{ seg.id }}, 'exclude', this)"
+                    class="text-xs rounded border px-2 py-1 {{ 'bg-red-100 border-red-300 text-red-800' if 'exclude' in seg_flags else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">除外 exclude</button>
+            <button type="button"
+                    data-active="{{ '1' if 'needs_review' in seg_flags else '0' }}"
+                    onclick="toggleSegmentFlag({{ seg.id }}, 'needs_review', this)"
+                    class="text-xs rounded border px-2 py-1 {{ 'bg-purple-100 border-purple-300 text-purple-800' if 'needs_review' in seg_flags else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">要確認 needs_review</button>
+          </div>
         </td>
         <td class="px-4 py-2">
           <button onclick="fetchProductHint({{ seg.id }})"
@@ -215,11 +237,32 @@
       <div class="mt-3">
         <p class="text-sm font-medium text-gray-700 mb-1">evidence_source_segment_ids</p>
         {% if cs.evidence_source_segment_ids %}
-          <div class="flex flex-wrap gap-2">
+          <div class="space-y-2">
             {% for sid in cs.evidence_source_segment_ids %}
-              <a href="#segment-{{ sid }}" class="text-xs border border-brand-300 text-brand-700 rounded px-2 py-1 hover:bg-brand-50">
-                segment-{{ sid }}
-              </a>
+              {% set sid_flags = segment_flag_map.get(sid, []) %}
+              <div class="flex flex-wrap items-center gap-2">
+                <a href="#segment-{{ sid }}" class="text-xs border border-brand-300 text-brand-700 rounded px-2 py-1 hover:bg-brand-50">
+                  segment-{{ sid }}
+                </a>
+                <div class="flex flex-wrap gap-1">
+                  <button type="button"
+                          data-active="{{ '1' if 'favorite' in sid_flags else '0' }}"
+                          onclick="toggleSegmentFlag({{ sid }}, 'favorite', this)"
+                          class="text-xs rounded border px-2 py-1 {{ 'bg-yellow-100 border-yellow-300 text-yellow-800' if 'favorite' in sid_flags else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">★</button>
+                  <button type="button"
+                          data-active="{{ '1' if 'quote' in sid_flags else '0' }}"
+                          onclick="toggleSegmentFlag({{ sid }}, 'quote', this)"
+                          class="text-xs rounded border px-2 py-1 {{ 'bg-blue-100 border-blue-300 text-blue-800' if 'quote' in sid_flags else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">引用</button>
+                  <button type="button"
+                          data-active="{{ '1' if 'exclude' in sid_flags else '0' }}"
+                          onclick="toggleSegmentFlag({{ sid }}, 'exclude', this)"
+                          class="text-xs rounded border px-2 py-1 {{ 'bg-red-100 border-red-300 text-red-800' if 'exclude' in sid_flags else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">除外</button>
+                  <button type="button"
+                          data-active="{{ '1' if 'needs_review' in sid_flags else '0' }}"
+                          onclick="toggleSegmentFlag({{ sid }}, 'needs_review', this)"
+                          class="text-xs rounded border px-2 py-1 {{ 'bg-purple-100 border-purple-300 text-purple-800' if 'needs_review' in sid_flags else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">要確認</button>
+                </div>
+              </div>
             {% endfor %}
           </div>
         {% else %}
@@ -343,6 +386,49 @@ async function fetchProductHint(segId){
     }
   } catch (e){
     el.textContent = '照合失敗';
+  }
+}
+
+function setFlagButtonStyle(btn, flagType, active){
+  btn.dataset.active = active ? '1' : '0';
+  const onMap = {
+    favorite: 'bg-yellow-100 border-yellow-300 text-yellow-800',
+    quote: 'bg-blue-100 border-blue-300 text-blue-800',
+    exclude: 'bg-red-100 border-red-300 text-red-800',
+    needs_review: 'bg-purple-100 border-purple-300 text-purple-800',
+  };
+  const off = 'border-gray-300 text-gray-600 hover:bg-gray-50';
+  btn.className = `text-xs rounded border px-2 py-1 ${active ? onMap[flagType] : off}`;
+}
+
+async function toggleSegmentFlag(segId, flagType, btn){
+  const active = btn.dataset.active === '1';
+  try {
+    if(active){
+      const r = await fetch(`/api/segments/${segId}/flags/${flagType}`, {method: 'DELETE'});
+      const data = await r.json();
+      if(data.ok){
+        setFlagButtonStyle(btn, flagType, false);
+        showMsg(`flag解除: segment-${segId} ${flagType}`, 'success');
+      } else {
+        showMsg(data.error || 'flag解除に失敗しました', 'error');
+      }
+    } else {
+      const r = await fetch(`/api/segments/${segId}/flags`, {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({flag_type: flagType}),
+      });
+      const data = await r.json();
+      if(data.ok){
+        setFlagButtonStyle(btn, flagType, true);
+        showMsg(`flag設定: segment-${segId} ${flagType}`, 'success');
+      } else {
+        showMsg(data.error || 'flag設定に失敗しました', 'error');
+      }
+    }
+  } catch (e){
+    showMsg('flag更新に失敗しました', 'error');
   }
 }
 </script>

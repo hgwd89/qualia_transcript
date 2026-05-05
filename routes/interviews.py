@@ -12,12 +12,14 @@ from models.participant import Participant
 from models.interview_flow import InterviewFlow
 from models.interview import Interview, MediaFile, Transcription
 from models.segment import Segment, UtteranceMapping
+from models.segment_flag import SegmentFlag
 from models.analysis import AIAnalysis
 from services.product_hint import lookup_product_hints, render_inline_hint
 
 bp = Blueprint("interviews", __name__)
 
 ALLOWED = config.ALLOWED_AUDIO_EXTENSIONS
+FLAG_TYPES = ("favorite", "quote", "exclude", "needs_review")
 
 
 def _allowed(filename):
@@ -75,6 +77,10 @@ def new(project_id):
 @bp.route("/interviews/<int:interview_id>")
 def detail(interview_id):
     interview = Interview.query.get_or_404(interview_id)
+    segment_flag_map = {
+        seg.id: [f.flag_type for f in seg.segment_flags]
+        for seg in interview.segments
+    }
     semantic_analysis = (
         AIAnalysis.query
         .filter_by(interview_id=interview.id, analysis_type="semantic_clusters")
@@ -90,9 +96,54 @@ def detail(interview_id):
             semantic_error = "意味クラスタ分析データの読み込みに失敗しました。"
     return render_template("interviews/detail.html", interview=interview,
                            project=interview.project,
+                           segment_flag_map=segment_flag_map,
+                           flag_types=FLAG_TYPES,
                            semantic_analysis=semantic_analysis,
                            semantic_payload=semantic_payload,
                            semantic_error=semantic_error)
+
+
+@bp.route("/api/segments/<int:segment_id>/flags", methods=["POST"])
+def create_segment_flag(segment_id):
+    seg = Segment.query.get_or_404(segment_id)
+    data = request.get_json(force=True, silent=True) or {}
+    flag_type = (data.get("flag_type") or "").strip()
+    note = (data.get("note") or "").strip() or None
+    if flag_type not in FLAG_TYPES:
+        return jsonify({"ok": False, "error": "invalid flag_type"}), 400
+
+    flag = SegmentFlag.query.filter_by(segment_id=seg.id, flag_type=flag_type).first()
+    created = False
+    if not flag:
+        flag = SegmentFlag(segment_id=seg.id, flag_type=flag_type, note=note)
+        db.session.add(flag)
+        created = True
+    else:
+        flag.note = note
+        flag.updated_at = datetime.now(timezone.utc)
+    db.session.commit()
+    return jsonify({
+        "ok": True,
+        "segment_id": seg.id,
+        "flag_type": flag_type,
+        "created": created,
+        "flag": flag.to_dict(),
+    })
+
+
+@bp.route("/api/segments/<int:segment_id>/flags/<string:flag_type>", methods=["DELETE"])
+def delete_segment_flag(segment_id, flag_type):
+    Segment.query.get_or_404(segment_id)
+    if flag_type not in FLAG_TYPES:
+        return jsonify({"ok": False, "error": "invalid flag_type"}), 400
+
+    flag = SegmentFlag.query.filter_by(segment_id=segment_id, flag_type=flag_type).first()
+    if not flag:
+        return jsonify({"ok": True, "deleted": 0, "segment_id": segment_id, "flag_type": flag_type})
+
+    db.session.delete(flag)
+    db.session.commit()
+    return jsonify({"ok": True, "deleted": 1, "segment_id": segment_id, "flag_type": flag_type})
 
 
 @bp.route("/interviews/<int:interview_id>/segments/<int:segment_id>/role", methods=["POST"])
