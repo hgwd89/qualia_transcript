@@ -16,6 +16,35 @@ from models.segment import Segment
 _BACKCHANNEL_RE = re.compile(r"^(はい|ええ|うん|なるほど|わかりました|ありがとうございます|そうですね|そうですか)[。！!？?、,\s]*$")
 _CONFIRM_RE = re.compile(r"聞こえ|確認|大丈夫|ですか|ますか|\?|？")
 _SPLIT_RE = re.compile(r"(?<=[。！？\?])\s+|[\r\n]+")
+_QUESTION_END_RE = re.compile(r"[？?]\s*$")
+_MODERATOR_LIKE_PHRASES = (
+    "ですか",
+    "ますか",
+    "教えてください",
+    "確認",
+    "わかりました",
+    "なるほど",
+    "はいはい",
+    "この季節でも",
+    "どうするんでしたっけ",
+    "取ってきてもいいですか",
+)
+
+
+def _is_question_like(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _QUESTION_END_RE.search(t):
+        return True
+    return ("ですか" in t) or ("ますか" in t)
+
+
+def _is_moderator_like_probe(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    return any(p in t for p in _MODERATOR_LIKE_PHRASES)
 
 
 def collect_candidate_segments(interview_id: int) -> list[dict[str, Any]]:
@@ -58,6 +87,13 @@ def filter_noise_fragments(
             continue
         if _BACKCHANNEL_RE.search(text):
             excluded["backchannel"] += 1
+            continue
+        # speaker_role が respondent でも、文面が質問・確認・進行発話なら除外する
+        if _is_question_like(text):
+            excluded["question_like"] += 1
+            continue
+        if _is_moderator_like_probe(text):
+            excluded["confirm_or_probe"] += 1
             continue
         if _CONFIRM_RE.search(text) and len(text) < 32:
             excluded["confirm_or_probe"] += 1
@@ -138,11 +174,14 @@ def split_long_fragments(
 def build_analysis_fragments(
     segments: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    filtered, excluded = filter_noise_fragments(segments)
+    # 先に分割してから除外することで、長文内の確認発話だけを落としやすくする
+    pre_split = split_long_fragments(segments)
+    filtered, excluded = filter_noise_fragments(pre_split)
     merged = merge_short_fragments(filtered)
     split = split_long_fragments(merged)
     return split, {
         "candidate_count": len(segments),
+        "pre_split_count": len(pre_split),
         "filtered_count": len(filtered),
         "fragment_count": len(split),
         "excluded_counts": excluded,

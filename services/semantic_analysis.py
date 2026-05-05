@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -27,6 +28,19 @@ from services.fragmentation import (
 )
 
 EMBEDDING_MODEL = "text-embedding-3-small"
+_QUESTION_END_RE = re.compile(r"[？?]\s*$")
+_MODERATOR_LIKE_PHRASES = (
+    "ですか",
+    "ますか",
+    "教えてください",
+    "確認",
+    "わかりました",
+    "なるほど",
+    "はいはい",
+    "この季節でも",
+    "どうするんでしたっけ",
+    "取ってきてもいいですか",
+)
 
 
 def _client() -> openai.OpenAI:
@@ -80,6 +94,62 @@ def cluster_embeddings(embeddings: np.ndarray) -> list[int]:
     )
     labels = model.fit_predict(embeddings)
     return [int(x) for x in labels.tolist()]
+
+
+def _is_question_like(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _QUESTION_END_RE.search(t):
+        return True
+    return ("ですか" in t) or ("ますか" in t)
+
+
+def _is_probe_like(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    return any(p in t for p in _MODERATOR_LIKE_PHRASES)
+
+
+def _is_evidence_worthy(text: str) -> bool:
+    t = (text or "").strip()
+    if len(t) < 12:
+        return False
+    if _is_question_like(t):
+        return False
+    if _is_probe_like(t):
+        return False
+    return True
+
+
+def _evaluate_cluster_eligibility(
+    cluster_fragments: list[dict[str, Any]],
+    representative_fragments: list[dict[str, Any]],
+) -> tuple[bool, str | None, dict[str, int]]:
+    total = len(cluster_fragments)
+    question_like = sum(1 for f in cluster_fragments if _is_question_like((f.get("text") or "")))
+    probe_like = sum(1 for f in cluster_fragments if _is_probe_like((f.get("text") or "")))
+    evidence_worthy = sum(1 for f in cluster_fragments if _is_evidence_worthy((f.get("text") or "")))
+    rep_count = len(representative_fragments)
+
+    stats = {
+        "total": total,
+        "question_like": question_like,
+        "probe_like": probe_like,
+        "evidence_worthy": evidence_worthy,
+        "representative_count": rep_count,
+    }
+
+    if total <= 1 and evidence_worthy <= 1:
+        return False, "single_fragment_weak", stats
+    if total > 0 and question_like / total >= 0.5:
+        return False, "question_like_dominant", stats
+    if total > 0 and probe_like / total >= 0.5:
+        return False, "probe_dominant", stats
+    if evidence_worthy == 0:
+        return False, "no_evidence_respondent", stats
+    return True, None, stats
 
 
 def select_representative_fragments(
@@ -151,6 +221,9 @@ def summarize_clusters_with_ai(clusters: list[dict[str, Any]]) -> dict[str, Any]
     system = (
         "あなたは定性調査の分析者です。"
         "出力は日本語。根拠にない推測や過度な一般化を禁止します。"
+        "因果関係を断定せず、『寄与している』『影響している』等の断定的因果表現は避けてください。"
+        "根拠発話が少ない場合は示唆を限定的に書き、caution に不確実性を明示してください。"
+        "代表発話にない行動・動機・効果を推測しないでください。"
         "各クラスタで evidence_quote を1つ必ず示し、ASR誤認識の可能性があれば caution に書いてください。"
     )
     user = (
@@ -196,24 +269,43 @@ def run_semantic_cluster_analysis(
     reps = select_representative_fragments(fragments, embeddings, labels, per_cluster=4)
 
     clusters: list[dict[str, Any]] = []
+    eligible_clusters: list[dict[str, Any]] = []
+    excluded_cluster_reasons = Counter()
     for cid in sorted(cluster_counter.keys()):
-        clusters.append({
+        idxs = [i for i, lab in enumerate(labels) if lab == cid]
+        cluster_fragments = [fragments[i] for i in idxs]
+        rep_frags = reps.get(cid, [])
+        eligible, ineligible_reason, eligibility_stats = _evaluate_cluster_eligibility(cluster_fragments, rep_frags)
+
+        cluster_item = {
             "cluster_id": int(cid),
             "count": int(cluster_counter[cid]),
-            "representative_fragments": reps.get(cid, []),
-        })
+            "representative_fragments": rep_frags,
+            "eligible_for_summary": eligible,
+            "ineligible_reason": ineligible_reason,
+            "eligibility_stats": eligibility_stats,
+        }
+        clusters.append(cluster_item)
+        if eligible:
+            eligible_clusters.append(cluster_item)
+        elif ineligible_reason:
+            excluded_cluster_reasons[ineligible_reason] += 1
 
     summary_api_call_count = 0
     cluster_summaries = None
     overall_summary = None
     evidence_quotes: list[str] = []
     if not no_ai:
-        ai_out = summarize_clusters_with_ai(clusters)
-        summary_api_call_count = 1
-        overall_summary = ai_out.get("overall_summary")
-        cluster_summaries = ai_out.get("cluster_summaries")
-        if isinstance(cluster_summaries, list):
-            evidence_quotes = [x.get("evidence_quote", "") for x in cluster_summaries if isinstance(x, dict)]
+        if eligible_clusters:
+            ai_out = summarize_clusters_with_ai(eligible_clusters)
+            summary_api_call_count = 1
+            overall_summary = ai_out.get("overall_summary")
+            cluster_summaries = ai_out.get("cluster_summaries")
+            if isinstance(cluster_summaries, list):
+                evidence_quotes = [x.get("evidence_quote", "") for x in cluster_summaries if isinstance(x, dict)]
+        else:
+            overall_summary = "要約対象クラスタがありません。"
+            cluster_summaries = []
 
     result_payload = {
         "interview_id": interview_id,
@@ -223,6 +315,9 @@ def run_semantic_cluster_analysis(
         "excluded_counts": frag_stats.get("excluded_counts", {}),
         "fragments": fragments,
         "clusters": clusters,
+        "eligible_cluster_count": len(eligible_clusters),
+        "excluded_cluster_count": len(clusters) - len(eligible_clusters),
+        "excluded_cluster_reasons": dict(excluded_cluster_reasons),
         "representative_quotes": reps,
         "cluster_summaries": cluster_summaries,
         "overall_summary": overall_summary,
