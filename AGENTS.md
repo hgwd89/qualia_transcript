@@ -35,6 +35,10 @@ Do not modify these areas during launcher, README, or operations tasks:
 - `uploads/`, `outputs/`, `*.db`, `logs/*.log`, virtual environments, and caches must remain untracked.
 - Do not add uploaded audio/video files to Git.
 - Do not add generated Word, Excel, CSV, transcript, or analysis output files to Git.
+- `outputs/raw_transcripts/*.json` is high-sensitivity generated data (raw API transcript snapshot).
+- Do not add raw transcript snapshots to Git.
+- Do not delete raw transcript snapshots unless the user explicitly requests it.
+- When summarizing or auditing raw transcripts, quote only the minimum necessary excerpts.
 - If logs are needed for debugging, show only relevant non-secret excerpts.
 
 ## Local launcher task rules

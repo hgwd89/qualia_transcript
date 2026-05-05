@@ -95,6 +95,17 @@ powershell -ExecutionPolicy Bypass -File scripts/check_mapping.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
 ```
 
+## raw_transcripts 運用ルール
+
+- `outputs/raw_transcripts/*.json` は OpenAI transcription API 返却原文の不変スナップショットです。
+- 逐語本文の検証用データであり、通常画面で扱う表示本文とは別扱いです。
+- 個人情報・機密発言を含む可能性があるため、機微情報として扱ってください。
+- Git管理しないでください（本リポジトリでは `outputs/` 全体を除外しています）。
+- 外部共有しないでください。
+- 不要になった場合は手動削除してください。
+- 削除前に、DB参照や既存出力との関係を確認してください。
+- 現時点では自動cleanupは行いません。
+
 ## 商品候補補足（楽天API）
 
 - 逐語本文は変更せず、`/interviews/<id>` 画面でセグメントごとに「候補を照合」を押すと補足候補を表示します。
