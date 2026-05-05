@@ -10,6 +10,7 @@ from models.interview_flow import InterviewFlow, InterviewFlowSection, Interview
 from models.interview      import Interview, MediaFile, Transcription
 from models.segment        import Segment, UtteranceMapping
 from models.segment_flag   import SegmentFlag
+from models.speaker_assignment import SpeakerAssignment
 from models.analysis       import AIAnalysis
 from models.generated_file import GeneratedFile
 from models.setting        import AppSetting
@@ -48,6 +49,27 @@ def _run_migrations(app):
             """))
             db.session.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_segment_flag_type ON segment_flags(segment_id, flag_type)"
+            ))
+            db.session.commit()
+            inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+        if "speaker_assignments" not in existing_tables:
+            db.session.execute(text("""
+                CREATE TABLE IF NOT EXISTS speaker_assignments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    interview_id INTEGER NOT NULL,
+                    speaker_label TEXT NOT NULL,
+                    speaker_role TEXT DEFAULT 'unknown',
+                    participant_id INTEGER,
+                    note TEXT,
+                    created_at DATETIME,
+                    updated_at DATETIME,
+                    FOREIGN KEY(interview_id) REFERENCES interviews(id),
+                    FOREIGN KEY(participant_id) REFERENCES participants(id)
+                )
+            """))
+            db.session.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_speaker_assignment_label ON speaker_assignments(interview_id, speaker_label)"
             ))
             db.session.commit()
             inspector = sa_inspect(db.engine)

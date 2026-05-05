@@ -28,6 +28,8 @@ class Interview(db.Model):
                                   cascade="all, delete-orphan")
     generated_files = db.relationship("GeneratedFile", back_populates="interview",
                                       cascade="all, delete-orphan")
+    speaker_assignments = db.relationship("SpeakerAssignment", back_populates="interview",
+                                          cascade="all, delete-orphan")
 
     def to_dict(self):
         return {

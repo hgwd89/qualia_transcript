@@ -13,6 +13,7 @@ from models.interview_flow import InterviewFlow, InterviewFlowQuestion
 from models.interview import Interview, MediaFile, Transcription
 from models.segment import Segment, UtteranceMapping
 from models.segment_flag import SegmentFlag
+from models.speaker_assignment import SpeakerAssignment
 from models.analysis import AIAnalysis
 from services.product_hint import lookup_product_hints, render_inline_hint
 
@@ -20,6 +21,7 @@ bp = Blueprint("interviews", __name__)
 
 ALLOWED = config.ALLOWED_AUDIO_EXTENSIONS
 FLAG_TYPES = ("favorite", "quote", "exclude", "needs_review")
+SPEAKER_ROLES = ("moderator", "respondent", "observer", "unknown")
 
 
 def _allowed(filename):
@@ -90,6 +92,15 @@ def new(project_id):
 @bp.route("/interviews/<int:interview_id>")
 def detail(interview_id):
     interview = Interview.query.get_or_404(interview_id)
+    speaker_assignments = (
+        SpeakerAssignment.query
+        .filter_by(interview_id=interview.id)
+        .all()
+    )
+    speaker_assignment_map = {
+        a.speaker_label: a
+        for a in speaker_assignments
+    }
     segment_flag_map = {
         seg.id: [f.flag_type for f in seg.segment_flags]
         for seg in interview.segments
@@ -118,6 +129,7 @@ def detail(interview_id):
                            project=interview.project,
                            segment_flag_map=segment_flag_map,
                            flag_types=FLAG_TYPES,
+                           speaker_assignment_map=speaker_assignment_map,
                            unclassified_count=unclassified_count,
                            semantic_analysis=semantic_analysis,
                            semantic_payload=semantic_payload,
@@ -175,6 +187,108 @@ def unclassified_review(interview_id):
         segment_flag_map=segment_flag_map,
         flag_types=FLAG_TYPES,
     )
+
+
+@bp.route("/interviews/<int:interview_id>/speakers")
+def speaker_review(interview_id):
+    interview = Interview.query.get_or_404(interview_id)
+    participants = Participant.query.filter_by(project_id=interview.project_id).order_by(Participant.id.asc()).all()
+    assignments = (
+        SpeakerAssignment.query
+        .filter_by(interview_id=interview.id)
+        .all()
+    )
+    assignment_map = {a.speaker_label: a for a in assignments}
+
+    distinct = (
+        db.session.query(Segment.speaker_label)
+        .filter(Segment.interview_id == interview.id)
+        .filter(Segment.speaker_label.isnot(None))
+        .distinct()
+        .all()
+    )
+    labels = sorted([d[0] for d in distinct if d[0]])
+
+    rows = []
+    for label in labels:
+        segs = (
+            Segment.query
+            .filter_by(interview_id=interview.id, speaker_label=label)
+            .order_by(Segment.seq.asc())
+            .all()
+        )
+        assignment = assignment_map.get(label)
+        rows.append({
+            "speaker_label": label,
+            "segment_count": len(segs),
+            "sample_text": (segs[0].text[:120] + "…") if segs and len(segs[0].text) > 120 else (segs[0].text if segs else ""),
+            "assignment": assignment,
+        })
+
+    return render_template(
+        "interviews/speaker_mapping.html",
+        interview=interview,
+        project=interview.project,
+        participants=participants,
+        rows=rows,
+        speaker_roles=SPEAKER_ROLES,
+    )
+
+
+@bp.route("/api/interviews/<int:interview_id>/speakers/<string:speaker_label>", methods=["POST"])
+def upsert_speaker_assignment(interview_id, speaker_label):
+    interview = Interview.query.get_or_404(interview_id)
+    label = (speaker_label or "").strip()
+    if not label:
+        return jsonify({"ok": False, "error": "speaker_label is required"}), 400
+
+    exists = (
+        Segment.query
+        .filter_by(interview_id=interview.id, speaker_label=label)
+        .first()
+    )
+    if not exists:
+        return jsonify({"ok": False, "error": "speaker_label not found in interview"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    speaker_role = (data.get("speaker_role") or "unknown").strip()
+    participant_id = data.get("participant_id")
+    note = (data.get("note") or "").strip() or None
+
+    if speaker_role not in SPEAKER_ROLES:
+        return jsonify({"ok": False, "error": "invalid speaker_role"}), 400
+
+    if participant_id in ("", None):
+        participant_id = None
+    else:
+        try:
+            participant_id = int(participant_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid participant_id"}), 400
+        participant = Participant.query.get(participant_id)
+        if not participant or participant.project_id != interview.project_id:
+            return jsonify({"ok": False, "error": "participant does not belong to project"}), 400
+
+    assignment = SpeakerAssignment.query.filter_by(
+        interview_id=interview.id, speaker_label=label
+    ).first()
+    created = False
+    if not assignment:
+        assignment = SpeakerAssignment(interview_id=interview.id, speaker_label=label)
+        db.session.add(assignment)
+        created = True
+
+    assignment.speaker_role = speaker_role
+    assignment.participant_id = participant_id
+    assignment.note = note
+    assignment.updated_at = datetime.now(timezone.utc)
+    db.session.commit()
+
+    return jsonify({
+        "ok": True,
+        "created": created,
+        "assignment": assignment.to_dict(),
+    })
 
 
 @bp.route("/api/interviews/<int:interview_id>/segments/<int:segment_id>/mapping", methods=["POST"])

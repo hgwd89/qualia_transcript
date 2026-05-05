@@ -86,6 +86,10 @@
 <div class="flex items-center justify-between mb-3">
   <h2 class="text-lg font-semibold text-brand-900">発言セグメント（{{ interview.segments|length }} 件）</h2>
   <div class="flex items-center gap-2">
+    <a href="{{ url_for('interviews.speaker_review', interview_id=interview.id) }}"
+       class="text-sm text-cyan-700 border border-cyan-300 rounded px-3 py-1.5 hover:bg-cyan-50 transition">
+      話者対応
+    </a>
     <a href="{{ url_for('interviews.unclassified_review', interview_id=interview.id) }}"
        class="text-sm text-amber-700 border border-amber-300 rounded px-3 py-1.5 hover:bg-amber-50 transition">
       未分類レビュー（{{ unclassified_count }}）
@@ -117,6 +121,7 @@
       <tbody class="divide-y divide-gray-100">
       {% for seg in interview.segments %}
       {% set seg_flags = segment_flag_map.get(seg.id, []) %}
+      {% set sa = speaker_assignment_map.get(seg.speaker_label) %}
       <tr id="segment-{{ seg.id }}" class="hover:bg-gray-50 {% if seg.speaker_role == 'interviewer' %}opacity-60{% endif %}">
         <td class="px-4 py-2 text-xs text-gray-400 font-mono whitespace-nowrap">
           {% if seg.start_sec is not none %}
@@ -135,6 +140,12 @@
             </option>
             {% endfor %}
           </select>
+          {% if sa %}
+          <div class="mt-1 text-[11px] text-cyan-700">
+            assigned: {{ sa.speaker_role or 'unknown' }}
+            {% if sa.participant %}/ {{ sa.participant.participant_code }}{% endif %}
+          </div>
+          {% endif %}
         </td>
         <td class="px-4 py-2 text-gray-800">
           <div>{{ seg.text }}</div>

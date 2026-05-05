@@ -1,0 +1,127 @@
+{% extends "base.html" %}
+{% block title %}話者対応 | インタビュー #{{ interview.id }}{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a> /
+  <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}" class="hover:underline">インタビュー #{{ interview.id }}</a> /
+  <span class="text-gray-700">話者対応</span>
+</nav>
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-2xl font-bold text-brand-900">話者対応レビュー</h1>
+    <p class="text-sm text-gray-500 mt-1">
+      speaker_label を moderator / respondent / observer / unknown と participant に対応付けます。
+    </p>
+  </div>
+  <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}"
+     class="text-sm border border-gray-300 rounded px-3 py-1.5 hover:bg-gray-50">
+    インタビュー詳細へ戻る
+  </a>
+</div>
+
+<div id="status-msg" class="hidden mb-4 p-3 rounded text-sm"></div>
+
+{% if rows %}
+<div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="px-3 py-2 text-left w-28">speaker_label</th>
+          <th class="px-3 py-2 text-left w-20">件数</th>
+          <th class="px-3 py-2 text-left">サンプル発話</th>
+          <th class="px-3 py-2 text-left w-40">role</th>
+          <th class="px-3 py-2 text-left w-44">participant</th>
+          <th class="px-3 py-2 text-left w-48">note</th>
+          <th class="px-3 py-2 text-left w-24">保存</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+      {% for row in rows %}
+        {% set a = row.assignment %}
+        <tr>
+          <td class="px-3 py-2 font-mono text-xs">{{ row.speaker_label }}</td>
+          <td class="px-3 py-2 text-xs text-gray-500">{{ row.segment_count }}</td>
+          <td class="px-3 py-2 text-gray-700">{{ row.sample_text or '-' }}</td>
+          <td class="px-3 py-2">
+            <select id="role-{{ loop.index0 }}" class="w-full text-xs border border-gray-300 rounded px-2 py-1">
+              {% for r in speaker_roles %}
+              <option value="{{ r }}" {% if a and a.speaker_role == r %}selected{% endif %}>{{ r }}</option>
+              {% endfor %}
+            </select>
+          </td>
+          <td class="px-3 py-2">
+            <select id="participant-{{ loop.index0 }}" class="w-full text-xs border border-gray-300 rounded px-2 py-1">
+              <option value="">-- 未設定 --</option>
+              {% for p in participants %}
+              <option value="{{ p.id }}" {% if a and a.participant_id == p.id %}selected{% endif %}>
+                {{ p.participant_code }}{% if p.display_name %} / {{ p.display_name }}{% endif %}
+              </option>
+              {% endfor %}
+            </select>
+          </td>
+          <td class="px-3 py-2">
+            <input id="note-{{ loop.index0 }}"
+                   type="text"
+                   value="{{ a.note if a else '' }}"
+                   class="w-full text-xs border border-gray-300 rounded px-2 py-1"
+                   placeholder="任意メモ">
+          </td>
+          <td class="px-3 py-2">
+            <button type="button"
+                    onclick="saveAssignment('{{ row.speaker_label }}', {{ loop.index0 }})"
+                    class="text-xs bg-brand-500 text-white rounded px-2 py-1 hover:bg-brand-700">
+              保存
+            </button>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="bg-white rounded-lg border border-gray-200 p-4 text-sm text-gray-500">
+  このインタビューには speaker_label がありません。
+</div>
+{% endif %}
+
+<script>
+const interviewId = {{ interview.id }};
+
+function showMsg(text, type='info'){
+  const el = document.getElementById('status-msg');
+  el.className = `mb-4 p-3 rounded text-sm flash-${type}`;
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+async function saveAssignment(label, idx){
+  const role = document.getElementById(`role-${idx}`).value;
+  const participantId = document.getElementById(`participant-${idx}`).value;
+  const note = document.getElementById(`note-${idx}`).value;
+
+  try {
+    const r = await fetch(`/api/interviews/${interviewId}/speakers/${encodeURIComponent(label)}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        speaker_role: role,
+        participant_id: participantId || null,
+        note: note || null,
+      }),
+    });
+    const data = await r.json();
+    if (data.ok) {
+      showMsg(`保存しました: ${label}`, 'success');
+    } else {
+      showMsg(data.error || `保存失敗: ${label}`, 'error');
+    }
+  } catch (e) {
+    showMsg(`保存失敗: ${label}`, 'error');
+  }
+}
+</script>
+{% endblock %}
