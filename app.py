@@ -36,6 +36,11 @@ def _run_migrations(app):
         pending = [
             ("method", "ALTER TABLE projects ADD COLUMN method TEXT DEFAULT 'DI'"),
             ("status", "ALTER TABLE projects ADD COLUMN status TEXT DEFAULT 'draft'"),
+            ("research_theme", "ALTER TABLE projects ADD COLUMN research_theme TEXT"),
+            ("research_category", "ALTER TABLE projects ADD COLUMN research_category TEXT DEFAULT 'general'"),
+            ("glossary_profile", "ALTER TABLE projects ADD COLUMN glossary_profile TEXT DEFAULT 'general'"),
+            ("deliverable_type", "ALTER TABLE projects ADD COLUMN deliverable_type TEXT DEFAULT 'verbatim_and_sheet'"),
+            ("confidentiality_level", "ALTER TABLE projects ADD COLUMN confidentiality_level TEXT DEFAULT 'standard'"),
         ]
         for col_name, stmt in pending:
             if col_name not in existing_cols:

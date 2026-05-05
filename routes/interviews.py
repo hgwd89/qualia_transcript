@@ -94,7 +94,8 @@ def segment_product_hint(interview_id, segment_id):
         return jsonify({"error": "segment does not belong to interview"}), 400
 
     try:
-        hints = lookup_product_hints(seg.text, max_hints=1)
+        profile = seg.interview.project.glossary_profile if seg.interview and seg.interview.project else None
+        hints = lookup_product_hints(seg.text, max_hints=1, glossary_profile=profile)
         inline_hint = render_inline_hint(hints[0]) if hints else ""
         return jsonify({
             "ok": True,

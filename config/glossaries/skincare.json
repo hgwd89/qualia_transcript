@@ -1,0 +1,30 @@
+{
+  "profile": "skincare",
+  "version": "1.0",
+  "items": [
+    {
+      "canonical": "CICAパック",
+      "display": "CICAパック",
+      "search_keyword": "CICA パック",
+      "aliases": ["鹿パック", "シカパック", "しかパック", "CICAパック", "シカマスク", "CICAマスク"]
+    },
+    {
+      "canonical": "ドクターシーラボ",
+      "display": "ドクターシーラボ",
+      "search_keyword": "ドクターシーラボ",
+      "aliases": ["ドクターCラボ", "Cラボ", "シーラボ", "ドクターシーラボ"]
+    },
+    {
+      "canonical": "無印良品 クリアケア",
+      "display": "無印良品 クリアケア",
+      "search_keyword": "無印良品 クリアケア",
+      "aliases": ["無印のクリアケア", "無印クリアケア", "クリアケア"]
+    },
+    {
+      "canonical": "無印良品 敏感肌用 高保湿",
+      "display": "無印良品 敏感肌用 高保湿",
+      "search_keyword": "無印良品 敏感肌用 高保湿",
+      "aliases": ["高保湿の白乳液", "敏感肌用高保湿", "白乳液"]
+    }
+  ]
+}

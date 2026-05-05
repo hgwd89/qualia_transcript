@@ -150,6 +150,8 @@ powershell -ExecutionPolicy Bypass -File scripts/check_outputs.ps1
 - Flask UIに組み込む前の単体実行CLIです。
 - respondent発話を対象に、embedding + クラスタリングで自然発生テーマを抽出します。
 - `--no-ai` を付けると、OpenAI要約を呼ばずクラスタ結果のみ確認できます。
+- 切片化（fragmentation）は `Segment.text` を変更しない派生処理です。
+- `--dry-run` はDB保存しません。`--save` 指定時のみ `AIAnalysis.analysis_type="semantic_clusters"` を保存します。
 
 ```powershell
 python scripts/run_semantic_analysis.py --interview-id 10 --dry-run --max-segments 50 --no-ai
@@ -157,3 +159,10 @@ python scripts/run_semantic_analysis.py --interview-id 10 --save
 ```
 
 - 逐語本文（`Segment.text`）と `outputs/raw_transcripts` は変更しません。
+
+## ドメイン辞書プロファイル（非破壊補足）
+
+- プロジェクトの調査テーマ/カテゴリ/辞書プロファイルに応じて、商品名候補の表記ゆれ補足を行います。
+- 辞書補足は本文置換ではなく、補足・正規化・検索支援に限定します。
+- 外部API検索時は `normalized_term` / `search_keyword` を優先する場合があります。
+- `Segment.text` と raw transcript は不変です。

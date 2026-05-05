@@ -18,6 +18,7 @@ from urllib.request import urlopen
 
 import config
 from models.setting import AppSetting
+from services.domain_glossary import find_glossary_hints
 
 _RAKUTEN_ENDPOINTS = [
     "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260401",
@@ -36,8 +37,8 @@ def _get_setting(key: str, default: str = "") -> str:
     return (AppSetting.get(key) or default).strip()
 
 
-def _provider() -> str:
-    v = _get_setting("product_hint_provider", config.PRODUCT_HINT_PROVIDER).lower()
+def _provider(provider_override: str | None = None) -> str:
+    v = (provider_override or _get_setting("product_hint_provider", config.PRODUCT_HINT_PROVIDER)).lower()
     return v if v in {"none", "rakuten"} else "rakuten"
 
 
@@ -72,6 +73,46 @@ def _extract_terms(text: str, limit: int = 4) -> list[str]:
         terms.append(t)
         if len(terms) >= limit:
             break
+    return terms
+
+
+def _merge_glossary_and_terms(
+    text: str,
+    glossary_profile: str | None,
+    max_hints: int,
+) -> list[dict[str, Any]]:
+    terms: list[dict[str, Any]] = []
+    seen = set()
+
+    for hint in find_glossary_hints(text, glossary_profile)[:max(1, max_hints * 2)]:
+        key = _norm(hint.get("search_keyword", ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        terms.append({
+            "original_term": hint.get("original_term"),
+            "normalized_term": hint.get("normalized_term"),
+            "display_text": hint.get("display_text"),
+            "search_keyword": hint.get("search_keyword") or hint.get("normalized_term") or hint.get("original_term"),
+            "source": hint.get("source", "domain_glossary"),
+            "confidence": hint.get("confidence", 0.9),
+            "note": hint.get("note", "逐語本文は変更していません"),
+        })
+
+    for t in _extract_terms(text, limit=max(1, max_hints * 3)):
+        key = _norm(t)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        terms.append({
+            "original_term": t,
+            "normalized_term": t,
+            "display_text": f"{t}の可能性",
+            "search_keyword": t,
+            "source": "raw_term",
+            "confidence": 0.6,
+            "note": "逐語本文は変更していません",
+        })
     return terms
 
 
@@ -149,7 +190,12 @@ def _rakuten_search(term: str, max_hits: int = 5) -> list[dict[str, Any]]:
     return []
 
 
-def lookup_product_hints(text: str, max_hints: int = 1) -> list[dict[str, Any]]:
+def lookup_product_hints(
+    text: str,
+    max_hints: int = 1,
+    glossary_profile: str | None = None,
+    provider_override: str | None = None,
+) -> list[dict[str, Any]]:
     """
     発話テキストから商品候補を検索して返す。
     返却例:
@@ -157,37 +203,59 @@ def lookup_product_hints(text: str, max_hints: int = 1) -> list[dict[str, Any]]:
       {"term":"ビオレ", "item_name":"...", "item_url":"...", "shop_name":"...", "confidence":0.82}
     ]
     """
-    if _provider() != "rakuten":
+    provider = _provider(provider_override)
+    glossary_terms = _merge_glossary_and_terms(text, glossary_profile, max_hints=max_hints)
+    if not glossary_terms:
         return []
 
-    terms = _extract_terms(text, limit=max(1, max_hints * 2))
+    # 楽天未使用時は辞書候補のみ返す
+    if provider != "rakuten" or not _rakuten_app_id():
+        return glossary_terms[:max_hints]
+
     hints: list[dict[str, Any]] = []
-    for term in terms:
-        items = _rakuten_search(term, max_hits=5)
-        if not items:
+    for term_info in glossary_terms:
+        search_term = (term_info.get("search_keyword") or "").strip()
+        if not search_term:
             continue
+        items = _rakuten_search(search_term, max_hits=5)
+        if not items:
+            # API失敗や未ヒット時も辞書候補は返す
+            hints.append(dict(term_info))
+            if len(hints) >= max_hints:
+                break
+            continue
+
         scored = []
         for item in items:
-            score = _score_match(term, item["item_name"])
+            score = _score_match(term_info.get("normalized_term", search_term), item["item_name"])
             scored.append((score, item))
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best = scored[0]
-        if best_score < 0.62:
-            continue
-        hints.append({
-            "term": term,
-            "item_name": best["item_name"],
-            "item_url": best["item_url"],
-            "shop_name": best["shop_name"],
-            "confidence": round(float(best_score), 3),
-        })
+
+        hint = dict(term_info)
+        if best_score >= 0.62:
+            hint.update({
+                "item_name": best["item_name"],
+                "item_url": best["item_url"],
+                "shop_name": best["shop_name"],
+                "confidence": round(float(max(best_score, hint.get("confidence", 0.0))), 3),
+            })
+        hints.append(hint)
         if len(hints) >= max_hints:
             break
     return hints
 
 
 def render_inline_hint(hint: dict[str, Any]) -> str:
-    name = hint.get("item_name") or ""
-    if not name:
+    display = (hint.get("display_text") or "").strip()
+    if not display:
+        normalized = (hint.get("normalized_term") or hint.get("item_name") or "").strip()
+        if normalized:
+            display = f"{normalized}の可能性"
+    if not display:
         return ""
-    return f"（この商品と思われる: {name}）"
+    original = (hint.get("original_term") or "").strip()
+    normalized = (hint.get("normalized_term") or "").strip()
+    if original and normalized and _norm(original) != _norm(normalized):
+        return f"（この商品と思われる: {display}／原文認識: {original}）"
+    return f"（この商品と思われる: {display}）"

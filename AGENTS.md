@@ -110,6 +110,9 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 - Do not modify `Segment.text` or raw transcript snapshots.
 - Use `--dry-run --no-ai` first when validating clustering behavior.
 - Run with `--save` only when the user explicitly requests persistence.
+- Fragmentation is derived analysis data; it must not overwrite transcript text.
+- Domain glossary normalization must be non-destructive and used only for hinting/search support.
+- Show API key status only; never print key values.
 
 ## Do not run
 

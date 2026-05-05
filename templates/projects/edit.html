@@ -15,6 +15,36 @@
       <input name="client" type="text" value="{{ project.client or '' }}"
              class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
     </div>
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">調査テーマ</label>
+      <input name="research_theme" type="text" value="{{ project.research_theme or '' }}"
+             class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500"
+             placeholder="例：男性スキンケア利用実態と購買行動">
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">調査カテゴリ</label>
+        <select name="research_category"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          {% for cat in research_category_options %}
+          <option value="{{ cat }}" {% if (project.research_category or 'general') == cat %}selected{% endif %}>
+            {{ research_category_labels.get(cat, cat) }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">辞書プロファイル</label>
+        <select name="glossary_profile"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          {% for profile in glossary_profile_options %}
+          <option value="{{ profile }}" {% if (project.glossary_profile or 'general') == profile %}selected{% endif %}>
+            {{ profile }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
     <div class="grid grid-cols-2 gap-4">
       <div>
         <label class="block text-sm font-medium text-gray-700 mb-1">調査手法</label>
@@ -30,6 +60,26 @@
                 class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
           {% for val, label in status_labels.items() %}
           <option value="{{ val }}" {% if project.status == val %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">納品形式</label>
+        <select name="deliverable_type"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          {% for val, label in deliverable_type_options %}
+          <option value="{{ val }}" {% if (project.deliverable_type or 'verbatim_and_sheet') == val %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700 mb-1">機密レベル</label>
+        <select name="confidentiality_level"
+                class="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          {% for val, label in confidentiality_level_options %}
+          <option value="{{ val }}" {% if (project.confidentiality_level or 'standard') == val %}selected{% endif %}>{{ label }}</option>
           {% endfor %}
         </select>
       </div>
