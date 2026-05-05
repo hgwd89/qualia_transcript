@@ -109,7 +109,7 @@
       </thead>
       <tbody class="divide-y divide-gray-100">
       {% for seg in interview.segments %}
-      <tr class="hover:bg-gray-50 {% if seg.speaker_role == 'interviewer' %}opacity-60{% endif %}">
+      <tr id="segment-{{ seg.id }}" class="hover:bg-gray-50 {% if seg.speaker_role == 'interviewer' %}opacity-60{% endif %}">
         <td class="px-4 py-2 text-xs text-gray-400 font-mono whitespace-nowrap">
           {% if seg.start_sec is not none %}
             {{ '%02d:%02d'|format((seg.start_sec|int) // 60, (seg.start_sec|int) % 60) }}
@@ -161,6 +161,80 @@
     <p>発言セグメントがありません。文字起こしを実行してください。</p>
   </div>
 {% endif %}
+
+<!-- 意味クラスタ分析（表示専用） -->
+<div class="mt-8">
+  <h2 class="text-lg font-semibold text-brand-900 mb-3">意味クラスタ分析</h2>
+  {% if semantic_error %}
+    <div class="bg-red-50 border border-red-200 text-red-700 rounded p-3 text-sm">
+      {{ semantic_error }}
+    </div>
+  {% elif not semantic_analysis or not semantic_payload %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4 text-sm text-gray-500">
+      まだ意味クラスタ分析は保存されていません。
+    </div>
+  {% else %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4 mb-3">
+      <div class="text-sm text-gray-500">
+        analysis_id: {{ semantic_analysis.id }} / model: {{ semantic_analysis.model_used or '-' }}
+      </div>
+      {% if semantic_payload.overall_summary %}
+      <p class="mt-2 text-sm text-gray-800">{{ semantic_payload.overall_summary }}</p>
+      {% endif %}
+    </div>
+
+    {% for cs in (semantic_payload.cluster_summaries or []) %}
+    <div class="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="font-semibold text-brand-900">Cluster {{ cs.cluster_id }}</h3>
+        <span class="text-xs text-gray-500">mode: {{ cs.evidence_quote_mode or '-' }}</span>
+      </div>
+
+      <div class="space-y-2 text-sm">
+        <p><span class="font-medium text-gray-700">cluster_label:</span> {{ cs.theme or '-' }}</p>
+        <p><span class="font-medium text-gray-700">summary:</span> {{ cs.summary or '-' }}</p>
+        <p><span class="font-medium text-gray-700">key_findings:</span> {{ cs.summary or '-' }}</p>
+        <p><span class="font-medium text-gray-700">implications:</span> {{ cs.implication or '-' }}</p>
+        <p><span class="font-medium text-gray-700">unresolved:</span> {{ cs.unresolved or '-' }}</p>
+        <p><span class="font-medium text-gray-700">caution:</span> {{ cs.caution or '-' }}</p>
+      </div>
+
+      <div class="mt-3">
+        <p class="text-sm font-medium text-gray-700 mb-1">根拠発話（source_segment_quotes）</p>
+        {% if cs.source_segment_quotes %}
+          <ul class="list-disc pl-5 text-sm text-gray-800 space-y-1">
+            {% for q in cs.source_segment_quotes %}
+              <li>{{ q }}</li>
+            {% endfor %}
+          </ul>
+        {% else %}
+          <p class="text-sm text-gray-500">なし</p>
+        {% endif %}
+      </div>
+
+      <div class="mt-3">
+        <p class="text-sm font-medium text-gray-700 mb-1">evidence_source_segment_ids</p>
+        {% if cs.evidence_source_segment_ids %}
+          <div class="flex flex-wrap gap-2">
+            {% for sid in cs.evidence_source_segment_ids %}
+              <a href="#segment-{{ sid }}" class="text-xs border border-brand-300 text-brand-700 rounded px-2 py-1 hover:bg-brand-50">
+                segment-{{ sid }}
+              </a>
+            {% endfor %}
+          </div>
+        {% else %}
+          <p class="text-sm text-gray-500">なし</p>
+        {% endif %}
+      </div>
+
+      <div class="mt-3">
+        <p class="text-sm font-medium text-gray-700 mb-1">AI補助引用（evidence_quote）</p>
+        <p class="text-sm text-gray-700">{{ cs.evidence_quote or '-' }}</p>
+      </div>
+    </div>
+    {% endfor %}
+  {% endif %}
+</div>
 
 <script>
 const interviewId = {{ interview.id }};

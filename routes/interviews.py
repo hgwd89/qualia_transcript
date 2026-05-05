@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 from datetime import datetime, timezone
 from flask import (Blueprint, render_template, request, redirect, url_for,
@@ -11,6 +12,7 @@ from models.participant import Participant
 from models.interview_flow import InterviewFlow
 from models.interview import Interview, MediaFile, Transcription
 from models.segment import Segment, UtteranceMapping
+from models.analysis import AIAnalysis
 from services.product_hint import lookup_product_hints, render_inline_hint
 
 bp = Blueprint("interviews", __name__)
@@ -73,8 +75,24 @@ def new(project_id):
 @bp.route("/interviews/<int:interview_id>")
 def detail(interview_id):
     interview = Interview.query.get_or_404(interview_id)
+    semantic_analysis = (
+        AIAnalysis.query
+        .filter_by(interview_id=interview.id, analysis_type="semantic_clusters")
+        .order_by(AIAnalysis.id.desc())
+        .first()
+    )
+    semantic_payload = None
+    semantic_error = None
+    if semantic_analysis and semantic_analysis.content_json:
+        try:
+            semantic_payload = json.loads(semantic_analysis.content_json)
+        except Exception:
+            semantic_error = "意味クラスタ分析データの読み込みに失敗しました。"
     return render_template("interviews/detail.html", interview=interview,
-                           project=interview.project)
+                           project=interview.project,
+                           semantic_analysis=semantic_analysis,
+                           semantic_payload=semantic_payload,
+                           semantic_error=semantic_error)
 
 
 @bp.route("/interviews/<int:interview_id>/segments/<int:segment_id>/role", methods=["POST"])
