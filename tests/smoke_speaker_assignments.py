@@ -4,7 +4,9 @@ from pathlib import Path
 
 
 TARGET_INTERVIEW_ID = 10
-TARGET_SPEAKER_LABEL = "C01_C"
+TARGET_LABELS = ("C01_A", "C02_A", "C01_C", "C02_B")
+MODERATOR_LABELS = ("C01_A", "C02_A")
+RESPONDENT_LABELS = ("C01_C", "C02_B")
 
 
 def print_result(name: str, ok: bool, detail: str = "") -> bool:
@@ -34,7 +36,8 @@ def main() -> int:
         sys.path.insert(0, str(repo_root))
 
     failures = 0
-    baseline_text = None
+    baseline_assignments = {}
+    baseline_segment_text = {}
 
     try:
         from app import create_app
@@ -56,120 +59,141 @@ def main() -> int:
             print_result("target interview exists", False, f"interview_id={TARGET_INTERVIEW_ID} not found")
             return 1
 
-        # label決定: 既定ラベルを優先、なければ先頭distinct
-        target_label = TARGET_SPEAKER_LABEL
-        seg = Segment.query.filter_by(interview_id=interview.id, speaker_label=target_label).order_by(Segment.id.asc()).first()
-        if not seg:
-            d = (
-                Segment.query
-                .with_entities(Segment.speaker_label)
-                .filter(Segment.interview_id == interview.id, Segment.speaker_label.isnot(None))
-                .distinct()
-                .first()
-            )
-            if not d or not d[0]:
-                print_result("speaker_label exists", False, "no speaker_label in interview")
-                return 1
-            target_label = d[0]
-            seg = Segment.query.filter_by(interview_id=interview.id, speaker_label=target_label).order_by(Segment.id.asc()).first()
-
-        baseline_text = seg.text
-        baseline_assignment = SpeakerAssignment.query.filter_by(
-            interview_id=interview.id, speaker_label=target_label
-        ).first()
-        baseline = None if not baseline_assignment else {
-            "speaker_role": baseline_assignment.speaker_role,
-            "participant_id": baseline_assignment.participant_id,
-            "note": baseline_assignment.note,
-        }
-
         p01 = Participant.query.filter_by(project_id=interview.project_id, participant_code="P01").first()
-        fallback = Participant.query.filter_by(project_id=interview.project_id).order_by(Participant.id.asc()).first()
-        participant = p01 or fallback
-        if not participant:
-            print_result("participant exists", False, f"project_id={interview.project_id} has no participants")
+        if not p01:
+            print_result("P01 exists", False, f"project_id={interview.project_id} has no P01")
             return 1
 
-    # page check
-    r_page = client.get(f"/interviews/{TARGET_INTERVIEW_ID}/speakers")
+        missing_labels = []
+        for label in TARGET_LABELS:
+            seg = (
+                Segment.query
+                .filter_by(interview_id=interview.id, speaker_label=label)
+                .order_by(Segment.id.asc())
+                .first()
+            )
+            if not seg:
+                missing_labels.append(label)
+                continue
+
+            baseline_segment_text[seg.id] = seg.text
+            assignment = SpeakerAssignment.query.filter_by(
+                interview_id=interview.id,
+                speaker_label=label,
+            ).first()
+            baseline_assignments[label] = None if assignment is None else {
+                "speaker_role": assignment.speaker_role,
+                "participant_id": assignment.participant_id,
+                "note": assignment.note,
+            }
+
+        failures += 0 if print_result(
+            "target labels exist",
+            len(missing_labels) == 0,
+            f"missing={missing_labels}" if missing_labels else "all labels found",
+        ) else 1
+        if missing_labels:
+            return 1
+
+    page = client.get(f"/interviews/{TARGET_INTERVIEW_ID}/speakers")
     failures += 0 if print_result(
         "GET /interviews/<id>/speakers",
-        r_page.status_code == 200,
-        f"status={r_page.status_code}",
+        page.status_code == 200,
+        f"status={page.status_code}",
     ) else 1
 
-    # upsert 1
-    r1 = client.post(
-        f"/api/interviews/{TARGET_INTERVIEW_ID}/speakers/{target_label}",
-        json={
-            "speaker_role": "respondent",
-            "participant_id": participant.id,
-            "note": "__smoke_speaker_assign_1__",
-        },
-    )
-    j1 = r1.get_json(silent=True) or {}
-    failures += 0 if print_result(
-        "upsert assignment #1",
-        r1.status_code == 200 and j1.get("ok") is True,
-        f"status={r1.status_code}, created={j1.get('created')}",
-    ) else 1
+    def post_assignment(label: str, role: str, participant_id, note: str):
+        return client.post(
+            f"/api/interviews/{TARGET_INTERVIEW_ID}/speakers/{label}",
+            json={
+                "speaker_role": role,
+                "participant_id": participant_id,
+                "note": note,
+            },
+        )
 
-    # upsert 2 (duplicate prevention)
-    r2 = client.post(
-        f"/api/interviews/{TARGET_INTERVIEW_ID}/speakers/{target_label}",
-        json={
-            "speaker_role": "respondent",
-            "participant_id": participant.id,
-            "note": "__smoke_speaker_assign_2__",
-        },
-    )
-    j2 = r2.get_json(silent=True) or {}
+    for label in MODERATOR_LABELS:
+        r = post_assignment(label, "moderator", p01.id, f"__smoke_{label}_moderator__")
+        j = r.get_json(silent=True) or {}
+        ok = r.status_code == 200 and j.get("ok") is True and (j.get("assignment") or {}).get("participant_id") is None
+        failures += 0 if print_result(
+            f"{label} save moderator with blank participant",
+            ok,
+            f"status={r.status_code}, participant_id={(j.get('assignment') or {}).get('participant_id')}",
+        ) else 1
+
+    for label in RESPONDENT_LABELS:
+        r = post_assignment(label, "respondent", p01.id, f"__smoke_{label}_respondent__")
+        j = r.get_json(silent=True) or {}
+        ok = r.status_code == 200 and j.get("ok") is True and (j.get("assignment") or {}).get("participant_id") == p01.id
+        failures += 0 if print_result(
+            f"{label} save respondent with P01",
+            ok,
+            f"status={r.status_code}, participant_id={(j.get('assignment') or {}).get('participant_id')}",
+        ) else 1
+
+    dup = post_assignment("C01_C", "respondent", p01.id, "__smoke_C01_C_duplicate__")
+    dup_json = dup.get_json(silent=True) or {}
     with app.app_context():
-        cnt = SpeakerAssignment.query.filter_by(
-            interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label
+        dup_count = SpeakerAssignment.query.filter_by(
+            interview_id=TARGET_INTERVIEW_ID,
+            speaker_label="C01_C",
         ).count()
     failures += 0 if print_result(
-        "upsert duplicate prevented",
-        r2.status_code == 200 and j2.get("ok") is True and cnt == 1,
-        f"status={r2.status_code}, created={j2.get('created')}, count={cnt}",
+        "upsert duplicate prevented for C01_C",
+        dup.status_code == 200 and dup_json.get("ok") is True and dup_count == 1,
+        f"status={dup.status_code}, created={dup_json.get('created')}, count={dup_count}",
     ) else 1
 
-    # cleanup restore baseline
     with app.app_context():
-        cur = SpeakerAssignment.query.filter_by(
-            interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label
-        ).first()
-        cleanup_ok = False
-        if baseline is None:
-            if cur:
-                db.session.delete(cur)
-                db.session.commit()
-            cleanup_ok = (
-                SpeakerAssignment.query.filter_by(
-                    interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label
-                ).count() == 0
-            )
-        else:
-            if cur is None:
-                cur = SpeakerAssignment(interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label)
-                db.session.add(cur)
-            cur.speaker_role = baseline["speaker_role"]
-            cur.participant_id = baseline["participant_id"]
-            cur.note = baseline["note"]
-            db.session.commit()
-            restored = SpeakerAssignment.query.filter_by(
-                interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label
+        cleanup_ok = True
+        for label in TARGET_LABELS:
+            cur = SpeakerAssignment.query.filter_by(
+                interview_id=TARGET_INTERVIEW_ID,
+                speaker_label=label,
             ).first()
-            cleanup_ok = bool(
-                restored
-                and restored.speaker_role == baseline["speaker_role"]
-                and restored.participant_id == baseline["participant_id"]
-                and restored.note == baseline["note"]
-            )
-        final_text = Segment.query.get(seg.id).text
+            base = baseline_assignments.get(label)
+
+            if base is None:
+                if cur is not None:
+                    db.session.delete(cur)
+            else:
+                if cur is None:
+                    cur = SpeakerAssignment(interview_id=TARGET_INTERVIEW_ID, speaker_label=label)
+                    db.session.add(cur)
+                cur.speaker_role = base["speaker_role"]
+                cur.participant_id = base["participant_id"]
+                cur.note = base["note"]
+
+        db.session.commit()
+
+        for label in TARGET_LABELS:
+            cur = SpeakerAssignment.query.filter_by(
+                interview_id=TARGET_INTERVIEW_ID,
+                speaker_label=label,
+            ).first()
+            base = baseline_assignments.get(label)
+            if base is None and cur is not None:
+                cleanup_ok = False
+            elif base is not None:
+                if not cur:
+                    cleanup_ok = False
+                elif (
+                    cur.speaker_role != base["speaker_role"]
+                    or cur.participant_id != base["participant_id"]
+                    or cur.note != base["note"]
+                ):
+                    cleanup_ok = False
+
+        text_ok = True
+        for seg_id, text in baseline_segment_text.items():
+            seg = Segment.query.get(seg_id)
+            if not seg or seg.text != text:
+                text_ok = False
+                break
 
     failures += 0 if print_result("cleanup restored baseline", cleanup_ok) else 1
-    failures += 0 if print_result("segment text unchanged", final_text == baseline_text) else 1
+    failures += 0 if print_result("segment text unchanged", text_ok) else 1
 
     status_proc = run_git(repo_root, "status", "--short")
     if status_proc.returncode == 0:
