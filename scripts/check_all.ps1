@@ -1,5 +1,6 @@
 param(
     [switch]$Flags,
+    [switch]$Integrated,
     [switch]$Mapping,
     [switch]$Analysis,
     [switch]$Transcription,
@@ -48,12 +49,14 @@ if ($Flags) {
 if ($AllLocal) {
     $doSafe = $true
     $doFlags = $true
+    $doIntegrated = $true
 } else {
     $doSafe = $false
     $doFlags = $doFlags -or $false
+    $doIntegrated = $Integrated -or $false
 }
 
-$hasAnyFlag = $Flags -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
+$hasAnyFlag = $Flags -or $Integrated -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
 
 if (-not $hasAnyFlag) {
     $doSafe = $true
@@ -67,6 +70,10 @@ if ($doFlags) {
     Invoke-Check -Name "Segment Flag Smoke Check" -ScriptPath (Join-Path $scriptDir "check_flags.ps1") -Paid:$false
     Invoke-Check -Name "Speaker Assignment Smoke Check" -ScriptPath (Join-Path $scriptDir "check_speaker_assignments.ps1") -Paid:$false
     Invoke-Check -Name "Output Flag Smoke Check" -ScriptPath (Join-Path $scriptDir "check_outputs_flags.ps1") -Paid:$false
+}
+
+if ($doIntegrated) {
+    Invoke-Check -Name "Integrated Analysis No-AI Check" -ScriptPath (Join-Path $scriptDir "check_integrated_analysis.ps1") -Paid:$false
 }
 
 if (-not $hasAnyFlag) {
