@@ -1,9 +1,11 @@
 param(
+    [switch]$Flags,
     [switch]$Mapping,
     [switch]$Analysis,
     [switch]$Transcription,
     [switch]$Outputs,
-    [switch]$AllPaid
+    [switch]$AllPaid,
+    [switch]$AllLocal
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,10 +41,35 @@ if ($AllPaid) {
     $Outputs = $true
 }
 
-$hasAnyFlag = $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid
+if ($Flags) {
+    $doFlags = $true
+}
+
+if ($AllLocal) {
+    $doSafe = $true
+    $doFlags = $true
+} else {
+    $doSafe = $false
+    $doFlags = $doFlags -or $false
+}
+
+$hasAnyFlag = $Flags -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
 
 if (-not $hasAnyFlag) {
+    $doSafe = $true
+}
+
+if ($doSafe) {
     Invoke-Check -Name "Safe Smoke Check" -ScriptPath (Join-Path $scriptDir "check_safe.ps1") -Paid:$false
+}
+
+if ($doFlags) {
+    Invoke-Check -Name "Segment Flag Smoke Check" -ScriptPath (Join-Path $scriptDir "check_flags.ps1") -Paid:$false
+    Invoke-Check -Name "Speaker Assignment Smoke Check" -ScriptPath (Join-Path $scriptDir "check_speaker_assignments.ps1") -Paid:$false
+    Invoke-Check -Name "Output Flag Smoke Check" -ScriptPath (Join-Path $scriptDir "check_outputs_flags.ps1") -Paid:$false
+}
+
+if (-not $hasAnyFlag) {
     Write-Host "[PASS] check_all completed (safe only)."
     exit 0
 }
