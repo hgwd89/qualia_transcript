@@ -147,10 +147,15 @@ powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
 ## Check Runner（1コマンド実行）
 
 - デフォルトは safe check のみ実行します。
+- `-Flags` は Segment flags / speaker assignments / output flags を実行します（外部APIなし、可逆DB更新あり）。
+- `-AllLocal` は safe + `-Flags` を実行します（外部APIなし）。
 - 有料APIチェックはオプション指定時のみ実行します。
+- `-AllPaid` は有料APIや重い処理を含む可能性があります。
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Flags
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllLocal
 powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Mapping
 powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Analysis
 powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Transcription
