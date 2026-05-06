@@ -200,6 +200,19 @@ python scripts/run_semantic_analysis.py --interview-id 10 --save
 
 - 逐語本文（`Segment.text`）と `outputs/raw_transcripts` は変更しません。
 
+## Integrated Analysis No-AI Dry-Run
+
+- `semantic_clusters` / `per_question` / flags / speaker assignments を読み取り統合し、
+  AIに渡す前の evidence payload を確認します。
+- 外部APIは呼びません。
+- DB保存は行いません（`--save` は未対応）。
+- `Segment.text` は変更しません。
+
+```powershell
+python scripts/run_integrated_analysis.py --interview-id 10 --dry-run --no-ai --max-quotes 20
+powershell -ExecutionPolicy Bypass -File scripts/check_integrated_analysis.ps1
+```
+
 ## ドメイン辞書プロファイル（非破壊補足）
 
 - プロジェクトの調査テーマ/カテゴリ/辞書プロファイルに応じて、商品名候補の表記ゆれ補足を行います。

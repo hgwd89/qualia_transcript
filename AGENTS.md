@@ -133,6 +133,12 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 - Domain glossary normalization must be non-destructive and used only for hinting/search support.
 - Show API key status only; never print key values.
 
+`scripts/run_integrated_analysis.py` / `services/integrated_analysis.py` are integrated-analysis preflight tools.
+- Current scope is no-ai dry-run only (external API must not be called).
+- `--save` is intentionally unsupported for now.
+- They must not modify Segment text or raw transcript snapshots.
+- Keep them out of default safe checks; run via explicit command when needed.
+
 ## Do not run
 
 - full `compileall`
