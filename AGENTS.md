@@ -2,185 +2,97 @@
 
 ## Project
 
-This repository is `Qualia Transcript`, a local Flask application for qualitative research interview management, transcription, and analysis.
+This repository is **Qualia Transcript**, a local Flask/SQLite web application for qualitative research interview transcription, segment review, question mapping, quote management, AI-assisted analysis, and Word/Excel deliverable generation.
 
-## Operating principles
+## v0.2 Core Principles
 
-- Prefer small, reversible changes.
-- Do not expand scope without explicit user approval.
-- Before editing, inspect the relevant files.
-- After editing, run only the minimum checks relevant to the changed files.
-- Keep reports concise and factual.
-- Do not expose secrets from `.env`, logs, or command output.
-- Do not print API key values. Report keys only as `set` or `not set`.
+- Do not treat this as a generic transcription app.
+- Preserve traceability from every analysis output back to question, flow, mapping, participant, segment, and timestamp.
+- **Segment.text is non-destructive and must never be modified** by AI correction, glossary normalization, quote extraction, analysis, or output generation.
+- **raw_transcripts snapshots are immutable** operational artifacts.
+- Primary evidence is:
+  - question / flow / UtteranceMapping / PerQuestionAnalysis / QuoteCandidate / Segment
+- `semantic_clusters` is exploratory/supporting evidence, not primary evidence.
 
-## Do not touch unless explicitly requested
+## Safety Rules
 
-Do not modify these areas during launcher, README, or operations tasks:
+- Do not call OpenAI API, Whisper, Rakuten API, embedding APIs, or other paid/external APIs unless explicitly requested.
+- Do not run paid checks unless explicitly requested.
+- Do not touch `.env`, DB files, `uploads/`, `outputs/`, `outputs/raw_transcripts/`, or `logs/` unless explicitly requested.
+- Do not print API keys/secrets.
+- Do not put API keys in code.
+- Do not perform large refactors.
 
-- `app.py`
-- `config.py`
-- `routes/`
-- `models/`
-- `services/`
-- `templates/`
-- `requirements.txt`
-- `.env`
+## Evidence and Quote Rules
 
-## Secrets and generated files
+- AI must not generate quote body text for deliverables.
+- Quotes must be resolved locally from `quote_id` and/or `source_segment_ids` against DB records.
+- `SegmentFlag.quote` is a lightweight candidate marker.
+- `QuoteCandidate` is the formal quote candidate entity.
+- `QuoteCandidate.quote_text` must be derived from `Segment.text` or `reviewed_text` (if introduced).
+- Per-question analysis must include:
+  - `source_segment_ids`
+  - `source_segment_quotes`
+  - `quote_ids`
 
-- Never print API key values.
-- Report API keys only as `set` or `not set`.
-- `.env` must remain untracked.
-- `uploads/`, `outputs/`, `*.db`, `logs/*.log`, virtual environments, and caches must remain untracked.
-- Do not add uploaded audio/video files to Git.
-- Do not add generated Word, Excel, CSV, transcript, or analysis output files to Git.
-- `outputs/raw_transcripts/*.json` is high-sensitivity generated data (raw API transcript snapshot).
-- Do not add raw transcript snapshots to Git.
-- Do not delete raw transcript snapshots unless the user explicitly requests it.
-- When summarizing or auditing raw transcripts, quote only the minimum necessary excerpts.
-- If logs are needed for debugging, show only relevant non-secret excerpts.
+## Analysis Status Rules
 
-## Local launcher task rules
+- `AIAnalysis.status` lifecycle:
+  - `draft` / `reviewed` / `approved` / `rejected`
+- Non-approved AI analysis must not be reflected in formal Word/Excel deliverables.
+- Non-approved QuoteCandidate must not be reflected as formal quotes in deliverables.
 
-For Windows local launcher work, only edit:
+## Review Queue Rules
 
-- `start_app.ps1`
-- `stop_app.ps1`
-- `open_app.ps1`
-- `README_LOCAL.md`
-- `.gitignore`
-- `logs/.gitkeep`
-- `AGENTS.md`
+- Use exception-based review (Review Queue), not all-record manual review.
+- Queue only items that affect quality/deliverables, such as:
+  - unclassified mappings
+  - low/medium confidence mappings
+  - unresolved speaker assignment
+  - needs_review segments
+  - quote candidates
+  - AI analysis drafts
 
-### Requirements
+## Data Model Direction (v0.2)
 
-- `start_app.ps1` must start `python app.py` in the background.
-- It must log to `logs/flask_out.log` and `logs/flask_err.log`.
-- It must avoid double-starting if port 5000 is already serving HTTP 200.
-- It must wait for readiness with a retry loop: max 30 seconds, 1-second interval, success on HTTP 200.
-- It must not kill unrelated processes.
-- `stop_app.ps1` may stop only the Qualia Transcript Flask process using port 5000.
-- `open_app.ps1` should only open `http://127.0.0.1:5000/`.
+- `confidence_level` belongs to **UtteranceMapping**, not Segment.
+- Segment-side incremental candidate field may include `duplicate_candidate`.
+- Standard chunk overlap target is **3-5 seconds** for long-audio chunk transcription.
+- Add `APIUsageLog` for paid API observability with fields such as:
+  - provider
+  - model
+  - operation_type
+  - request_count
+  - token usage
+  - audio_duration_sec
+  - estimated_cost
 
-## Lightweight verification
+## Product Hint Policy
 
-For launcher-only changes, run only:
+- ProductHint external API is default OFF for safe/local operation.
+- Glossary/product hinting must remain non-destructive to transcript text.
 
-```powershell
-.\start_app.ps1
-Invoke-WebRequest http://127.0.0.1:5000/ -UseBasicParsing
-Invoke-WebRequest http://127.0.0.1:5000/settings -UseBasicParsing
-.\open_app.ps1
-.\stop_app.ps1
-git status
-git diff --stat
-```
+## MVP Scope Notes
 
-For safe non-destructive regression checks, run:
+- MVP formal target is audio files.
+- Video handling is out of MVP formal scope.
 
-```powershell
-python tests/smoke_safe.py
-powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
-```
+## Check Policy
 
-`scripts/check_analysis.ps1` / `tests/smoke_analysis.py` are paid API checks.
-- Do not mix them into safe checks.
-- Do not run them unless the user explicitly asks.
+- Keep `check_all.ps1` default as safe-only.
+- Do not include paid/API checks in default safe run.
+- `-AllLocal` must remain external-API free.
 
-`scripts/check_mapping.ps1` / `tests/smoke_mapping.py` are paid API checks.
-- Do not mix them into safe checks.
-- Do not run them unless the user explicitly asks.
+## Implementation Rules
 
-`scripts/check_transcription.ps1` / `tests/smoke_transcription.py` are paid API checks.
-- Do not mix them into safe checks.
-- Do not run them unless the user explicitly asks.
+- Make small, reviewable changes.
+- Prefer additive and backward-compatible schema updates.
+- Keep existing routes/services working.
+- Add/update tests or checks with behavior changes.
+- Update docs when behavior changes.
 
-`scripts/check_outputs.ps1` / `tests/smoke_outputs.py` are output generation checks.
-- OpenAI API must not be called.
-- Do not mix them into safe checks.
-- Do not run large/repeated generations without explicit user request.
+## Before Finalizing Changes
 
-`scripts/check_outputs_flags.ps1` / `tests/smoke_outputs_flags.py` are output-flag reflection checks.
-- OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes on `segment_id=257` flags (create/delete/restore).
-- They verify Word marker (`★引用候補`) and Excel flag columns/values.
-- Keep them out of default safe checks; run only when needed.
-
-`scripts/check_flags.ps1` / `tests/smoke_flags.py` are segment-flag checks.
-- OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes (create/delete/restore flags), so they are not fully read-only.
-- Keep them out of default safe checks; run only when needed.
-
-`scripts/check_speaker_assignments.ps1` / `tests/smoke_speaker_assignments.py` are speaker-assignment checks.
-- OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes (upsert/restore speaker assignments).
-- Keep them out of default safe checks; run only when needed.
-
-`scripts/check_all.ps1` is a runner.
-- Default: safe check only.
-- `-Flags`: segment/speaker/output-flag checks only (no external API, reversible DB updates).
-- `-Integrated`: integrated-analysis no-ai dry-run check only (no external API, no DB updates, no AI calls).
-- `-AllLocal`: safe + `-Flags` + `-Integrated` checks (no external API).
-- Paid checks run only when explicit flags are provided.
-- `-AllPaid` may include paid API calls and heavier processing.
-- Stop at first failed check.
-
-`scripts/run_semantic_analysis.py` / `services/semantic_analysis.py` are semantic analysis tools.
-- Do not modify `Segment.text` or raw transcript snapshots.
-- Use `--dry-run --no-ai` first when validating clustering behavior.
-- Run with `--save` only when the user explicitly requests persistence.
-- Fragmentation is derived analysis data; it must not overwrite transcript text.
-- Domain glossary normalization must be non-destructive and used only for hinting/search support.
-- Show API key status only; never print key values.
-
-`scripts/run_integrated_analysis.py` / `services/integrated_analysis.py` are integrated-analysis preflight tools.
-- Current scope is no-ai dry-run only (external API must not be called).
-- `--save` is intentionally unsupported for now.
-- They must not modify Segment text or raw transcript snapshots.
-- Keep them out of default safe checks; run via explicit command when needed.
-
-## Do not run
-
-- full `compileall`
-- all-route checks
-- OpenAI API calls
-- Whisper transcription
-- batch processing
-- Word/Excel generation
-- large video/audio processing
-
-## AI provider rules
-
-The current provider is OpenAI / GPT API.
-
-- Use `OPENAI_API_KEY`.
-- Do not use `ANTHROPIC_API_KEY` unless explicitly requested.
-- Do not leave Claude / Anthropic naming in active code, UI, or README unless referring to old history.
-- Do not print `.env` values.
-- Do not call the OpenAI API unless the user explicitly asks for API testing.
-- For structured outputs, preserve evidence fields such as `evidence_quote`.
-- Do not fabricate interview statements or analysis findings not supported by source utterances.
-- Product-hint enrichment may use Rakuten API, but must not alter raw verbatim transcript text.
-
-## Transcription rules
-
-- Do not run Whisper or process audio/video unless explicitly requested.
-- Do not process large media files without first confirming scope.
-- For tests, prefer short clips such as `uploads/test_30s.wav`.
-- Do not delete source audio/video files unless explicitly requested.
-
-## Commit rules
-
-Before committing:
-
-- Show `git diff --stat`.
-- Show `git status`.
-- Confirm no secrets or generated files are tracked.
-- Commit only the relevant files for the current task.
-
-Recommended commit message for launcher work:
-
-```text
-chore: add Windows launcher scripts for local app usage
-```
+- Report what checks were run.
+- Report what checks were not run and why.
+- Report current `git status --short`.
