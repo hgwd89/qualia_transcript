@@ -46,14 +46,19 @@
           <td class="px-3 py-2 text-xs text-gray-500">{{ row.segment_count }}</td>
           <td class="px-3 py-2 text-gray-700">{{ row.sample_text or '-' }}</td>
           <td class="px-3 py-2">
-            <select id="role-{{ loop.index0 }}" class="w-full text-xs border border-gray-300 rounded px-2 py-1">
+            <select id="role-{{ loop.index0 }}"
+                    class="role-select w-full text-xs border border-gray-300 rounded px-2 py-1"
+                    data-idx="{{ loop.index0 }}"
+                    onchange="syncParticipantState({{ loop.index0 }})">
               {% for r in speaker_roles %}
               <option value="{{ r }}" {% if a and a.speaker_role == r %}selected{% endif %}>{{ r }}</option>
               {% endfor %}
             </select>
           </td>
           <td class="px-3 py-2">
-            <select id="participant-{{ loop.index0 }}" class="w-full text-xs border border-gray-300 rounded px-2 py-1">
+            <select id="participant-{{ loop.index0 }}"
+                    class="participant-select w-full text-xs border border-gray-300 rounded px-2 py-1"
+                    data-idx="{{ loop.index0 }}">
               <option value="">-- 未設定 --</option>
               {% for p in participants %}
               <option value="{{ p.id }}" {% if a and a.participant_id == p.id %}selected{% endif %}>
@@ -98,9 +103,26 @@ function showMsg(text, type='info'){
   el.classList.remove('hidden');
 }
 
+function syncParticipantState(idx){
+  const roleEl = document.getElementById(`role-${idx}`);
+  const participantEl = document.getElementById(`participant-${idx}`);
+  if (!roleEl || !participantEl) return;
+
+  const isRespondent = roleEl.value === 'respondent';
+  participantEl.disabled = !isRespondent;
+
+  if (!isRespondent) {
+    participantEl.value = '';
+    participantEl.classList.add('bg-gray-100');
+  } else {
+    participantEl.classList.remove('bg-gray-100');
+  }
+}
+
 async function saveAssignment(label, idx){
   const role = document.getElementById(`role-${idx}`).value;
-  const participantId = document.getElementById(`participant-${idx}`).value;
+  const participantEl = document.getElementById(`participant-${idx}`);
+  const participantId = participantEl.disabled ? null : (participantEl.value || null);
   const note = document.getElementById(`note-${idx}`).value;
 
   try {
@@ -109,7 +131,7 @@ async function saveAssignment(label, idx){
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         speaker_role: role,
-        participant_id: participantId || null,
+        participant_id: participantId,
         note: note || null,
       }),
     });
@@ -123,5 +145,12 @@ async function saveAssignment(label, idx){
     showMsg(`保存失敗: ${label}`, 'error');
   }
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.role-select').forEach((el) => {
+    const idx = el.dataset.idx;
+    if (idx !== undefined) syncParticipantState(idx);
+  });
+});
 </script>
 {% endblock %}

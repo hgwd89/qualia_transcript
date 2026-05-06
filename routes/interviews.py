@@ -258,7 +258,10 @@ def upsert_speaker_assignment(interview_id, speaker_label):
     if speaker_role not in SPEAKER_ROLES:
         return jsonify({"ok": False, "error": "invalid speaker_role"}), 400
 
-    if participant_id in ("", None):
+    # respondent 以外は participant を紐づけない
+    if speaker_role != "respondent":
+        participant_id = None
+    elif participant_id in ("", None):
         participant_id = None
     else:
         try:
