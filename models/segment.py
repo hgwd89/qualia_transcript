@@ -47,6 +47,8 @@ class UtteranceMapping(db.Model):
     question_id      = db.Column(db.Integer, db.ForeignKey("interview_flow_questions.id"))  # NULL = 未分類
     mapped_by        = db.Column(db.Text, default="ai")    # ai / manual
     confidence       = db.Column(db.Float)                 # 0.0〜1.0
+    # high / medium / low
+    confidence_level = db.Column(db.Text)
     is_unclassified  = db.Column(db.Boolean, default=False)
     notes            = db.Column(db.Text)
     created_at       = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
@@ -61,5 +63,6 @@ class UtteranceMapping(db.Model):
             "question_id": self.question_id,
             "mapped_by": self.mapped_by,
             "confidence": self.confidence,
+            "confidence_level": self.confidence_level,
             "is_unclassified": self.is_unclassified,
         }

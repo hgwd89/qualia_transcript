@@ -185,11 +185,70 @@ def _run_migrations(app):
 
         if "ai_analyses" in existing_tables:
             ai_cols = {c["name"] for c in inspector.get_columns("ai_analyses")}
-            if "status" not in ai_cols:
-                db.session.execute(text("ALTER TABLE ai_analyses ADD COLUMN status TEXT DEFAULT 'draft'"))
+            ai_pending = [
+                ("status", "ALTER TABLE ai_analyses ADD COLUMN status TEXT DEFAULT 'draft'"),
+                ("quote_ids", "ALTER TABLE ai_analyses ADD COLUMN quote_ids TEXT"),
+                ("source_segment_ids", "ALTER TABLE ai_analyses ADD COLUMN source_segment_ids TEXT"),
+                ("prompt_version", "ALTER TABLE ai_analyses ADD COLUMN prompt_version TEXT"),
+                ("input_hash", "ALTER TABLE ai_analyses ADD COLUMN input_hash TEXT"),
+                ("reviewed_by", "ALTER TABLE ai_analyses ADD COLUMN reviewed_by TEXT"),
+                ("reviewed_at", "ALTER TABLE ai_analyses ADD COLUMN reviewed_at DATETIME"),
+            ]
+            for col_name, stmt in ai_pending:
+                if col_name not in ai_cols:
+                    db.session.execute(text(stmt))
+                    db.session.commit()
+                    inspector = sa_inspect(db.engine)
+                    ai_cols = {c["name"] for c in inspector.get_columns("ai_analyses")}
+
+        if "utterance_mappings" in existing_tables:
+            um_cols = {c["name"] for c in inspector.get_columns("utterance_mappings")}
+            if "confidence_level" not in um_cols:
+                db.session.execute(text("ALTER TABLE utterance_mappings ADD COLUMN confidence_level TEXT"))
                 db.session.commit()
                 inspector = sa_inspect(db.engine)
-                existing_tables = set(inspector.get_table_names())
+                um_cols = {c["name"] for c in inspector.get_columns("utterance_mappings")}
+
+            if "confidence_level" in um_cols:
+                # backfill (ordered)
+                db.session.execute(text("""
+                    UPDATE utterance_mappings
+                    SET confidence_level = 'high'
+                    WHERE confidence_level IS NULL
+                      AND mapped_by = 'human'
+                """))
+                db.session.execute(text("""
+                    UPDATE utterance_mappings
+                    SET confidence_level = 'low'
+                    WHERE confidence_level IS NULL
+                      AND is_unclassified = 1
+                """))
+                db.session.execute(text("""
+                    UPDATE utterance_mappings
+                    SET confidence_level = 'low'
+                    WHERE confidence_level IS NULL
+                      AND confidence IS NULL
+                """))
+                db.session.execute(text("""
+                    UPDATE utterance_mappings
+                    SET confidence_level = 'high'
+                    WHERE confidence_level IS NULL
+                      AND confidence >= 0.80
+                """))
+                db.session.execute(text("""
+                    UPDATE utterance_mappings
+                    SET confidence_level = 'medium'
+                    WHERE confidence_level IS NULL
+                      AND confidence >= 0.50
+                      AND confidence < 0.80
+                """))
+                db.session.execute(text("""
+                    UPDATE utterance_mappings
+                    SET confidence_level = 'low'
+                    WHERE confidence_level IS NULL
+                      AND confidence < 0.50
+                """))
+                db.session.commit()
 
         existing_cols = {c["name"] for c in inspector.get_columns("projects")}
         pending = [
