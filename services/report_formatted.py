@@ -31,10 +31,12 @@ def _segment_flag_map(seg) -> dict[str, bool]:
     return {name: (name in flags) for name in _FLAG_ORDER}
 
 
-def _segment_flag_label(seg) -> str:
+def _segment_flag_value_line(seg) -> str:
     flag_map = _segment_flag_map(seg)
-    labels = [name for name in _FLAG_ORDER if flag_map[name]]
-    return ",".join(labels)
+    return ",".join(
+        f"{name}={'true' if flag_map[name] else 'false'}"
+        for name in _FLAG_ORDER
+    )
 
 
 def generate_formatted_sheet(project_id: int) -> GeneratedFile:
@@ -76,8 +78,14 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
         c_text.fill      = _HEADER_FILL
         c_text.alignment = Alignment(wrap_text=True, horizontal="center")
 
-        c_flag = ws.cell(1, flag_col,
-                         f"{p.participant_code}\n{p.display_name or ''}\nflags")
+        c_flag = ws.cell(
+            1,
+            flag_col,
+            (
+                f"{p.participant_code}\n{p.display_name or ''}\n"
+                "favorite,quote,exclude,needs_review"
+            ),
+        )
         c_flag.font      = Font(bold=True, color="FFFFFF")
         c_flag.fill      = _HEADER_FILL
         c_flag.alignment = Alignment(wrap_text=True, horizontal="center")
@@ -112,7 +120,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
 
                 texts = "\n".join(f"・{m.segment.text}" for m in mappings)
                 flags = "\n".join(
-                    f"・{_segment_flag_label(m.segment) or '-'}"
+                    f"・{_segment_flag_value_line(m.segment)}"
                     for m in mappings
                 )
 
@@ -157,10 +165,10 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
                 flag_map = _segment_flag_map(seg)
                 ws2.append([code, seg.text,
                              _fmt_time(seg.start_sec) if seg.start_sec else "",
-                             "Y" if flag_map["favorite"] else "",
-                             "Y" if flag_map["quote"] else "",
-                             "Y" if flag_map["exclude"] else "",
-                             "Y" if flag_map["needs_review"] else "",
+                             "true" if flag_map["favorite"] else "false",
+                             "true" if flag_map["quote"] else "false",
+                             "true" if flag_map["exclude"] else "false",
+                             "true" if flag_map["needs_review"] else "false",
                              ])
 
     # 保存
