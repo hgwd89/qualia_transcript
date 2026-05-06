@@ -120,7 +120,8 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 `scripts/check_all.ps1` is a runner.
 - Default: safe check only.
 - `-Flags`: segment/speaker/output-flag checks only (no external API, reversible DB updates).
-- `-AllLocal`: safe + `-Flags` checks (no external API).
+- `-Integrated`: integrated-analysis no-ai dry-run check only (no external API, no DB updates, no AI calls).
+- `-AllLocal`: safe + `-Flags` + `-Integrated` checks (no external API).
 - Paid checks run only when explicit flags are provided.
 - `-AllPaid` may include paid API calls and heavier processing.
 - Stop at first failed check.
