@@ -20,6 +20,10 @@ def _fmt_time(sec: float | None) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def _has_quote_flag(seg) -> bool:
+    return any(f.flag_type == "quote" for f in (seg.segment_flags or []))
+
+
 def generate_verbatim(interview_id: int) -> GeneratedFile:
     interview   = Interview.query.get(interview_id)
     participant = interview.participant
@@ -64,6 +68,9 @@ def generate_verbatim(interview_id: int) -> GeneratedFile:
                         time_str = f"[{_fmt_time(seg.start_sec)}–{_fmt_time(seg.end_sec)}]"
                         run1 = row.add_run(f"{time_str} {speaker}：")
                         run1.bold = True
+                        if _has_quote_flag(seg):
+                            quote_mark = row.add_run("★引用候補 ")
+                            quote_mark.bold = True
                         row.add_run(seg.text)
 
     # 未分類発言
@@ -78,6 +85,9 @@ def generate_verbatim(interview_id: int) -> GeneratedFile:
         for seg in unclassified:
             row = doc.add_paragraph()
             row.add_run(f"[{_fmt_time(seg.start_sec)}] ").bold = True
+            if _has_quote_flag(seg):
+                quote_mark = row.add_run("★引用候補 ")
+                quote_mark.bold = True
             row.add_run(seg.text)
 
     # 保存

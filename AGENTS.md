@@ -101,6 +101,12 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 - Do not mix them into safe checks.
 - Do not run large/repeated generations without explicit user request.
 
+`scripts/check_outputs_flags.ps1` / `tests/smoke_outputs_flags.py` are output-flag reflection checks.
+- OpenAI/Rakuten/Whisper APIs must not be called.
+- They perform reversible DB writes on `segment_id=257` flags (create/delete/restore).
+- They verify Word marker (`★引用候補`) and Excel flag columns/values.
+- Keep them out of default safe checks; run only when needed.
+
 `scripts/check_flags.ps1` / `tests/smoke_flags.py` are segment-flag checks.
 - OpenAI/Rakuten/Whisper APIs must not be called.
 - They perform reversible DB writes (create/delete/restore flags), so they are not fully read-only.

@@ -23,6 +23,22 @@ _THIN        = Side(style="thin", color="AAAAAA")
 _BORDER      = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
 
+_FLAG_ORDER = ("favorite", "quote", "exclude", "needs_review")
+
+
+def _segment_flag_map(seg) -> dict[str, bool]:
+    flags = {f.flag_type for f in (seg.segment_flags or [])}
+    return {name: (name in flags) for name in _FLAG_ORDER}
+
+
+def _segment_flag_value_line(seg) -> str:
+    flag_map = _segment_flag_map(seg)
+    return ",".join(
+        f"{name}={'true' if flag_map[name] else 'false'}"
+        for name in _FLAG_ORDER
+    )
+
+
 def generate_formatted_sheet(project_id: int) -> GeneratedFile:
     project      = Project.query.get(project_id)
     participants = Participant.query.filter_by(project_id=project_id).all()
@@ -53,11 +69,26 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
 
     col_offset = 4
     for i, p in enumerate(participants):
-        c = ws.cell(1, col_offset + i,
-                    f"{p.participant_code}\n{p.display_name or ''}")
-        c.font      = Font(bold=True, color="FFFFFF")
-        c.fill      = _HEADER_FILL
-        c.alignment = Alignment(wrap_text=True, horizontal="center")
+        text_col = col_offset + (i * 2)
+        flag_col = text_col + 1
+
+        c_text = ws.cell(1, text_col,
+                         f"{p.participant_code}\n{p.display_name or ''}\n発話")
+        c_text.font      = Font(bold=True, color="FFFFFF")
+        c_text.fill      = _HEADER_FILL
+        c_text.alignment = Alignment(wrap_text=True, horizontal="center")
+
+        c_flag = ws.cell(
+            1,
+            flag_col,
+            (
+                f"{p.participant_code}\n{p.display_name or ''}\n"
+                "favorite,quote,exclude,needs_review"
+            ),
+        )
+        c_flag.font      = Font(bold=True, color="FFFFFF")
+        c_flag.fill      = _HEADER_FILL
+        c_flag.alignment = Alignment(wrap_text=True, horizontal="center")
 
     # 質問行
     row = 2
@@ -84,11 +115,22 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
                             Segment.speaker_role == "respondent")
                     .all()
                 )
-                texts = "\n".join(f"・{m.segment.text}" for m in mappings)
-                c = ws.cell(row, col_offset + i, texts)
-                c.alignment = Alignment(wrap_text=True, vertical="top")
+                text_col = col_offset + (i * 2)
+                flag_col = text_col + 1
 
-            for col in range(1, col_offset + len(participants)):
+                texts = "\n".join(f"・{m.segment.text}" for m in mappings)
+                flags = "\n".join(
+                    f"・{_segment_flag_value_line(m.segment)}"
+                    for m in mappings
+                )
+
+                c_text = ws.cell(row, text_col, texts)
+                c_text.alignment = Alignment(wrap_text=True, vertical="top")
+
+                c_flag = ws.cell(row, flag_col, flags)
+                c_flag.alignment = Alignment(wrap_text=True, vertical="top")
+
+            for col in range(1, col_offset + (len(participants) * 2)):
                 ws.cell(row, col).border = _BORDER
 
             row += 1
@@ -98,13 +140,19 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
     ws.column_dimensions["B"].width = 10
     ws.column_dimensions["C"].width = 40
     for i in range(len(participants)):
-        ws.column_dimensions[get_column_letter(col_offset + i)].width = 35
+        text_col = col_offset + (i * 2)
+        flag_col = text_col + 1
+        ws.column_dimensions[get_column_letter(text_col)].width = 35
+        ws.column_dimensions[get_column_letter(flag_col)].width = 22
 
     ws.freeze_panes = "D2"
 
     # ─── シート2：未分類発言 ───
     ws2 = wb.create_sheet("未分類発言")
-    ws2.append(["参加者", "発言テキスト", "開始時刻"])
+    ws2.append([
+        "参加者", "発言テキスト", "開始時刻",
+        "favorite", "quote", "exclude", "needs_review",
+    ])
     for iv in interviews:
         p = iv.participant
         code = p.participant_code if p else "?"
@@ -114,8 +162,14 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
             if not seg.utterance_mappings:
                 continue
             if all(um.is_unclassified for um in seg.utterance_mappings):
+                flag_map = _segment_flag_map(seg)
                 ws2.append([code, seg.text,
-                             _fmt_time(seg.start_sec) if seg.start_sec else ""])
+                             _fmt_time(seg.start_sec) if seg.start_sec else "",
+                             "true" if flag_map["favorite"] else "false",
+                             "true" if flag_map["quote"] else "false",
+                             "true" if flag_map["exclude"] else "false",
+                             "true" if flag_map["needs_review"] else "false",
+                             ])
 
     # 保存
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")

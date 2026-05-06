@@ -168,6 +168,18 @@ powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllPaid
 powershell -ExecutionPolicy Bypass -File scripts/check_outputs.ps1
 ```
 
+## Output Flag Smoke Check（外部APIなし・可逆DB更新あり）
+
+- Segment flag（`favorite / quote / exclude / needs_review`）がWord/Excel出力へ反映されるか確認します。
+- 外部APIは呼びません。
+- 実行中に `segment_id=257` の flag を一時更新しますが、テスト終了時に実行前状態へ復元します。
+- `Segment.text` は変更しません。
+
+```powershell
+python tests/smoke_outputs_flags.py
+powershell -ExecutionPolicy Bypass -File scripts/check_outputs_flags.ps1
+```
+
 ## Semantic Cluster Analysis CLI
 
 - Flask UIに組み込む前の単体実行CLIです。
