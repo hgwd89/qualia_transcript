@@ -17,6 +17,8 @@ class AIAnalysis(db.Model):
     #         implications, unresolved }
     content_json  = db.Column(db.Text)
     model_used    = db.Column(db.Text)
+    # draft / reviewed / approved / rejected
+    status        = db.Column(db.Text, nullable=False, default="draft")
     created_at    = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     interview = db.relationship("Interview",              back_populates="ai_analyses")

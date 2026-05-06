@@ -12,6 +12,9 @@ from models.segment        import Segment, UtteranceMapping
 from models.segment_flag   import SegmentFlag
 from models.speaker_assignment import SpeakerAssignment
 from models.analysis       import AIAnalysis
+from models.quote_candidate import QuoteCandidate
+from models.review_item import ReviewItem
+from models.api_usage_log import APIUsageLog
 from models.generated_file import GeneratedFile
 from models.setting        import AppSetting
 
@@ -73,6 +76,121 @@ def _run_migrations(app):
             ))
             db.session.commit()
             inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+
+        if "quote_candidates" not in existing_tables:
+            db.session.execute(text("""
+                CREATE TABLE IF NOT EXISTS quote_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    quote_id TEXT NOT NULL UNIQUE,
+                    project_id INTEGER,
+                    interview_id INTEGER NOT NULL,
+                    segment_id INTEGER NOT NULL,
+                    participant_id INTEGER,
+                    question_id INTEGER,
+                    start_sec REAL,
+                    end_sec REAL,
+                    char_start INTEGER,
+                    char_end INTEGER,
+                    quote_text TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'candidate',
+                    source TEXT NOT NULL,
+                    note TEXT,
+                    created_at DATETIME,
+                    updated_at DATETIME,
+                    FOREIGN KEY(project_id) REFERENCES projects(id),
+                    FOREIGN KEY(interview_id) REFERENCES interviews(id),
+                    FOREIGN KEY(segment_id) REFERENCES segments(id),
+                    FOREIGN KEY(participant_id) REFERENCES participants(id),
+                    FOREIGN KEY(question_id) REFERENCES interview_flow_questions(id)
+                )
+            """))
+            db.session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_quote_candidates_interview_id ON quote_candidates(interview_id)"
+            ))
+            db.session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_quote_candidates_segment_id ON quote_candidates(segment_id)"
+            ))
+            db.session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_quote_candidates_status ON quote_candidates(status)"
+            ))
+            db.session.commit()
+            inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+
+        if "review_items" not in existing_tables:
+            db.session.execute(text("""
+                CREATE TABLE IF NOT EXISTS review_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER,
+                    interview_id INTEGER,
+                    item_type TEXT NOT NULL,
+                    target_type TEXT NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    severity TEXT NOT NULL DEFAULT 'medium',
+                    status TEXT NOT NULL DEFAULT 'open',
+                    reason TEXT,
+                    created_at DATETIME,
+                    updated_at DATETIME,
+                    FOREIGN KEY(project_id) REFERENCES projects(id),
+                    FOREIGN KEY(interview_id) REFERENCES interviews(id)
+                )
+            """))
+            db.session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_review_items_project_status ON review_items(project_id, status)"
+            ))
+            db.session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_review_items_interview_status ON review_items(interview_id, status)"
+            ))
+            db.session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_review_items_item_type_status ON review_items(item_type, status)"
+            ))
+            db.session.commit()
+            inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+
+        if "api_usage_logs" not in existing_tables:
+            db.session.execute(text("""
+                CREATE TABLE IF NOT EXISTS api_usage_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER,
+                    interview_id INTEGER,
+                    analysis_id INTEGER,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    operation_type TEXT NOT NULL,
+                    request_count INTEGER NOT NULL DEFAULT 1,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    total_tokens INTEGER,
+                    audio_duration_sec REAL,
+                    estimated_cost REAL,
+                    success BOOLEAN NOT NULL DEFAULT 1,
+                    error_message TEXT,
+                    created_at DATETIME,
+                    FOREIGN KEY(project_id) REFERENCES projects(id),
+                    FOREIGN KEY(interview_id) REFERENCES interviews(id),
+                    FOREIGN KEY(analysis_id) REFERENCES ai_analyses(id)
+                )
+            """))
+            db.session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_api_usage_logs_created_at ON api_usage_logs(created_at)"
+            ))
+            db.session.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_api_usage_logs_provider_operation ON api_usage_logs(provider, operation_type)"
+            ))
+            db.session.commit()
+            inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+
+        if "ai_analyses" in existing_tables:
+            ai_cols = {c["name"] for c in inspector.get_columns("ai_analyses")}
+            if "status" not in ai_cols:
+                db.session.execute(text("ALTER TABLE ai_analyses ADD COLUMN status TEXT DEFAULT 'draft'"))
+                db.session.commit()
+                inspector = sa_inspect(db.engine)
+                existing_tables = set(inspector.get_table_names())
+
         existing_cols = {c["name"] for c in inspector.get_columns("projects")}
         pending = [
             ("method", "ALTER TABLE projects ADD COLUMN method TEXT DEFAULT 'DI'"),
