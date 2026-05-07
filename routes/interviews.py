@@ -161,6 +161,11 @@ def detail(interview_id):
         .filter_by(interview_id=interview.id, status="open")
         .count()
     )
+    quote_candidate_count = (
+        QuoteCandidate.query
+        .filter_by(interview_id=interview.id, status="candidate")
+        .count()
+    )
 
     semantic_analysis = (
         AIAnalysis.query
@@ -182,6 +187,7 @@ def detail(interview_id):
                            speaker_assignment_map=speaker_assignment_map,
                            unclassified_count=unclassified_count,
                            review_open_count=review_open_count,
+                           quote_candidate_count=quote_candidate_count,
                            semantic_analysis=semantic_analysis,
                            semantic_payload=semantic_payload,
                            semantic_error=semantic_error)
@@ -311,6 +317,89 @@ def review_queue(interview_id):
         items=items,
         open_count=open_count,
         item_type_counts=item_type_counts,
+    )
+
+
+@bp.route("/interviews/<int:interview_id>/quote-candidates")
+def quote_candidates(interview_id):
+    interview = Interview.query.get_or_404(interview_id)
+    status_filter = (request.args.get("status") or "").strip().lower() or None
+    if status_filter and status_filter not in ALLOWED_QUOTE_CANDIDATE_STATUSES:
+        return "invalid status filter", 400
+
+    focus_raw = request.args.get("focus_id")
+    focus_id = None
+    if focus_raw not in (None, "", "null"):
+        try:
+            focus_id = int(focus_raw)
+        except (TypeError, ValueError):
+            focus_id = None
+
+    items = list_quote_candidates_for_interview(
+        db.session,
+        interview_id=interview.id,
+        status=status_filter,
+    )
+
+    counts = {
+        "candidate": QuoteCandidate.query.filter_by(interview_id=interview.id, status="candidate").count(),
+        "approved": QuoteCandidate.query.filter_by(interview_id=interview.id, status="approved").count(),
+        "rejected": QuoteCandidate.query.filter_by(interview_id=interview.id, status="rejected").count(),
+    }
+
+    return render_template(
+        "interviews/quote_candidates.html",
+        interview=interview,
+        project=interview.project,
+        items=items,
+        counts=counts,
+        status_filter=status_filter,
+        focus_id=focus_id,
+    )
+
+
+@bp.route("/interviews/<int:interview_id>/quote-candidates/from-flags", methods=["POST"])
+def quote_candidates_from_flags(interview_id):
+    interview = Interview.query.get_or_404(interview_id)
+    summary = create_quote_candidates_from_flags(db.session, interview_id=interview.id)
+    db.session.commit()
+    flash(
+        f"引用候補を生成しました（created={summary.get('created', 0)}, "
+        f"existing={summary.get('existing', 0)}, skipped={summary.get('skipped', 0)}）",
+        "success",
+    )
+    return redirect(url_for("interviews.quote_candidates", interview_id=interview.id))
+
+
+@bp.route("/interviews/<int:interview_id>/quote-candidates/<string:quote_id>/status", methods=["POST"])
+def update_quote_candidate_status_ui(interview_id, quote_id):
+    Interview.query.get_or_404(interview_id)
+    status = (request.form.get("status") or "").strip().lower()
+    if status not in ("approved", "rejected"):
+        return "invalid status", 400
+
+    try:
+        quote = update_quote_candidate_status(
+            db.session,
+            interview_id=interview_id,
+            quote_id=quote_id,
+            status=status,
+        )
+        db.session.commit()
+    except QuoteCandidateNotFoundError:
+        db.session.rollback()
+        return "quote candidate not found", 404
+    except QuoteCandidateValidationError:
+        db.session.rollback()
+        return "invalid status", 400
+
+    flash(f"QuoteCandidate {quote.quote_id} を {quote.status} に更新しました", "success")
+    return redirect(
+        url_for(
+            "interviews.quote_candidates",
+            interview_id=interview_id,
+            focus_id=quote.id,
+        )
     )
 
 

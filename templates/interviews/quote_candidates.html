@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}引用候補 | インタビュー #{{ interview.id }}{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}" class="hover:underline">インタビュー #{{ interview.id }}</a> /
+  <span class="text-gray-700">引用候補</span>
+</nav>
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-2xl font-bold text-brand-900">引用候補</h1>
+    <p class="text-sm text-gray-500 mt-1">QuoteCandidate を確認し、candidate を approved/rejected に更新できます。</p>
+  </div>
+  <div class="flex items-center gap-2">
+    <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}"
+       class="text-sm border border-gray-300 rounded px-3 py-1.5 hover:bg-gray-50">
+      インタビュー詳細へ戻る
+    </a>
+    <form method="post" action="{{ url_for('interviews.quote_candidates_from_flags', interview_id=interview.id) }}">
+      <button type="submit"
+              class="text-sm bg-brand-500 text-white rounded px-3 py-1.5 hover:bg-brand-700">
+        from_flags 実行
+      </button>
+    </form>
+  </div>
+</div>
+
+<div class="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+  <div class="text-sm text-gray-700 flex flex-wrap items-center gap-2">
+    <span>candidate: <span class="font-semibold">{{ counts.candidate }}</span></span>
+    <span>approved: <span class="font-semibold">{{ counts.approved }}</span></span>
+    <span>rejected: <span class="font-semibold">{{ counts.rejected }}</span></span>
+  </div>
+  <div class="mt-2 flex flex-wrap gap-2 text-xs">
+    <a href="{{ url_for('interviews.quote_candidates', interview_id=interview.id) }}"
+       class="px-2 py-1 rounded border {{ 'border-brand-400 text-brand-700 bg-brand-50' if not status_filter else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">
+      全件
+    </a>
+    {% for st in ['candidate', 'approved', 'rejected'] %}
+    <a href="{{ url_for('interviews.quote_candidates', interview_id=interview.id, status=st) }}"
+       class="px-2 py-1 rounded border {{ 'border-brand-400 text-brand-700 bg-brand-50' if status_filter == st else 'border-gray-300 text-gray-600 hover:bg-gray-50' }}">
+      {{ st }}
+    </a>
+    {% endfor %}
+  </div>
+</div>
+
+{% if items %}
+<div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="px-3 py-2 text-left w-20">id</th>
+          <th class="px-3 py-2 text-left w-44">quote_id</th>
+          <th class="px-3 py-2 text-left w-24">status</th>
+          <th class="px-3 py-2 text-left w-20">source</th>
+          <th class="px-3 py-2 text-left w-24">segment_id</th>
+          <th class="px-3 py-2 text-left w-24">participant_id</th>
+          <th class="px-3 py-2 text-left w-24">question_id</th>
+          <th class="px-3 py-2 text-left w-32">time</th>
+          <th class="px-3 py-2 text-left w-32">char_range</th>
+          <th class="px-3 py-2 text-left">quote_text</th>
+          <th class="px-3 py-2 text-left w-48">timestamps</th>
+          <th class="px-3 py-2 text-left w-48">操作</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+      {% for item in items %}
+        <tr id="quote-candidate-{{ item.id }}" class="hover:bg-gray-50 {% if focus_id and item.id == focus_id %}bg-indigo-50{% endif %}">
+          <td class="px-3 py-2 text-xs font-mono">#{{ item.id }}</td>
+          <td class="px-3 py-2 text-xs font-mono text-gray-700">{{ item.quote_id }}</td>
+          <td class="px-3 py-2 text-xs">
+            {% if item.status == 'candidate' %}
+              <span class="px-2 py-0.5 rounded bg-amber-100 text-amber-800">candidate</span>
+            {% elif item.status == 'approved' %}
+              <span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">approved</span>
+            {% else %}
+              <span class="px-2 py-0.5 rounded bg-gray-100 text-gray-700">{{ item.status }}</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-xs">{{ item.source }}</td>
+          <td class="px-3 py-2 text-xs">
+            <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}#segment-{{ item.segment_id }}"
+               class="text-brand-700 hover:underline">{{ item.segment_id }}</a>
+          </td>
+          <td class="px-3 py-2 text-xs">{{ item.participant_id or '-' }}</td>
+          <td class="px-3 py-2 text-xs">{{ item.question_id or '-' }}</td>
+          <td class="px-3 py-2 text-xs">{{ item.start_sec if item.start_sec is not none else '-' }} - {{ item.end_sec if item.end_sec is not none else '-' }}</td>
+          <td class="px-3 py-2 text-xs">{{ item.char_start if item.char_start is not none else '-' }} : {{ item.char_end if item.char_end is not none else '-' }}</td>
+          <td class="px-3 py-2 text-xs text-gray-800">{{ item.quote_text }}</td>
+          <td class="px-3 py-2 text-xs text-gray-500">
+            <div>c: {{ item.created_at or '-' }}</div>
+            <div>u: {{ item.updated_at or '-' }}</div>
+          </td>
+          <td class="px-3 py-2">
+            {% if item.status == 'candidate' %}
+            <div class="flex items-center gap-1">
+              <form method="post" action="{{ url_for('interviews.update_quote_candidate_status_ui', interview_id=interview.id, quote_id=item.quote_id) }}">
+                <input type="hidden" name="status" value="approved">
+                <button type="submit"
+                        class="text-xs rounded border border-emerald-300 text-emerald-700 px-2 py-1 hover:bg-emerald-50">
+                  approved
+                </button>
+              </form>
+              <form method="post" action="{{ url_for('interviews.update_quote_candidate_status_ui', interview_id=interview.id, quote_id=item.quote_id) }}">
+                <input type="hidden" name="status" value="rejected">
+                <button type="submit"
+                        class="text-xs rounded border border-gray-300 text-gray-700 px-2 py-1 hover:bg-gray-50">
+                  rejected
+                </button>
+              </form>
+            </div>
+            {% else %}
+              <span class="text-xs text-gray-400">更新済み</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="bg-white rounded-lg border border-gray-200 p-6 text-sm text-gray-500">
+  引用候補はまだありません。from_flags 実行で候補を生成できます。
+</div>
+{% endif %}
+{% endblock %}

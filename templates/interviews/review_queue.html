@@ -82,6 +82,9 @@
             {% if item.target_type == 'speaker_assignment' %}
               <a href="{{ url_for('interviews.speaker_review', interview_id=interview.id) }}"
                  class="text-cyan-700 hover:underline">話者対応へ</a>
+            {% elif item.target_type == 'quote_candidate' %}
+              <a href="{{ url_for('interviews.quote_candidates', interview_id=interview.id, focus_id=item.target_id) }}"
+                 class="text-indigo-700 hover:underline">引用候補へ</a>
             {% elif item.target_type == 'segment' %}
               <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}#segment-{{ item.target_id }}"
                  class="text-brand-700 hover:underline">segmentへ</a>
