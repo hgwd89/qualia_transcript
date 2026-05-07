@@ -10,6 +10,7 @@ import config
 from models.interview import Interview
 from models.generated_file import GeneratedFile
 from models import db
+from services.output_quote_gate import get_approved_quote_candidates_for_interview
 
 
 def _fmt_time(sec: float | None) -> str:
@@ -22,6 +23,29 @@ def _fmt_time(sec: float | None) -> str:
 
 def _has_quote_flag(seg) -> bool:
     return any(f.flag_type == "quote" for f in (seg.segment_flags or []))
+
+
+def _append_approved_quote_section(doc: Document, approved_quotes: list[dict]) -> None:
+    if not approved_quotes:
+        return
+
+    doc.add_heading("【正式引用（承認済み）】", level=2)
+    for row in approved_quotes:
+        time_str = f"[{_fmt_time(row.get('start_sec'))}–{_fmt_time(row.get('end_sec'))}]"
+        meta_parts = [
+            f"quote_id={row.get('quote_id')}",
+            f"segment_id={row.get('segment_id')}",
+        ]
+        if row.get("participant_id") is not None:
+            meta_parts.append(f"participant_id={row.get('participant_id')}")
+        if row.get("question_id") is not None:
+            meta_parts.append(f"question_id={row.get('question_id')}")
+        if row.get("source"):
+            meta_parts.append(f"source={row.get('source')}")
+
+        meta = doc.add_paragraph()
+        meta.add_run(f"{time_str} {' / '.join(meta_parts)}").bold = True
+        doc.add_paragraph(row.get("quote_text") or "")
 
 
 def generate_verbatim(interview_id: int) -> GeneratedFile:
@@ -89,6 +113,9 @@ def generate_verbatim(interview_id: int) -> GeneratedFile:
                 quote_mark = row.add_run("★引用候補 ")
                 quote_mark.bold = True
             row.add_run(seg.text)
+
+    approved_quotes = get_approved_quote_candidates_for_interview(db.session, interview_id)
+    _append_approved_quote_section(doc, approved_quotes)
 
     # 保存
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
