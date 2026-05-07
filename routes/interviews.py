@@ -16,8 +16,19 @@ from models.segment import Segment, UtteranceMapping
 from models.segment_flag import SegmentFlag
 from models.speaker_assignment import SpeakerAssignment
 from models.analysis import AIAnalysis
+from models.quote_candidate import QuoteCandidate
 from models.review_item import ReviewItem
 from services.product_hint import lookup_product_hints, render_inline_hint
+from services.quote_candidate_service import (
+    ALLOWED_QUOTE_CANDIDATE_SOURCES,
+    ALLOWED_QUOTE_CANDIDATE_STATUSES,
+    QuoteCandidateNotFoundError,
+    QuoteCandidateValidationError,
+    create_quote_candidate,
+    create_quote_candidates_from_flags,
+    list_quote_candidates_for_interview,
+    update_quote_candidate_status,
+)
 from services.review_queue import rebuild_review_items_for_interview
 
 bp = Blueprint("interviews", __name__)
@@ -42,6 +53,37 @@ def _is_unclassified_segment(seg: Segment, mapping=None) -> bool:
     if mapping is None:
         return True
     return bool(mapping.is_unclassified or mapping.question_id is None)
+
+
+def _parse_optional_int(raw_value):
+    if raw_value in (None, "", "null"):
+        return None
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        raise QuoteCandidateValidationError("invalid integer field")
+
+
+def _quote_candidate_to_dict(q: QuoteCandidate):
+    return {
+        "id": q.id,
+        "quote_id": q.quote_id,
+        "project_id": q.project_id,
+        "interview_id": q.interview_id,
+        "segment_id": q.segment_id,
+        "participant_id": q.participant_id,
+        "question_id": q.question_id,
+        "start_sec": q.start_sec,
+        "end_sec": q.end_sec,
+        "char_start": q.char_start,
+        "char_end": q.char_end,
+        "quote_text": q.quote_text,
+        "status": q.status,
+        "source": q.source,
+        "note": q.note,
+        "created_at": q.created_at.isoformat() if q.created_at else None,
+        "updated_at": q.updated_at.isoformat() if q.updated_at else None,
+    }
 
 
 @bp.route("/projects/<int:project_id>/interviews/new", methods=["GET", "POST"])
@@ -325,6 +367,115 @@ def update_review_item_status(interview_id, item_id):
 
     flash(f"ReviewItem #{item.id} を {item.status} に更新しました", "success")
     return redirect(url_for("interviews.review_queue", interview_id=interview_id))
+
+
+@bp.route("/api/interviews/<int:interview_id>/quote-candidates")
+def list_quote_candidates_api(interview_id):
+    Interview.query.get_or_404(interview_id)
+    status = (request.args.get("status") or "").strip().lower() or None
+    if status is not None and status not in ALLOWED_QUOTE_CANDIDATE_STATUSES:
+        return jsonify({"ok": False, "error": "invalid status filter"}), 400
+
+    rows = list_quote_candidates_for_interview(
+        db.session,
+        interview_id=interview_id,
+        status=status,
+    )
+    return jsonify({
+        "ok": True,
+        "interview_id": interview_id,
+        "count": len(rows),
+        "items": [_quote_candidate_to_dict(x) for x in rows],
+    })
+
+
+@bp.route("/api/interviews/<int:interview_id>/quote-candidates", methods=["POST"])
+def create_quote_candidate_api(interview_id):
+    Interview.query.get_or_404(interview_id)
+    payload = request.get_json(silent=True) if request.is_json else request.form
+    payload = payload or {}
+
+    try:
+        segment_id = _parse_optional_int(payload.get("segment_id"))
+        if segment_id is None:
+            raise QuoteCandidateValidationError("segment_id is required")
+
+        quote_text = (payload.get("quote_text") or "").strip()
+        source = (payload.get("source") or "human").strip().lower()
+        if source not in ALLOWED_QUOTE_CANDIDATE_SOURCES:
+            raise QuoteCandidateValidationError("invalid source")
+
+        char_start = _parse_optional_int(payload.get("char_start"))
+        char_end = _parse_optional_int(payload.get("char_end"))
+        participant_id = _parse_optional_int(payload.get("participant_id"))
+        question_id = _parse_optional_int(payload.get("question_id"))
+        note = (payload.get("note") or "").strip() or None
+
+        quote, created = create_quote_candidate(
+            db.session,
+            interview_id=interview_id,
+            segment_id=segment_id,
+            quote_text=quote_text,
+            source=source,
+            char_start=char_start,
+            char_end=char_end,
+            note=note,
+            participant_id=participant_id,
+            question_id=question_id,
+        )
+        db.session.commit()
+    except QuoteCandidateNotFoundError as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except QuoteCandidateValidationError as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    return jsonify({
+        "ok": True,
+        "created": bool(created),
+        "quote_candidate": _quote_candidate_to_dict(quote),
+    })
+
+
+@bp.route("/api/interviews/<int:interview_id>/quote-candidates/from-flags", methods=["POST"])
+def create_quote_candidates_from_flags_api(interview_id):
+    Interview.query.get_or_404(interview_id)
+    summary = create_quote_candidates_from_flags(db.session, interview_id=interview_id)
+    db.session.commit()
+    return jsonify({
+        "ok": True,
+        "interview_id": interview_id,
+        "summary": summary,
+    })
+
+
+@bp.route("/api/interviews/<int:interview_id>/quote-candidates/<string:quote_id>/status", methods=["POST"])
+def update_quote_candidate_status_api(interview_id, quote_id):
+    Interview.query.get_or_404(interview_id)
+    payload = request.get_json(silent=True) if request.is_json else request.form
+    payload = payload or {}
+    status = (payload.get("status") or "").strip().lower()
+
+    try:
+        quote = update_quote_candidate_status(
+            db.session,
+            interview_id=interview_id,
+            quote_id=quote_id,
+            status=status,
+        )
+        db.session.commit()
+    except QuoteCandidateNotFoundError as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": str(e)}), 404
+    except QuoteCandidateValidationError as e:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    return jsonify({
+        "ok": True,
+        "quote_candidate": _quote_candidate_to_dict(quote),
+    })
 
 
 @bp.route("/api/interviews/<int:interview_id>/speakers/<string:speaker_label>", methods=["POST"])
