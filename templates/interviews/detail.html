@@ -90,6 +90,10 @@
        class="text-sm text-cyan-700 border border-cyan-300 rounded px-3 py-1.5 hover:bg-cyan-50 transition">
       話者対応
     </a>
+    <a href="{{ url_for('interviews.review_queue', interview_id=interview.id) }}"
+       class="text-sm text-emerald-700 border border-emerald-300 rounded px-3 py-1.5 hover:bg-emerald-50 transition">
+      Review Queue（{{ review_open_count }}）
+    </a>
     <a href="{{ url_for('interviews.unclassified_review', interview_id=interview.id) }}"
        class="text-sm text-amber-700 border border-amber-300 rounded px-3 py-1.5 hover:bg-amber-50 transition">
       未分類レビュー（{{ unclassified_count }}）

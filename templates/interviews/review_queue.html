@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Review Queue | インタビュー #{{ interview.id }}{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}" class="hover:underline">インタビュー #{{ interview.id }}</a> /
+  <span class="text-gray-700">Review Queue</span>
+</nav>
+
+<div class="flex items-center justify-between mb-4">
+  <div>
+    <h1 class="text-2xl font-bold text-brand-900">Review Queue</h1>
+    <p class="text-sm text-gray-500 mt-1">
+      要確認項目のみを一覧表示します。ignored にした項目は自動で open に戻りません。
+    </p>
+  </div>
+  <div class="flex items-center gap-2">
+    <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}"
+       class="text-sm border border-gray-300 rounded px-3 py-1.5 hover:bg-gray-50">
+      インタビュー詳細へ戻る
+    </a>
+    <form method="post" action="{{ url_for('interviews.rebuild_review_queue', interview_id=interview.id) }}">
+      <button type="submit"
+              class="text-sm bg-brand-500 text-white rounded px-3 py-1.5 hover:bg-brand-700">
+        Rebuild
+      </button>
+    </form>
+  </div>
+</div>
+
+<div class="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+  <div class="text-sm text-gray-700">
+    open件数: <span class="font-semibold">{{ open_count }}</span> / 全件: <span class="font-semibold">{{ items|length }}</span>
+  </div>
+  <div class="mt-2 flex flex-wrap gap-2 text-xs">
+    {% if item_type_counts %}
+      {% for item_type, cnt in item_type_counts.items() %}
+      <span class="px-2 py-1 rounded bg-gray-100 text-gray-700">
+        {{ item_type }}: {{ cnt }}
+      </span>
+      {% endfor %}
+    {% else %}
+      <span class="text-gray-500">項目はまだありません。</span>
+    {% endif %}
+  </div>
+</div>
+
+{% if items %}
+<div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="px-3 py-2 text-left w-20">ID</th>
+          <th class="px-3 py-2 text-left w-28">status</th>
+          <th class="px-3 py-2 text-left w-24">severity</th>
+          <th class="px-3 py-2 text-left w-56">item_type</th>
+          <th class="px-3 py-2 text-left w-40">target</th>
+          <th class="px-3 py-2 text-left">reason</th>
+          <th class="px-3 py-2 text-left w-40">created_at</th>
+          <th class="px-3 py-2 text-left w-40">updated_at</th>
+          <th class="px-3 py-2 text-left w-56">操作</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+      {% for item in items %}
+        <tr class="hover:bg-gray-50">
+          <td class="px-3 py-2 text-xs font-mono">#{{ item.id }}</td>
+          <td class="px-3 py-2 text-xs">
+            {% if item.status == 'open' %}
+              <span class="px-2 py-0.5 rounded bg-amber-100 text-amber-800">open</span>
+            {% elif item.status == 'resolved' %}
+              <span class="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800">resolved</span>
+            {% else %}
+              <span class="px-2 py-0.5 rounded bg-gray-100 text-gray-700">{{ item.status }}</span>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-xs">{{ item.severity }}</td>
+          <td class="px-3 py-2 text-xs">{{ item.item_type }}</td>
+          <td class="px-3 py-2 text-xs">
+            <div>{{ item.target_type }} / {{ item.target_id }}</div>
+            {% if item.target_type == 'speaker_assignment' %}
+              <a href="{{ url_for('interviews.speaker_review', interview_id=interview.id) }}"
+                 class="text-cyan-700 hover:underline">話者対応へ</a>
+            {% elif item.target_type == 'segment' %}
+              <a href="{{ url_for('interviews.detail', interview_id=interview.id) }}#segment-{{ item.target_id }}"
+                 class="text-brand-700 hover:underline">segmentへ</a>
+            {% endif %}
+          </td>
+          <td class="px-3 py-2 text-xs text-gray-700">{{ item.reason or '-' }}</td>
+          <td class="px-3 py-2 text-xs text-gray-500">{{ item.created_at or '-' }}</td>
+          <td class="px-3 py-2 text-xs text-gray-500">{{ item.updated_at or '-' }}</td>
+          <td class="px-3 py-2">
+            <div class="flex items-center gap-1">
+              <form method="post" action="{{ url_for('interviews.update_review_item_status', interview_id=interview.id, item_id=item.id) }}">
+                <input type="hidden" name="status" value="resolved">
+                <button type="submit"
+                        class="text-xs rounded border border-emerald-300 text-emerald-700 px-2 py-1 hover:bg-emerald-50">
+                  resolved
+                </button>
+              </form>
+              <form method="post" action="{{ url_for('interviews.update_review_item_status', interview_id=interview.id, item_id=item.id) }}">
+                <input type="hidden" name="status" value="ignored">
+                <button type="submit"
+                        class="text-xs rounded border border-gray-300 text-gray-700 px-2 py-1 hover:bg-gray-50">
+                  ignored
+                </button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% else %}
+<div class="bg-white rounded-lg border border-gray-200 p-6 text-sm text-gray-500">
+  現在、Review Queue項目はありません。必要に応じて Rebuild を実行してください。
+</div>
+{% endif %}
+{% endblock %}

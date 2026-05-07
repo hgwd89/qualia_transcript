@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from flask import (Blueprint, render_template, request, redirect, url_for,
                    flash, jsonify, current_app)
+from sqlalchemy import case
 from werkzeug.utils import secure_filename
 import config
 from models import db
@@ -15,7 +16,9 @@ from models.segment import Segment, UtteranceMapping
 from models.segment_flag import SegmentFlag
 from models.speaker_assignment import SpeakerAssignment
 from models.analysis import AIAnalysis
+from models.review_item import ReviewItem
 from services.product_hint import lookup_product_hints, render_inline_hint
+from services.review_queue import rebuild_review_items_for_interview
 
 bp = Blueprint("interviews", __name__)
 
@@ -111,6 +114,11 @@ def detail(interview_id):
             continue
         if _is_unclassified_segment(seg):
             unclassified_count += 1
+    review_open_count = (
+        ReviewItem.query
+        .filter_by(interview_id=interview.id, status="open")
+        .count()
+    )
 
     semantic_analysis = (
         AIAnalysis.query
@@ -131,6 +139,7 @@ def detail(interview_id):
                            flag_types=FLAG_TYPES,
                            speaker_assignment_map=speaker_assignment_map,
                            unclassified_count=unclassified_count,
+                           review_open_count=review_open_count,
                            semantic_analysis=semantic_analysis,
                            semantic_payload=semantic_payload,
                            semantic_error=semantic_error)
@@ -233,6 +242,89 @@ def speaker_review(interview_id):
         rows=rows,
         speaker_roles=SPEAKER_ROLES,
     )
+
+
+@bp.route("/interviews/<int:interview_id>/review")
+def review_queue(interview_id):
+    interview = Interview.query.get_or_404(interview_id)
+    items = (
+        ReviewItem.query
+        .filter_by(interview_id=interview.id)
+        .order_by(
+            case((ReviewItem.status == "open", 0), else_=1),
+            ReviewItem.updated_at.desc(),
+            ReviewItem.id.desc(),
+        )
+        .all()
+    )
+    open_count = sum(1 for i in items if i.status == "open")
+    item_type_counts = {}
+    for item in items:
+        item_type_counts[item.item_type] = item_type_counts.get(item.item_type, 0) + 1
+
+    return render_template(
+        "interviews/review_queue.html",
+        interview=interview,
+        project=interview.project,
+        items=items,
+        open_count=open_count,
+        item_type_counts=item_type_counts,
+    )
+
+
+@bp.route("/api/interviews/<int:interview_id>/review/rebuild", methods=["POST"])
+def rebuild_review_queue(interview_id):
+    interview = Interview.query.get_or_404(interview_id)
+    summary = rebuild_review_items_for_interview(
+        db.session,
+        interview_id=interview.id,
+        resolve_missing=True,
+    )
+
+    if request.is_json:
+        return jsonify({"ok": True, "interview_id": interview.id, "summary": summary})
+
+    flash(
+        f"Review Queueを更新しました（created={summary.get('created', 0)}, "
+        f"existing={summary.get('existing', 0)}, resolved={summary.get('resolved', 0)}）",
+        "success",
+    )
+    return redirect(url_for("interviews.review_queue", interview_id=interview.id))
+
+
+@bp.route("/api/interviews/<int:interview_id>/review-items/<int:item_id>/status", methods=["POST"])
+def update_review_item_status(interview_id, item_id):
+    Interview.query.get_or_404(interview_id)
+    item = ReviewItem.query.filter_by(id=item_id, interview_id=interview_id).first()
+    if not item:
+        if request.is_json:
+            return jsonify({"ok": False, "error": "review item not found"}), 404
+        flash("ReviewItemが見つかりません", "error")
+        return redirect(url_for("interviews.review_queue", interview_id=interview_id))
+
+    payload = request.get_json(silent=True) if request.is_json else request.form
+    status = (payload.get("status") if payload else None) or ""
+    status = status.strip().lower()
+    if status not in ("resolved", "ignored"):
+        if request.is_json:
+            return jsonify({"ok": False, "error": "invalid status"}), 400
+        flash("不正なstatusです（resolved / ignored のみ）", "error")
+        return redirect(url_for("interviews.review_queue", interview_id=interview_id))
+
+    item.status = status
+    item.updated_at = datetime.now(timezone.utc)
+    db.session.commit()
+
+    if request.is_json:
+        return jsonify({
+            "ok": True,
+            "item_id": item.id,
+            "interview_id": interview_id,
+            "status": item.status,
+        })
+
+    flash(f"ReviewItem #{item.id} を {item.status} に更新しました", "success")
+    return redirect(url_for("interviews.review_queue", interview_id=interview_id))
 
 
 @bp.route("/api/interviews/<int:interview_id>/speakers/<string:speaker_label>", methods=["POST"])
