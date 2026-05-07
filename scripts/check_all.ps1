@@ -1,6 +1,7 @@
 param(
     [switch]$Flags,
     [switch]$Review,
+    [switch]$Quotes,
     [switch]$Integrated,
     [switch]$Mapping,
     [switch]$Analysis,
@@ -49,20 +50,25 @@ if ($Flags) {
 if ($Review) {
     $doReview = $true
 }
+if ($Quotes) {
+    $doQuotes = $true
+}
 
 if ($AllLocal) {
     $doSafe = $true
     $doFlags = $true
     $doReview = $true
+    $doQuotes = $true
     $doIntegrated = $true
 } else {
     $doSafe = $false
     $doFlags = $doFlags -or $false
     $doReview = $doReview -or $false
+    $doQuotes = $doQuotes -or $false
     $doIntegrated = $Integrated -or $false
 }
 
-$hasAnyFlag = $Flags -or $Review -or $Integrated -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
+$hasAnyFlag = $Flags -or $Review -or $Quotes -or $Integrated -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
 
 if (-not $hasAnyFlag) {
     $doSafe = $true
@@ -80,6 +86,11 @@ if ($doFlags) {
 
 if ($doReview) {
     Invoke-Check -Name "Review Queue Smoke Check" -ScriptPath (Join-Path $scriptDir "check_review_queue.ps1") -Paid:$false
+}
+
+if ($doQuotes) {
+    Invoke-Check -Name "Quote Candidate Smoke Check" -ScriptPath (Join-Path $scriptDir "check_quote_candidates.ps1") -Paid:$false
+    Invoke-Check -Name "Quote Candidate UI Smoke Check" -ScriptPath (Join-Path $scriptDir "check_quote_candidates_ui.ps1") -Paid:$false
 }
 
 if ($doIntegrated) {
