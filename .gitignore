@@ -3,8 +3,11 @@
 *.env.*
 
 # データベース
+instance/
 *.db
 *.sqlite3
+*.db-journal
+*.sqlite3-journal
 
 # アップロード・出力ファイル
 uploads/

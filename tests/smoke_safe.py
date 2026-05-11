@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -29,7 +30,11 @@ def is_disallowed_tracked_path(path: str) -> bool:
     return (
         p.startswith("uploads/")
         or p.startswith("outputs/")
+        or p.startswith("instance/")
         or p.endswith(".db")
+        or p.endswith(".sqlite3")
+        or p.endswith(".db-journal")
+        or p.endswith(".sqlite3-journal")
         or (p.startswith("logs/") and p.endswith(".log"))
     )
 
@@ -40,44 +45,48 @@ def main() -> int:
         sys.path.insert(0, str(repo_root))
     failures = 0
 
-    # 1) git status --short can be retrieved
     status_proc = run_git(repo_root, "status", "--short")
     ok = status_proc.returncode == 0
-    if not ok:
-        detail = (status_proc.stderr or status_proc.stdout or "unknown git error").strip()
-        failures += 0 if print_result("git status --short", ok, detail) else 1
-    else:
-        failures += 0 if print_result("git status --short", True) else 1
+    detail = "" if ok else (status_proc.stderr or status_proc.stdout or "unknown git error").strip()
+    failures += 0 if print_result("git status --short", ok, detail) else 1
 
-    # 2) .env is not tracked
     env_proc = run_git(repo_root, "ls-files", "--error-unmatch", ".env")
-    env_untracked = env_proc.returncode != 0
-    failures += 0 if print_result(".env not tracked", env_untracked) else 1
+    failures += 0 if print_result(".env not tracked", env_proc.returncode != 0) else 1
 
-    # 3) uploads/ outputs/ *.db logs/*.log are not tracked
     ls_proc = run_git(repo_root, "ls-files")
-    tracked_artifacts = []
     if ls_proc.returncode == 0:
         tracked_files = [line.strip() for line in ls_proc.stdout.splitlines() if line.strip()]
         tracked_artifacts = [f for f in tracked_files if is_disallowed_tracked_path(f)]
         artifacts_ok = len(tracked_artifacts) == 0
         detail = "" if artifacts_ok else ", ".join(tracked_artifacts[:10])
         failures += 0 if print_result(
-            "uploads/ outputs/ *.db logs/*.log not tracked", artifacts_ok, detail
+            "uploads/ outputs/ instance/ *.db logs/*.log not tracked",
+            artifacts_ok,
+            detail,
         ) else 1
     else:
         detail = (ls_proc.stderr or ls_proc.stdout or "failed to read git ls-files").strip()
         failures += 0 if print_result(
-            "uploads/ outputs/ *.db logs/*.log not tracked", False, detail
+            "uploads/ outputs/ instance/ *.db logs/*.log not tracked",
+            False,
+            detail,
         ) else 1
 
-    # App-level checks
     try:
+        import config
         from app import create_app
-        from models.project import Project
-        from models.interview import Interview, Transcription
-        from models.segment import Segment, UtteranceMapping
+        from models import db
         from models.analysis import AIAnalysis
+        from models.generated_file import GeneratedFile
+        from models.interview import Interview, MediaFile, Transcription
+        from models.interview_flow import InterviewFlow, InterviewFlowQuestion, InterviewFlowSection
+        from models.participant import Participant, ParticipantAttribute
+        from models.project import Project
+        from models.quote_candidate import QuoteCandidate
+        from models.review_item import ReviewItem
+        from models.segment import Segment, UtteranceMapping
+        from models.segment_flag import SegmentFlag
+        from models.speaker_assignment import SpeakerAssignment
 
         failures += 0 if print_result("create_app import", True) else 1
     except Exception as e:
@@ -85,72 +94,93 @@ def main() -> int:
         print("\nSummary: FAIL")
         return 1
 
-    app = create_app()
-    client = app.test_client()
+    original_database_uri = config.DATABASE_URI
+    original_upload_dir = config.UPLOAD_DIR
+    original_output_dir = config.OUTPUT_DIR
 
-    # 4) GET / == 200
-    try:
-        r = client.get("/")
-        failures += 0 if print_result("GET / returns 200", r.status_code == 200, f"status={r.status_code}") else 1
-    except Exception as e:
-        failures += 0 if print_result("GET / returns 200", False, f"{type(e).__name__}: {e}") else 1
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        config.DATABASE_URI = f"sqlite:///{(tmp_root / 'safe_smoke.db').as_posix()}"
+        config.UPLOAD_DIR = str(tmp_root / "uploads")
+        config.OUTPUT_DIR = str(tmp_root / "outputs")
+        try:
+            app = create_app()
+            client = app.test_client()
 
-    # 5) GET /settings == 200
-    try:
-        r = client.get("/settings")
-        failures += 0 if print_result(
-            "GET /settings returns 200", r.status_code == 200, f"status={r.status_code}"
-        ) else 1
-    except Exception as e:
-        failures += 0 if print_result(
-            "GET /settings returns 200", False, f"{type(e).__name__}: {e}"
-        ) else 1
+            failures += 0 if print_result(
+                "temporary database configured",
+                config.DATABASE_URI.startswith("sqlite:///") and config.DATABASE_URI.endswith("/safe_smoke.db"),
+                config.DATABASE_URI,
+            ) else 1
+            failures += 0 if print_result(
+                "temporary upload/output dirs configured",
+                str(tmp_root) in config.UPLOAD_DIR and str(tmp_root) in config.OUTPUT_DIR,
+            ) else 1
 
-    with app.app_context():
-        # 6) project_id=2 exists
-        project = Project.query.get(2)
-        failures += 0 if print_result("project_id=2 exists", project is not None) else 1
+            try:
+                r = client.get("/")
+                failures += 0 if print_result(
+                    "GET / returns 200",
+                    r.status_code == 200,
+                    f"status={r.status_code}",
+                ) else 1
+            except Exception as e:
+                failures += 0 if print_result("GET / returns 200", False, f"{type(e).__name__}: {e}") else 1
 
-        # 7) interview_id=4 exists
-        interview = Interview.query.get(4)
-        failures += 0 if print_result("interview_id=4 exists", interview is not None) else 1
+            try:
+                r = client.get("/settings")
+                failures += 0 if print_result(
+                    "GET /settings returns 200",
+                    r.status_code == 200,
+                    f"status={r.status_code}",
+                ) else 1
+            except Exception as e:
+                failures += 0 if print_result(
+                    "GET /settings returns 200",
+                    False,
+                    f"{type(e).__name__}: {e}",
+                ) else 1
 
-        # 8) transcription_id=8 exists
-        transcription = Transcription.query.get(8)
-        failures += 0 if print_result("transcription_id=8 exists", transcription is not None) else 1
+            model_classes = [
+                Project,
+                Participant,
+                ParticipantAttribute,
+                Interview,
+                MediaFile,
+                Transcription,
+                InterviewFlow,
+                InterviewFlowSection,
+                InterviewFlowQuestion,
+                Segment,
+                UtteranceMapping,
+                SegmentFlag,
+                SpeakerAssignment,
+                AIAnalysis,
+                GeneratedFile,
+                QuoteCandidate,
+                ReviewItem,
+            ]
+            with app.app_context():
+                query_ok = True
+                query_error = ""
+                try:
+                    for model_class in model_classes:
+                        model_class.query.count()
+                except Exception as e:
+                    query_ok = False
+                    query_error = f"{type(e).__name__}: {e}"
+                failures += 0 if print_result("major models queryable", query_ok, query_error) else 1
+                db.session.remove()
+                db.engine.dispose()
+        finally:
+            config.DATABASE_URI = original_database_uri
+            config.UPLOAD_DIR = original_upload_dir
+            config.OUTPUT_DIR = original_output_dir
 
-        # 9) segment_id=40 exists
-        segment = Segment.query.get(40)
-        failures += 0 if print_result("segment_id=40 exists", segment is not None) else 1
-
-        # 10) segment text matches expected
-        expected_text = "大学の時に上京しました。"
-        actual_text = (segment.text if segment else "").strip()
-        failures += 0 if print_result(
-            "segment_id=40 text matches",
-            actual_text == expected_text,
-            f"text={actual_text}" if segment else "segment missing",
-        ) else 1
-
-        # 11) mapping_count >= 1 for interview_id=4
-        mapping_count = 0
-        if interview is not None:
-            seg_ids = [s.id for s in Segment.query.filter_by(interview_id=4).all()]
-            if seg_ids:
-                mapping_count = UtteranceMapping.query.filter(
-                    UtteranceMapping.segment_id.in_(seg_ids)
-                ).count()
-        failures += 0 if print_result(
-            "mapping_count >= 1", mapping_count >= 1, f"count={mapping_count}"
-        ) else 1
-
-        # 12) per_question analysis >= 1
-        analysis_count = AIAnalysis.query.filter_by(
-            interview_id=4, analysis_type="per_question"
-        ).count()
-        failures += 0 if print_result(
-            "per_question analysis >= 1", analysis_count >= 1, f"count={analysis_count}"
-        ) else 1
+    failures += 0 if print_result(
+        "repo instance dir not created",
+        not (repo_root / "instance").exists(),
+    ) else 1
 
     if failures == 0:
         print("\nSummary: PASS")
