@@ -15,6 +15,7 @@ from models.interview import Interview
 from models.segment import Segment, UtteranceMapping
 from models.generated_file import GeneratedFile
 from models import db
+from services.output_quote_gate import get_approved_quote_candidates_for_interview
 
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F3864")
@@ -43,6 +44,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
     project      = Project.query.get(project_id)
     participants = Participant.query.filter_by(project_id=project_id).all()
     interviews   = Interview.query.filter_by(project_id=project_id).all()
+    participant_code_map = {p.id: p.participant_code for p in participants}
 
     # 参加者→インタビュー の対応マップ
     p_to_interview = {iv.participant_id: iv for iv in interviews if iv.participant_id}
@@ -170,6 +172,47 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
                              "true" if flag_map["exclude"] else "false",
                              "true" if flag_map["needs_review"] else "false",
                              ])
+
+    # ─── シート3：正式引用（承認済み） ───
+    ws3 = wb.create_sheet("正式引用（承認済み）")
+    ws3.append([
+        "interview_id",
+        "participant_code",
+        "quote_id",
+        "segment_id",
+        "question_id",
+        "start_sec",
+        "end_sec",
+        "quote_text",
+        "source",
+        "status",
+    ])
+    for iv in sorted(interviews, key=lambda x: x.id):
+        approved_quotes = get_approved_quote_candidates_for_interview(db.session, iv.id)
+        sorted_quotes = sorted(
+            approved_quotes,
+            key=lambda row: (
+                row.get("start_sec") is None,
+                row.get("start_sec") if row.get("start_sec") is not None else float("inf"),
+                row.get("quote_id") or "",
+            ),
+        )
+        for row in sorted_quotes:
+            participant_code = participant_code_map.get(row.get("participant_id"))
+            if not participant_code and iv.participant:
+                participant_code = iv.participant.participant_code
+            ws3.append([
+                iv.id,
+                participant_code or "",
+                row.get("quote_id"),
+                row.get("segment_id"),
+                row.get("question_id"),
+                row.get("start_sec"),
+                row.get("end_sec"),
+                row.get("quote_text"),
+                row.get("source"),
+                row.get("status"),
+            ])
 
     # 保存
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
