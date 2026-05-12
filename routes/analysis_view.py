@@ -2,13 +2,17 @@
 分析結果表示・プロジェクトレベル AI 分析トリガー。
 """
 import json
-from flask import Blueprint, render_template, jsonify, request
+from datetime import datetime, timezone
+from flask import Blueprint, render_template, jsonify, redirect, request, url_for
+from models import db
 from models.project import Project
 from models.interview_flow import InterviewFlowQuestion
 from models.analysis import AIAnalysis
 from services.analyzer import analyze_cross_participants, analyze_project_integrated
 
 bp = Blueprint("analysis_view", __name__)
+
+ALLOWED_REVIEW_STATUSES = {"reviewed", "approved", "rejected"}
 
 
 def _parse(a: AIAnalysis) -> dict:
@@ -19,6 +23,10 @@ def _parse(a: AIAnalysis) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
     return {"obj": a, "content": content}
+
+
+def _wants_json_response() -> bool:
+    return bool(request.is_json or "application/json" in (request.headers.get("Accept") or ""))
 
 
 @bp.route("/projects/<int:project_id>/analysis")
@@ -73,3 +81,36 @@ def run_integrated(project_id):
                         "summary": analysis.summary_text})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/projects/<int:project_id>/analyses/<int:analysis_id>/status", methods=["POST"])
+def update_analysis_status(project_id, analysis_id):
+    analysis = AIAnalysis.query.filter_by(id=analysis_id, project_id=project_id).first()
+    if not analysis:
+        if _wants_json_response():
+            return jsonify({"ok": False, "error": "analysis not found"}), 404
+        return "analysis not found", 404
+
+    payload = request.get_json(silent=True) if request.is_json else None
+    status = ((payload or {}).get("status") if payload else None) or request.form.get("status") or ""
+    status = status.strip().lower()
+    if status not in ALLOWED_REVIEW_STATUSES:
+        if _wants_json_response():
+            return jsonify({"ok": False, "error": "invalid status"}), 400
+        return "invalid status", 400
+
+    analysis.status = status
+    analysis.reviewed_at = datetime.now(timezone.utc)
+    analysis.reviewed_by = "local_user"
+    db.session.commit()
+
+    if _wants_json_response():
+        return jsonify({
+            "ok": True,
+            "analysis_id": analysis.id,
+            "status": analysis.status,
+            "reviewed_by": analysis.reviewed_by,
+            "reviewed_at": analysis.reviewed_at.isoformat() if analysis.reviewed_at else None,
+        })
+
+    return redirect(url_for("analysis_view.index", project_id=project_id) + f"#analysis-{analysis.id}")

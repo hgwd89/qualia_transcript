@@ -22,6 +22,42 @@
 <!-- ステータスメッセージ -->
 <div id="status-msg" class="hidden mb-4 p-3 rounded text-sm"></div>
 
+{% macro analysis_status_controls(a) %}
+{% set badge_class = {
+  'draft': 'bg-yellow-100 text-yellow-800',
+  'reviewed': 'bg-blue-100 text-blue-800',
+  'approved': 'bg-emerald-100 text-emerald-800',
+  'rejected': 'bg-gray-100 text-gray-700'
+}.get(a.status or 'draft', 'bg-gray-100 text-gray-700') %}
+<div class="flex flex-col items-end gap-2 text-xs">
+  <div class="flex flex-wrap justify-end items-center gap-2">
+    <span class="text-gray-400">id={{ a.id }}</span>
+    <span class="px-2 py-0.5 rounded {{ badge_class }}">status: {{ a.status or 'draft' }}</span>
+  </div>
+  {% if (a.status or 'draft') == 'draft' %}
+  <p class="text-yellow-700">Review Queue対象</p>
+  {% elif a.status == 'approved' %}
+  <p class="text-emerald-700">正式出力対象候補</p>
+  {% elif a.status == 'rejected' %}
+  <p class="text-gray-500">正式出力対象外</p>
+  {% elif a.status == 'reviewed' %}
+  <p class="text-blue-700">確認済み・正式出力は未承認</p>
+  {% endif %}
+  <div class="flex flex-wrap justify-end gap-1">
+    {% for st, label in [('reviewed', 'reviewed'), ('approved', 'approved'), ('rejected', 'rejected')] %}
+    <form method="post" action="{{ url_for('analysis_view.update_analysis_status', project_id=project.id, analysis_id=a.id) }}">
+      <input type="hidden" name="status" value="{{ st }}">
+      <button type="submit"
+              class="border border-gray-300 rounded px-2 py-1 text-gray-600 hover:bg-gray-50 transition"
+              {% if a.status == st %}disabled{% endif %}>
+        {{ label }}
+      </button>
+    </form>
+    {% endfor %}
+  </div>
+</div>
+{% endmacro %}
+
 <!-- ═══════════════════════════════════════════════
      ① 参加者別考察
 ═══════════════════════════════════════════════ -->
@@ -39,10 +75,13 @@
     {% for item in per_participant %}
     {% set a = item.obj %}
     {% set c = item.content %}
-    <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+    <div id="analysis-{{ a.id }}" class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
       <div class="bg-brand-50 px-5 py-3 flex items-center justify-between border-b border-gray-200">
         <h3 class="font-semibold text-brand-900">{{ a.title }}</h3>
-        <span class="text-xs text-gray-400">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+        <div class="flex items-start gap-4">
+          <span class="text-xs text-gray-400">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+          {{ analysis_status_controls(a) }}
+        </div>
       </div>
       <div class="p-5 space-y-4">
 
@@ -131,10 +170,13 @@
     {% for item in cross_participant %}
     {% set a = item.obj %}
     {% set c = item.content %}
-    <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+    <div id="analysis-{{ a.id }}" class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
       <div class="bg-purple-50 px-5 py-3 flex items-center justify-between border-b border-purple-100">
         <h3 class="font-semibold text-purple-900">{{ a.title }}</h3>
-        <span class="text-xs text-gray-400">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+        <div class="flex items-start gap-4">
+          <span class="text-xs text-gray-400">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+          {{ analysis_status_controls(a) }}
+        </div>
       </div>
       <div class="p-5 space-y-4">
 
@@ -219,10 +261,13 @@
   {% if integrated %}
   {% set a = integrated.obj %}
   {% set c = integrated.content %}
-  <div class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+  <div id="analysis-{{ a.id }}" class="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
     <div class="bg-brand-900 px-5 py-3 flex items-center justify-between">
       <h3 class="font-semibold text-white">{{ a.title }}</h3>
-      <span class="text-xs text-brand-200">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+      <div class="flex items-start gap-4">
+        <span class="text-xs text-brand-200">{{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}</span>
+        {{ analysis_status_controls(a) }}
+      </div>
     </div>
     <div class="p-5 space-y-5">
 
