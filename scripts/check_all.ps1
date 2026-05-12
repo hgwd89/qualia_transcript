@@ -3,6 +3,7 @@ param(
     [switch]$Review,
     [switch]$Quotes,
     [switch]$QuoteOutputs,
+    [switch]$AnalysisGate,
     [switch]$Integrated,
     [switch]$Mapping,
     [switch]$Analysis,
@@ -57,6 +58,9 @@ if ($Quotes) {
 if ($QuoteOutputs) {
     $doQuoteOutputs = $true
 }
+if ($AnalysisGate) {
+    $doAnalysisGate = $true
+}
 
 if ($AllLocal) {
     $doSafe = $true
@@ -64,6 +68,7 @@ if ($AllLocal) {
     $doReview = $true
     $doQuotes = $true
     $doQuoteOutputs = $true
+    $doAnalysisGate = $true
     $doIntegrated = $true
 } else {
     $doSafe = $false
@@ -71,10 +76,11 @@ if ($AllLocal) {
     $doReview = $doReview -or $false
     $doQuotes = $doQuotes -or $false
     $doQuoteOutputs = $doQuoteOutputs -or $false
+    $doAnalysisGate = $doAnalysisGate -or $false
     $doIntegrated = $Integrated -or $false
 }
 
-$hasAnyFlag = $Flags -or $Review -or $Quotes -or $QuoteOutputs -or $Integrated -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
+$hasAnyFlag = $Flags -or $Review -or $Quotes -or $QuoteOutputs -or $AnalysisGate -or $Integrated -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
 
 if (-not $hasAnyFlag) {
     $doSafe = $true
@@ -103,6 +109,10 @@ if ($doQuoteOutputs) {
     Invoke-Check -Name "Approved Quote Gate Smoke Check" -ScriptPath (Join-Path $scriptDir "check_output_quote_gate.ps1") -Paid:$false
     Invoke-Check -Name "Approved Quote Word Output Smoke Check" -ScriptPath (Join-Path $scriptDir "check_outputs_approved_quotes.ps1") -Paid:$false
     Invoke-Check -Name "Approved Quote Excel Output Smoke Check" -ScriptPath (Join-Path $scriptDir "check_outputs_approved_quotes_excel.ps1") -Paid:$false
+}
+
+if ($doAnalysisGate) {
+    Invoke-Check -Name "Approved AIAnalysis Output Gate Smoke Check" -ScriptPath (Join-Path $scriptDir "check_output_analysis_gate.ps1") -Paid:$false
 }
 
 if ($doIntegrated) {
