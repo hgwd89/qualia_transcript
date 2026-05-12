@@ -344,8 +344,8 @@ def main() -> int:
                     str(sorted(generated_types)),
                 ) else 1
 
-                final_mapped_text = Segment.query.get(mapped_segment.id).text
-                final_unclassified_text = Segment.query.get(unclassified_segment.id).text
+                final_mapped_text = db.session.get(Segment, mapped_segment.id).text
+                final_unclassified_text = db.session.get(Segment, unclassified_segment.id).text
                 failures += 0 if print_result(
                     "segment text unchanged",
                     final_mapped_text == mapped_baseline_text == MAPPED_TEXT

@@ -173,7 +173,7 @@ def main() -> int:
 
             with app.app_context():
                 final_count = SegmentFlag.query.filter_by(segment_id=target_segment_id).count()
-                final_text = Segment.query.get(target_segment_id).text
+                final_text = db.session.get(Segment, target_segment_id).text
                 db.session.remove()
                 db.engine.dispose()
 
