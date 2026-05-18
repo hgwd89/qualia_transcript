@@ -9,6 +9,7 @@ from models.interview_flow import InterviewFlowQuestion
 from models.segment import Segment, UtteranceMapping
 from models.analysis import AIAnalysis
 from services.ai_client import call_structured, MODEL
+from services.analysis_trace import build_per_question_trace
 
 # ── 共通スキーマ定義 ──────────────────────────────────────────
 
@@ -113,6 +114,12 @@ def analyze_per_question(interview_id: int, question_id: int) -> AIAnalysis:
         f["question_codes"] = [canonical_q_code]
         normalized_findings.append(f)
 
+    trace = build_per_question_trace(
+        db.session,
+        interview_id=interview_id,
+        question_id=question_id,
+    )
+
     normalized_result = {
         "question_id": question.id,
         "question_code": canonical_q_code,
@@ -120,6 +127,9 @@ def analyze_per_question(interview_id: int, question_id: int) -> AIAnalysis:
         "findings": normalized_findings,
         "implications": result.get("implications", ""),
         "unresolved": result.get("unresolved", ""),
+        "source_segment_ids": trace["source_segment_ids"],
+        "source_segment_quotes": trace["source_segment_quotes"],
+        "quote_ids": trace["quote_ids"],
     }
 
     analysis = AIAnalysis(
@@ -130,6 +140,8 @@ def analyze_per_question(interview_id: int, question_id: int) -> AIAnalysis:
         title=f"{question.question_code} 考察",
         summary_text=normalized_result.get("implications", ""),
         content_json=json.dumps(normalized_result, ensure_ascii=False),
+        quote_ids=json.dumps(trace["quote_ids"], ensure_ascii=False),
+        source_segment_ids=json.dumps(trace["source_segment_ids"], ensure_ascii=False),
         model_used=MODEL,
     )
     db.session.add(analysis)
