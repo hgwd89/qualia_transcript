@@ -234,11 +234,12 @@ def run_integrated_interview_analysis(
             "source_segment_quotes": src_quotes,
         })
 
-    # per-question analyses as supplementary input (no source_segment_ids today)
+    # per-question analyses with trace are evidence; missing trace remains supplementary
     per_question_rows = _latest_per_question_analyses(interview_id)
     question_insights: list[dict[str, Any]] = []
     unresolved_questions: list[str] = []
     question_findings_without_traceability = 0
+    per_question_source_ids_in_order: list[int] = []
 
     for row in per_question_rows:
         content = _parse_json(row.content_json)
@@ -248,7 +249,27 @@ def run_integrated_interview_analysis(
         implications = content.get("implications", "")
         unresolved = content.get("unresolved", "")
         findings = content.get("findings") or []
-        if isinstance(findings, list):
+
+        raw_source_ids = content.get("source_segment_ids")
+        if raw_source_ids is None and row.source_segment_ids:
+            try:
+                parsed_source_ids = json.loads(row.source_segment_ids)
+            except Exception:
+                parsed_source_ids = []
+            raw_source_ids = parsed_source_ids if isinstance(parsed_source_ids, list) else []
+        source_ids: list[int] = []
+        if isinstance(raw_source_ids, list):
+            for x in raw_source_ids:
+                try:
+                    sid = int(x)
+                except Exception:
+                    continue
+                if sid in segment_by_id and sid in candidate_flags:
+                    source_ids.append(sid)
+                    per_question_source_ids_in_order.append(sid)
+
+        traceability = "traceable_source_segment_ids" if source_ids else "supplementary_no_source_segment_ids"
+        if not source_ids and isinstance(findings, list):
             question_findings_without_traceability += len(findings)
         if unresolved:
             unresolved_questions.append(f"{question_code or question_id}: {unresolved}")
@@ -257,8 +278,8 @@ def run_integrated_interview_analysis(
             "question_code": question_code,
             "question_text": question_text,
             "summary": implications,
-            "evidence_source_segment_ids": [],  # supplementary only for now
-            "traceability": "supplementary_no_source_segment_ids",
+            "evidence_source_segment_ids": source_ids,
+            "traceability": traceability,
         })
 
     if question_findings_without_traceability > 0:
@@ -266,7 +287,7 @@ def run_integrated_interview_analysis(
             f"per_question findings ({question_findings_without_traceability}) lack source_segment_ids; treated as supplementary only"
         )
 
-    # supporting quotes (quote flags first, then semantic evidence, then respondent fallback)
+    # supporting quotes (quote flags first, then traceable per-question evidence, then semantic evidence, then respondent fallback)
     quote_items: list[dict[str, Any]] = []
     selected_segment_ids: set[int] = set()
 
@@ -280,6 +301,19 @@ def run_integrated_interview_analysis(
         _ = pid  # pid resolved for participant_insights, not needed here
         quote_items.append(_supporting_quote_item(seg, candidate_flags.get(seg.id, set()), candidate_role[seg.id], pcode))
         selected_segment_ids.add(seg.id)
+
+    for sid in per_question_source_ids_in_order:
+        if len(quote_items) >= max_quotes:
+            break
+        if sid in selected_segment_ids:
+            continue
+        seg = segment_by_id.get(sid)
+        if not seg:
+            continue
+        pid, pcode, _ = _resolve_participant_info(seg, interview, assignment_map, participant_map)
+        _ = pid
+        quote_items.append(_supporting_quote_item(seg, candidate_flags.get(seg.id, set()), candidate_role[sid], pcode))
+        selected_segment_ids.add(sid)
 
     for sid in semantic_source_ids_in_order:
         if len(quote_items) >= max_quotes:
@@ -360,7 +394,7 @@ def run_integrated_interview_analysis(
                 "confidence": "low",
                 "question_codes": [q.get("question_code")] if q.get("question_code") else [],
                 "cluster_ids": [],
-                "evidence_source_segment_ids": [],
+                "evidence_source_segment_ids": q.get("evidence_source_segment_ids", []),
             })
 
     # traceable source quotes

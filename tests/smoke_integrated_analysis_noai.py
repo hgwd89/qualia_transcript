@@ -132,7 +132,14 @@ def main() -> int:
                     is_key_question=True,
                     seq=1,
                 )
-                db.session.add(question)
+                question_missing_trace = InterviewFlowQuestion(
+                    section_id=section.id,
+                    question_code="Q2",
+                    question_text="Integrated smoke question without trace",
+                    is_key_question=False,
+                    seq=2,
+                )
+                db.session.add_all([question, question_missing_trace])
                 db.session.flush()
 
                 interview = Interview(
@@ -225,11 +232,33 @@ def main() -> int:
                     "question_text": question.question_text,
                     "findings": [
                         {
+                            "point": "Traceable question finding",
+                            "evidence_quote": SEGMENT_TEXTS[QUOTE_LABEL],
+                        }
+                    ],
+                    "implications": "Traceable per-question insight can be used as evidence.",
+                    "unresolved": "No unresolved smoke question.",
+                    "source_segment_ids": [
+                        segments_by_label[QUOTE_LABEL].id,
+                        segments_by_label[RESPONDENT_LABEL].id,
+                    ],
+                    "source_segment_quotes": [
+                        {"segment_id": segments_by_label[QUOTE_LABEL].id, "text": SEGMENT_TEXTS[QUOTE_LABEL]},
+                        {"segment_id": segments_by_label[RESPONDENT_LABEL].id, "text": SEGMENT_TEXTS[RESPONDENT_LABEL]},
+                    ],
+                    "quote_ids": [f"Q{segments_by_label[QUOTE_LABEL].id}_1"],
+                }
+                per_question_missing_trace_payload = {
+                    "question_id": question_missing_trace.id,
+                    "question_code": question_missing_trace.question_code,
+                    "question_text": question_missing_trace.question_text,
+                    "findings": [
+                        {
                             "point": "Supplementary question finding without source ids",
                             "evidence_quote": SEGMENT_TEXTS[QUOTE_LABEL],
                         }
                     ],
-                    "implications": "Per-question insight is treated as supplementary.",
+                    "implications": "Per-question insight without trace is supplementary.",
                     "unresolved": "No unresolved smoke question.",
                 }
                 db.session.add(
@@ -251,6 +280,20 @@ def main() -> int:
                         analysis_type="per_question",
                         title="Per-question smoke",
                         content_json=json.dumps(per_question_payload, ensure_ascii=False),
+                        source_segment_ids=json.dumps(per_question_payload["source_segment_ids"]),
+                        quote_ids=json.dumps(per_question_payload["quote_ids"]),
+                        model_used="none",
+                        status="draft",
+                    )
+                )
+                db.session.add(
+                    AIAnalysis(
+                        project_id=project.id,
+                        interview_id=interview.id,
+                        question_id=question_missing_trace.id,
+                        analysis_type="per_question",
+                        title="Per-question smoke without trace",
+                        content_json=json.dumps(per_question_missing_trace_payload, ensure_ascii=False),
                         model_used="none",
                         status="draft",
                     )
@@ -379,6 +422,28 @@ def main() -> int:
                     "respondent fallback remains available",
                     respondent_id in support_segment_ids or respondent_id in source_ids_set,
                     f"respondent_id={respondent_id}",
+                ) else 1
+
+                question_insights = payload.get("question_insights") or []
+                traceable_question = next((q for q in question_insights if q.get("question_code") == "Q1"), {})
+                missing_trace_question = next((q for q in question_insights if q.get("question_code") == "Q2"), {})
+                failures += 0 if print_result(
+                    "traceable per_question carries evidence ids",
+                    traceable_question.get("traceability") == "traceable_source_segment_ids"
+                    and quote_id in set(traceable_question.get("evidence_source_segment_ids") or []),
+                    f"question={traceable_question}",
+                ) else 1
+                failures += 0 if print_result(
+                    "missing-trace per_question remains supplementary",
+                    missing_trace_question.get("traceability") == "supplementary_no_source_segment_ids"
+                    and not missing_trace_question.get("evidence_source_segment_ids"),
+                    f"question={missing_trace_question}",
+                ) else 1
+                question_finding = next((f for f in payload.get("key_findings", []) if f.get("finding_id") == "Q1"), {})
+                failures += 0 if print_result(
+                    "question key finding uses per_question evidence ids",
+                    quote_id in set(question_finding.get("evidence_source_segment_ids") or []),
+                    f"finding={question_finding}",
                 ) else 1
 
                 speaker_summary = payload.get("speaker_assignment_summary") or {}
