@@ -70,7 +70,10 @@ def main() -> int:
             analysis_type="integrated",
             title="approved integrated",
             summary_text="approved summary",
-            content_json=json.dumps({"findings": [{"point": "approved"}]}, ensure_ascii=False),
+            content_json=json.dumps({
+                "findings": [{"point": "approved"}],
+                "source_segment_quotes": [{"segment_id": 101, "text": "approved evidence"}],
+            }, ensure_ascii=False),
             quote_ids=json.dumps(["Q1", "Q2"]),
             source_segment_ids=json.dumps([101, 102]),
             prompt_version="v0.2-approved",
@@ -172,6 +175,19 @@ def main() -> int:
             and broken_json.id in integrated_ids
             and approved_other_type.id not in integrated_ids,
             f"ids={sorted(integrated_ids)}",
+        ) else 1
+
+        trace_required_rows = get_approved_ai_analyses_for_project(
+            db.session,
+            project_1.id,
+            analysis_type="integrated",
+            require_trace=True,
+        )
+        trace_required_ids = {row["id"] for row in trace_required_rows}
+        failures += 0 if print_result(
+            "require_trace keeps only rows with segment ids and source quotes",
+            approved.id in trace_required_ids and broken_json.id not in trace_required_ids,
+            f"ids={sorted(trace_required_ids)}",
         ) else 1
 
         approved_row = next((row for row in rows if row["id"] == approved.id), None)

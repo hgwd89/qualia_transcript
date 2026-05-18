@@ -46,15 +46,25 @@ def _parse_json_list(value: Any) -> list[Any]:
     return parsed if isinstance(parsed, list) else []
 
 
+def _has_required_trace(row: dict[str, Any]) -> bool:
+    content = row.get("content_json") or {}
+    source_segment_ids = row.get("source_segment_ids") or []
+    source_segment_quotes = content.get("source_segment_quotes") if isinstance(content, dict) else None
+    return bool(source_segment_ids) and isinstance(source_segment_quotes, list) and bool(source_segment_quotes)
+
+
 def get_approved_ai_analyses_for_project(
     session,
     project_id: int,
     analysis_type: str | None = None,
+    require_trace: bool = False,
 ) -> list[dict[str, Any]]:
     """Return approved AIAnalysis rows for formal output use.
 
     Only status="approved" rows from the specified project are returned.
-    draft/reviewed/rejected rows are intentionally excluded.
+    draft/reviewed/rejected rows are intentionally excluded. When require_trace
+    is true, rows without source_segment_ids and source_segment_quotes are also
+    excluded from formal-output use.
     """
     query = (
         session.query(AIAnalysis)
@@ -64,7 +74,7 @@ def get_approved_ai_analyses_for_project(
         query = query.filter_by(analysis_type=analysis_type)
 
     rows = query.order_by(AIAnalysis.created_at.asc(), AIAnalysis.id.asc()).all()
-    return [
+    result = [
         {
             "id": row.id,
             "project_id": row.project_id,
@@ -84,3 +94,6 @@ def get_approved_ai_analyses_for_project(
         }
         for row in rows
     ]
+    if require_trace:
+        result = [row for row in result if _has_required_trace(row)]
+    return result
