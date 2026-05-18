@@ -5,6 +5,7 @@ param(
     [switch]$QuoteOutputs,
     [switch]$AnalysisGate,
     [switch]$AnalysisApproval,
+    [switch]$PerQuestionTrace,
     [switch]$Integrated,
     [switch]$Mapping,
     [switch]$Analysis,
@@ -65,6 +66,9 @@ if ($AnalysisGate) {
 if ($AnalysisApproval) {
     $doAnalysisApproval = $true
 }
+if ($PerQuestionTrace) {
+    $doPerQuestionTrace = $true
+}
 
 if ($AllLocal) {
     $doSafe = $true
@@ -74,6 +78,7 @@ if ($AllLocal) {
     $doQuoteOutputs = $true
     $doAnalysisGate = $true
     $doAnalysisApproval = $true
+    $doPerQuestionTrace = $true
     $doIntegrated = $true
 } else {
     $doSafe = $false
@@ -83,10 +88,11 @@ if ($AllLocal) {
     $doQuoteOutputs = $doQuoteOutputs -or $false
     $doAnalysisGate = $doAnalysisGate -or $false
     $doAnalysisApproval = $doAnalysisApproval -or $false
+    $doPerQuestionTrace = $doPerQuestionTrace -or $false
     $doIntegrated = $Integrated -or $false
 }
 
-$hasAnyFlag = $Flags -or $Review -or $Quotes -or $QuoteOutputs -or $AnalysisGate -or $AnalysisApproval -or $Integrated -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
+$hasAnyFlag = $Flags -or $Review -or $Quotes -or $QuoteOutputs -or $AnalysisGate -or $AnalysisApproval -or $PerQuestionTrace -or $Integrated -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
 
 if (-not $hasAnyFlag) {
     $doSafe = $true
@@ -123,6 +129,11 @@ if ($doAnalysisGate) {
 
 if ($doAnalysisApproval) {
     Invoke-Check -Name "AIAnalysis Approval Smoke Check" -ScriptPath (Join-Path $scriptDir "check_analysis_approval.ps1") -Paid:$false
+}
+
+if ($doPerQuestionTrace) {
+    Invoke-Check -Name "Per-Question Trace Builder Smoke Check" -ScriptPath (Join-Path $scriptDir "check_per_question_trace.ps1") -Paid:$false
+    Invoke-Check -Name "Per-Question Analyzer Trace Smoke Check" -ScriptPath (Join-Path $scriptDir "check_per_question_trace_analyzer.ps1") -Paid:$false
 }
 
 if ($doIntegrated) {
