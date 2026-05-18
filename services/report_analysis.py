@@ -13,6 +13,7 @@ from models.interview import Interview
 from models.segment import Segment, UtteranceMapping
 from models.generated_file import GeneratedFile
 from models import db
+from services.output_analysis_gate import get_approved_ai_analyses_for_project
 
 
 def _build_rows(project_id: int) -> list[list]:
@@ -76,6 +77,51 @@ def _build_rows(project_id: int) -> list[list]:
     return rows
 
 
+def _append_approved_analysis_sheet(wb: Workbook, project_id: int) -> None:
+    ws = wb.create_sheet("承認済み分析")
+    headers = [
+        "analysis_id",
+        "analysis_type",
+        "interview_id",
+        "question_id",
+        "title",
+        "summary_text",
+        "source_segment_ids",
+        "quote_ids",
+        "model_used",
+        "status",
+        "created_at",
+    ]
+    ws.append(headers)
+
+    rows = get_approved_ai_analyses_for_project(
+        db.session,
+        project_id,
+        require_trace=True,
+    )
+    for row in rows:
+        ws.append([
+            row.get("id"),
+            row.get("analysis_type"),
+            row.get("interview_id"),
+            row.get("question_id"),
+            row.get("title"),
+            row.get("summary_text"),
+            ",".join(str(x) for x in row.get("source_segment_ids", [])),
+            ",".join(str(x) for x in row.get("quote_ids", [])),
+            row.get("model_used"),
+            row.get("status"),
+            row.get("created_at"),
+        ])
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="2E4057")
+
+    ws.freeze_panes = "A2"
+
+
+
 def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
     rows    = _build_rows(project_id)
     project = Project.query.get(project_id)
@@ -94,6 +140,8 @@ def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
         cell.fill = PatternFill("solid", fgColor="2E4057")
 
     ws.freeze_panes = "A2"
+
+    _append_approved_analysis_sheet(wb, project_id)
 
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"分析データ_{project.name}_{ts}.xlsx"

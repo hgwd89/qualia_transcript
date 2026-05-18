@@ -125,6 +125,7 @@ if ($doQuoteOutputs) {
 
 if ($doAnalysisGate) {
     Invoke-Check -Name "Approved AIAnalysis Output Gate Smoke Check" -ScriptPath (Join-Path $scriptDir "check_output_analysis_gate.ps1") -Paid:$false
+    Invoke-Check -Name "Approved AIAnalysis XLSX Output Smoke Check" -ScriptPath (Join-Path $scriptDir "check_outputs_approved_analysis.ps1") -Paid:$false
 }
 
 if ($doAnalysisApproval) {
