@@ -15,6 +15,21 @@ bp = Blueprint("analysis_view", __name__)
 ALLOWED_REVIEW_STATUSES = {"reviewed", "approved", "rejected"}
 
 
+def _has_required_per_question_trace(analysis: AIAnalysis) -> bool:
+    if analysis.analysis_type != "per_question":
+        return True
+    try:
+        source_segment_ids = json.loads(analysis.source_segment_ids or "[]")
+    except (json.JSONDecodeError, TypeError):
+        source_segment_ids = []
+    try:
+        content = json.loads(analysis.content_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        content = {}
+    source_segment_quotes = content.get("source_segment_quotes") if isinstance(content, dict) else None
+    return bool(source_segment_ids) and isinstance(source_segment_quotes, list) and bool(source_segment_quotes)
+
+
 def _parse(a: AIAnalysis) -> dict:
     content = {}
     if a.content_json:
@@ -98,6 +113,11 @@ def update_analysis_status(project_id, analysis_id):
         if _wants_json_response():
             return jsonify({"ok": False, "error": "invalid status"}), 400
         return "invalid status", 400
+
+    if status == "approved" and not _has_required_per_question_trace(analysis):
+        if _wants_json_response():
+            return jsonify({"ok": False, "error": "per_question analysis requires source trace before approval"}), 400
+        return "per_question analysis requires source trace before approval", 400
 
     analysis.status = status
     analysis.reviewed_at = datetime.now(timezone.utc)

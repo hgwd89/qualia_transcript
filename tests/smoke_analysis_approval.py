@@ -26,27 +26,43 @@ def run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def make_analysis(project_id: int, analysis_type: str, title: str, status: str):
+def make_analysis(
+    project_id: int,
+    analysis_type: str,
+    title: str,
+    status: str,
+    with_trace: bool = False,
+):
     from models.analysis import AIAnalysis
+
+    content = {
+        "findings": [
+            {
+                "point": f"{title} finding",
+                "evidence_quote": f"{title} quote",
+                "participant_codes": ["P01"],
+                "question_codes": ["Q1"],
+                "confidence": "medium",
+            }
+        ],
+        "implications": f"{title} implication",
+        "unresolved": "",
+    }
+    source_segment_ids = None
+    if with_trace:
+        content["source_segment_ids"] = [101]
+        content["source_segment_quotes"] = [{"segment_id": 101, "text": f"{title} source text"}]
+        content["quote_ids"] = []
+        source_segment_ids = json.dumps([101])
 
     return AIAnalysis(
         project_id=project_id,
         analysis_type=analysis_type,
         title=title,
         summary_text=f"{title} summary",
-        content_json=json.dumps({
-            "findings": [
-                {
-                    "point": f"{title} finding",
-                    "evidence_quote": f"{title} quote",
-                    "participant_codes": ["P01"],
-                    "question_codes": ["Q1"],
-                    "confidence": "medium",
-                }
-            ],
-            "implications": f"{title} implication",
-            "unresolved": "",
-        }, ensure_ascii=False),
+        content_json=json.dumps(content, ensure_ascii=False),
+        source_segment_ids=source_segment_ids,
+        quote_ids=json.dumps([]) if with_trace else None,
         model_used="none",
         status=status,
     )
@@ -108,14 +124,32 @@ def main() -> int:
                 reviewed = make_analysis(project_1.id, "cross_participant", "reviewed analysis", "reviewed")
                 approved = make_analysis(project_1.id, "integrated", "approved analysis", "approved")
                 rejected = make_analysis(project_1.id, "per_participant", "rejected analysis", "rejected")
+                per_question_missing_trace = make_analysis(project_1.id, "per_question", "per question missing trace", "reviewed")
+                per_question_with_trace = make_analysis(
+                    project_1.id,
+                    "per_question",
+                    "per question with trace",
+                    "reviewed",
+                    with_trace=True,
+                )
                 other_project = make_analysis(project_2.id, "integrated", "other project analysis", "draft")
-                db.session.add_all([draft, reviewed, approved, rejected, other_project])
+                db.session.add_all([
+                    draft,
+                    reviewed,
+                    approved,
+                    rejected,
+                    per_question_missing_trace,
+                    per_question_with_trace,
+                    other_project,
+                ])
                 db.session.commit()
 
                 draft_id = draft.id
                 reviewed_id = reviewed.id
                 approved_id = approved.id
                 rejected_id = rejected.id
+                per_question_missing_trace_id = per_question_missing_trace.id
+                per_question_with_trace_id = per_question_with_trace.id
                 other_project_id = other_project.id
                 project_1_id = project_1.id
                 project_2_id = project_2.id
@@ -169,6 +203,30 @@ def main() -> int:
                     "POST approved works",
                     r_approved.status_code in (302, 303) and reviewed_row.status == "approved",
                     f"status_code={r_approved.status_code}, value={reviewed_row.status}",
+                ) else 1
+
+            r_per_question_missing_trace = client.post(
+                f"/api/projects/{project_1_id}/analyses/{per_question_missing_trace_id}/status",
+                json={"status": "approved"},
+            )
+            with app.app_context():
+                missing_trace_row = db.session.get(AIAnalysis, per_question_missing_trace_id)
+                failures += 0 if print_result(
+                    "per_question without trace cannot be approved",
+                    r_per_question_missing_trace.status_code == 400 and missing_trace_row.status == "reviewed",
+                    f"status_code={r_per_question_missing_trace.status_code}, value={missing_trace_row.status}",
+                ) else 1
+
+            r_per_question_with_trace = client.post(
+                f"/api/projects/{project_1_id}/analyses/{per_question_with_trace_id}/status",
+                json={"status": "approved"},
+            )
+            with app.app_context():
+                with_trace_row = db.session.get(AIAnalysis, per_question_with_trace_id)
+                failures += 0 if print_result(
+                    "per_question with trace can be approved",
+                    r_per_question_with_trace.status_code == 200 and with_trace_row.status == "approved",
+                    f"status_code={r_per_question_with_trace.status_code}, value={with_trace_row.status}",
                 ) else 1
 
             r_rejected = client.post(
