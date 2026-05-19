@@ -30,10 +30,11 @@ This repository is **Qualia Transcript**, a local Flask/SQLite web application f
 - `SegmentFlag.quote` is a lightweight candidate marker.
 - `QuoteCandidate` is the formal quote candidate entity.
 - `QuoteCandidate.quote_text` must be derived from `Segment.text` or `reviewed_text` (if introduced).
-- Per-question analysis must include:
+- Per-question analysis should carry trace fields whenever evidence exists:
   - `source_segment_ids`
   - `source_segment_quotes`
   - `quote_ids`
+- Draft per-question analysis may be saved without trace for compatibility, but it must not be approved or reflected in formal outputs until trace is present.
 
 ## Analysis Status Rules
 

@@ -87,7 +87,9 @@ Qualia Transcript を、定性調査における実務運用可能なローカ�
   - `source_segment_ids`
   - `source_segment_quotes`
   - `quote_ids`
-- `source_segment_ids` なしの保存は禁止する。
+- `source_segment_ids` なしの `draft` 保存は後方互換のため許容する。
+- `source_segment_ids` / `source_segment_quotes` なしの `per_question` は `approved` にできない。
+- 正式出力は trace 付きの `approved` AIAnalysis のみ対象にする。
 - 引用本文は必ずローカル再解決する。
 
 ## 13. Semantic Clusterの位置づけ
