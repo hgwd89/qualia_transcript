@@ -41,3 +41,11 @@
 - Default CLI behavior remains no-ai.
 - `--ai` and `--no-ai` are mutually exclusive.
 - No validation command in this step calls OpenAI API.
+
+## Implemented in `feature/integrated-analysis-cli-guards`
+
+- Added no-API CLI guard smoke checks.
+- Verified `--ai` and `--no-ai` are mutually exclusive.
+- Verified `--save` remains disabled in this phase.
+- Verified `--help` exposes `--ai`.
+- Verified integrated analysis keeps `ai_client` import lazy for no-ai checks.
