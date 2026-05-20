@@ -1,11 +1,11 @@
 """
-Integrated interview analysis (no-ai dry-run baseline).
+Integrated interview analysis service.
 
-Important:
+Important invariants:
 - Segment.text must remain unchanged.
 - raw transcripts must remain unchanged.
-- This module does not call external APIs.
-- This module does not write DB rows (save is intentionally unsupported).
+- save mode is intentionally unsupported (no DB writes).
+- AI mode is dry-run only and returns structured summaries with quote-id references.
 """
 from __future__ import annotations
 
@@ -19,6 +19,74 @@ from models.participant import Participant
 from models.segment import Segment
 from models.segment_flag import SegmentFlag
 from models.speaker_assignment import SpeakerAssignment
+from services.ai_client import MODEL as INTEGRATOR_MODEL
+from services.ai_client import call_structured
+
+
+AI_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "key_findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "finding_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                    "quote_ids": {"type": "array", "items": {"type": "string"}},
+                    "evidence_source_segment_ids": {"type": "array", "items": {"type": "integer"}},
+                    "caution": {"type": ["string", "null"]},
+                },
+                "required": [
+                    "finding_id",
+                    "summary",
+                    "confidence",
+                    "quote_ids",
+                    "evidence_source_segment_ids",
+                    "caution",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "participant_summary": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "participant_code": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "quote_ids": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["participant_code", "summary", "quote_ids"],
+                "additionalProperties": False,
+            },
+        },
+        "implications": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string"},
+                    "evidence_source_segment_ids": {"type": "array", "items": {"type": "integer"}},
+                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                },
+                "required": ["summary", "evidence_source_segment_ids", "confidence"],
+                "additionalProperties": False,
+            },
+        },
+        "unresolved_questions": {"type": "array", "items": {"type": "string"}},
+        "cautions": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "key_findings",
+        "participant_summary",
+        "implications",
+        "unresolved_questions",
+        "cautions",
+    ],
+    "additionalProperties": False,
+}
 
 
 def _parse_json(text: str | None) -> dict[str, Any]:
@@ -55,7 +123,6 @@ def _latest_per_question_analyses(interview_id: int) -> list[AIAnalysis]:
             continue
         if row.question_id not in latest_by_qid:
             latest_by_qid[row.question_id] = row
-    # keep deterministic order by question_id asc, then no_qid rows by id desc
     selected = [latest_by_qid[k] for k in sorted(latest_by_qid.keys())]
     selected.extend(no_qid_rows)
     return selected
@@ -124,18 +191,31 @@ def _supporting_quote_item(
     }
 
 
-def run_integrated_interview_analysis(
+def _unique_ints(items: list[int]) -> list[int]:
+    seen = set()
+    out: list[int] = []
+    for x in items:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _normalize_confidence(value: Any) -> str:
+    if not isinstance(value, str):
+        return "medium"
+    v = value.strip().lower()
+    if v in {"high", "medium", "low"}:
+        return v
+    return "medium"
+
+
+def _build_no_ai_result(
     interview_id: int,
-    no_ai: bool = True,
-    save: bool = False,
     max_quotes: int = 20,
     include_needs_review: bool = False,
 ) -> dict[str, Any]:
-    if not no_ai:
-        raise NotImplementedError("AI-integrated mode is not implemented yet. Use --no-ai.")
-    if save:
-        raise NotImplementedError("Save mode is not implemented for integrated analysis yet.")
-
     interview = Interview.query.get(interview_id)
     if not interview:
         raise ValueError(f"interview_id={interview_id} not found")
@@ -191,7 +271,6 @@ def run_integrated_interview_analysis(
         if "needs_review" in flags:
             cautions.append(f"segment-{seg.id} is marked needs_review")
 
-    # speaker assignment summary
     labels_in_interview = sorted({(s.speaker_label or "") for s in segments if s.speaker_label})
     unresolved_labels = sorted([lbl for lbl in labels_in_interview if lbl and lbl not in assignment_map])
     speaker_assignment_summary = {
@@ -199,7 +278,6 @@ def run_integrated_interview_analysis(
         "unresolved_labels": unresolved_labels,
     }
 
-    # semantic clusters as primary evidence source
     semantic_analysis = _latest_semantic_analysis(interview_id)
     semantic_payload = _parse_json(semantic_analysis.content_json if semantic_analysis else None)
     cluster_summaries = semantic_payload.get("cluster_summaries") if isinstance(semantic_payload, dict) else []
@@ -234,7 +312,6 @@ def run_integrated_interview_analysis(
             "source_segment_quotes": src_quotes,
         })
 
-    # per-question analyses as supplementary input (no source_segment_ids today)
     per_question_rows = _latest_per_question_analyses(interview_id)
     question_insights: list[dict[str, Any]] = []
     unresolved_questions: list[str] = []
@@ -257,7 +334,7 @@ def run_integrated_interview_analysis(
             "question_code": question_code,
             "question_text": question_text,
             "summary": implications,
-            "evidence_source_segment_ids": [],  # supplementary only for now
+            "evidence_source_segment_ids": [],
             "traceability": "supplementary_no_source_segment_ids",
         })
 
@@ -266,7 +343,6 @@ def run_integrated_interview_analysis(
             f"per_question findings ({question_findings_without_traceability}) lack source_segment_ids; treated as supplementary only"
         )
 
-    # supporting quotes (quote flags first, then semantic evidence, then respondent fallback)
     quote_items: list[dict[str, Any]] = []
     selected_segment_ids: set[int] = set()
 
@@ -276,8 +352,7 @@ def run_integrated_interview_analysis(
     for seg in quote_first:
         if len(quote_items) >= max_quotes:
             break
-        pid, pcode, _ = _resolve_participant_info(seg, interview, assignment_map, participant_map)
-        _ = pid  # pid resolved for participant_insights, not needed here
+        _, pcode, _ = _resolve_participant_info(seg, interview, assignment_map, participant_map)
         quote_items.append(_supporting_quote_item(seg, candidate_flags.get(seg.id, set()), candidate_role[seg.id], pcode))
         selected_segment_ids.add(seg.id)
 
@@ -289,8 +364,7 @@ def run_integrated_interview_analysis(
         seg = segment_by_id.get(sid)
         if not seg:
             continue
-        pid, pcode, _ = _resolve_participant_info(seg, interview, assignment_map, participant_map)
-        _ = pid
+        _, pcode, _ = _resolve_participant_info(seg, interview, assignment_map, participant_map)
         quote_items.append(_supporting_quote_item(seg, candidate_flags.get(seg.id, set()), candidate_role[sid], pcode))
         selected_segment_ids.add(sid)
 
@@ -299,12 +373,10 @@ def run_integrated_interview_analysis(
             break
         if seg.id in selected_segment_ids:
             continue
-        pid, pcode, _ = _resolve_participant_info(seg, interview, assignment_map, participant_map)
-        _ = pid
+        _, pcode, _ = _resolve_participant_info(seg, interview, assignment_map, participant_map)
         quote_items.append(_supporting_quote_item(seg, candidate_flags.get(seg.id, set()), candidate_role[seg.id], pcode))
         selected_segment_ids.add(seg.id)
 
-    # participant insights (deterministic, no AI)
     participant_bucket: dict[int, dict[str, Any]] = {}
     for seg in candidate_segments:
         pid, pcode, pname = _resolve_participant_info(seg, interview, assignment_map, participant_map)
@@ -340,7 +412,6 @@ def run_integrated_interview_analysis(
         ]
         participant_insights.append(bucket)
 
-    # key findings (deterministic placeholders from existing analyses)
     key_findings: list[dict[str, Any]] = []
     for idx, c in enumerate(semantic_cluster_insights, start=1):
         key_findings.append({
@@ -363,7 +434,6 @@ def run_integrated_interview_analysis(
                 "evidence_source_segment_ids": [],
             })
 
-    # traceable source quotes
     source_segment_ids = sorted(list({
         q["segment_id"] for q in quote_items if q.get("segment_id") is not None
     }))
@@ -439,4 +509,265 @@ def run_integrated_interview_analysis(
         "source_quote_exact_match_count": source_quote_exact_match_count,
         "api_call_count": 0,
         "db_update_performed": False,
+        "save_available": False,
+    }
+
+
+def _build_ai_input(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "interview_id": payload.get("interview_id"),
+        "speaker_assignment_summary": payload.get("speaker_assignment_summary", {}),
+        "flag_summary": payload.get("flag_summary", {}),
+        "participant_insights": payload.get("participant_insights", []),
+        "semantic_cluster_insights": payload.get("semantic_cluster_insights", []),
+        "question_insights": payload.get("question_insights", []),
+        "cautions": payload.get("cautions", []),
+        "supporting_quotes": [
+            {
+                "quote_id": q.get("quote_id"),
+                "segment_id": q.get("segment_id"),
+                "participant_code": q.get("participant_code"),
+                "speaker_role": q.get("speaker_role"),
+                "text": q.get("text"),
+                "flags": q.get("flags", []),
+            }
+            for q in (payload.get("supporting_quotes") or [])
+        ],
+    }
+
+
+def _ai_prompt_messages(ai_input: dict[str, Any]) -> tuple[str, str]:
+    system = (
+        "あなたは定性調査の統合分析アシスタントです。"
+        "出力は必ず日本語にしてください。"
+        "根拠発話にない内容を追加しないでください。"
+        "引用本文は生成しないでください。quote_idだけを根拠として返してください。"
+        "各 finding には evidence_source_segment_ids を必ず入れてください。"
+        "1人の発話を市場全体の傾向に一般化しないでください。"
+        "必ず『この参加者において』という範囲で記述してください。"
+        "因果関係を断定しないでください。"
+    )
+    user = (
+        "以下の統合分析入力データを読み、構造化JSONで要約してください。\n"
+        "注意:\n"
+        "- 引用本文は返さない\n"
+        "- quote_id と evidence_source_segment_ids のみ根拠として返す\n"
+        "- 不明点は unresolved_questions に入れる\n\n"
+        f"{json.dumps(ai_input, ensure_ascii=False)}"
+    )
+    return system, user
+
+
+def _normalize_ai_summary(
+    ai_summary: dict[str, Any],
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], bool, bool, bool, list[str]]:
+    supporting_quotes = payload.get("supporting_quotes") or []
+    quote_map = {q.get("quote_id"): q for q in supporting_quotes if q.get("quote_id")}
+    quote_to_segment = {
+        qid: q.get("segment_id")
+        for qid, q in quote_map.items()
+        if q.get("segment_id") is not None
+    }
+    valid_segment_ids = {int(x) for x in (payload.get("source_segment_ids") or []) if str(x).isdigit()}
+
+    invalid_quote_refs = 0
+    invalid_segment_refs = 0
+
+    normalized_findings: list[dict[str, Any]] = []
+    raw_findings = ai_summary.get("key_findings") or []
+    if not isinstance(raw_findings, list):
+        raw_findings = []
+    for idx, row in enumerate(raw_findings, start=1):
+        if not isinstance(row, dict):
+            continue
+        quote_ids = row.get("quote_ids") or []
+        if not isinstance(quote_ids, list):
+            quote_ids = []
+        original_quote_count = len(quote_ids)
+        quote_ids = [str(qid) for qid in quote_ids if str(qid) in quote_map]
+        invalid_quote_refs += max(0, original_quote_count - len(quote_ids))
+
+        seg_ids_raw = row.get("evidence_source_segment_ids") or []
+        if not isinstance(seg_ids_raw, list):
+            seg_ids_raw = []
+        seg_ids: list[int] = []
+        for x in seg_ids_raw:
+            try:
+                sid = int(x)
+            except Exception:
+                continue
+            seg_ids.append(sid)
+        before_seg_count = len(seg_ids)
+        seg_ids = [sid for sid in seg_ids if sid in valid_segment_ids]
+        invalid_segment_refs += max(0, before_seg_count - len(seg_ids))
+
+        if not seg_ids and quote_ids:
+            seg_ids = _unique_ints([
+                int(quote_to_segment[qid])
+                for qid in quote_ids
+                if qid in quote_to_segment and int(quote_to_segment[qid]) in valid_segment_ids
+            ])
+
+        normalized_findings.append({
+            "finding_id": str(row.get("finding_id") or f"F{idx}"),
+            "summary": str(row.get("summary") or ""),
+            "confidence": _normalize_confidence(row.get("confidence")),
+            "quote_ids": quote_ids,
+            "evidence_source_segment_ids": _unique_ints(seg_ids),
+            "caution": None if row.get("caution") in (None, "") else str(row.get("caution")),
+        })
+
+    normalized_participant_summary: list[dict[str, Any]] = []
+    raw_ps = ai_summary.get("participant_summary") or []
+    if not isinstance(raw_ps, list):
+        raw_ps = []
+    for row in raw_ps:
+        if not isinstance(row, dict):
+            continue
+        quote_ids = row.get("quote_ids") or []
+        if not isinstance(quote_ids, list):
+            quote_ids = []
+        original_quote_count = len(quote_ids)
+        quote_ids = [str(qid) for qid in quote_ids if str(qid) in quote_map]
+        invalid_quote_refs += max(0, original_quote_count - len(quote_ids))
+        normalized_participant_summary.append({
+            "participant_code": str(row.get("participant_code") or "UNKNOWN"),
+            "summary": str(row.get("summary") or ""),
+            "quote_ids": quote_ids,
+        })
+
+    normalized_implications: list[dict[str, Any]] = []
+    raw_implications = ai_summary.get("implications") or []
+    if not isinstance(raw_implications, list):
+        raw_implications = []
+    for row in raw_implications:
+        if not isinstance(row, dict):
+            continue
+        seg_ids_raw = row.get("evidence_source_segment_ids") or []
+        if not isinstance(seg_ids_raw, list):
+            seg_ids_raw = []
+        seg_ids: list[int] = []
+        for x in seg_ids_raw:
+            try:
+                sid = int(x)
+            except Exception:
+                continue
+            seg_ids.append(sid)
+        before_seg_count = len(seg_ids)
+        seg_ids = [sid for sid in seg_ids if sid in valid_segment_ids]
+        invalid_segment_refs += max(0, before_seg_count - len(seg_ids))
+
+        normalized_implications.append({
+            "summary": str(row.get("summary") or ""),
+            "evidence_source_segment_ids": _unique_ints(seg_ids),
+            "confidence": _normalize_confidence(row.get("confidence")),
+        })
+
+    unresolved_questions = ai_summary.get("unresolved_questions") or []
+    if not isinstance(unresolved_questions, list):
+        unresolved_questions = []
+    unresolved_questions = [str(x) for x in unresolved_questions if str(x).strip()]
+
+    cautions = ai_summary.get("cautions") or []
+    if not isinstance(cautions, list):
+        cautions = []
+    cautions = [str(x) for x in cautions if str(x).strip()]
+    if invalid_quote_refs > 0:
+        cautions.append(f"invalid quote_id removed: {invalid_quote_refs}")
+    if invalid_segment_refs > 0:
+        cautions.append(f"invalid evidence_source_segment_ids removed: {invalid_segment_refs}")
+
+    unresolved_labels = ((payload.get("speaker_assignment_summary") or {}).get("unresolved_labels") or [])
+    if unresolved_labels:
+        cautions.append(
+            "participant未確定のspeaker_labelがあります: " + ", ".join(str(x) for x in unresolved_labels)
+        )
+
+    normalized_summary = {
+        "key_findings": normalized_findings,
+        "participant_summary": normalized_participant_summary,
+        "implications": normalized_implications,
+        "unresolved_questions": unresolved_questions,
+        "cautions": sorted(list(dict.fromkeys(cautions))),
+    }
+
+    quote_id_validation_ok = (invalid_quote_refs == 0)
+    evidence_segment_validation_ok = (invalid_segment_refs == 0)
+    # strict schema does not allow quote body fields; all quote references are IDs only.
+    generated_quote_text_absent = True
+    return (
+        normalized_summary,
+        quote_id_validation_ok,
+        evidence_segment_validation_ok,
+        generated_quote_text_absent,
+        normalized_summary["cautions"],
+    )
+
+
+def _run_ai_dry_run(payload: dict[str, Any]) -> tuple[dict[str, Any], bool, bool, bool, list[str]]:
+    ai_input = _build_ai_input(payload)
+    system, user = _ai_prompt_messages(ai_input)
+    ai_raw = call_structured(
+        system=system,
+        user=user,
+        json_schema=AI_SUMMARY_SCHEMA,
+        schema_name="integrated_ai_summary",
+    )
+    return _normalize_ai_summary(ai_raw, payload)
+
+
+def run_integrated_interview_analysis(
+    interview_id: int,
+    no_ai: bool = True,
+    save: bool = False,
+    max_quotes: int = 20,
+    include_needs_review: bool = False,
+) -> dict[str, Any]:
+    if save:
+        raise NotImplementedError("Save mode is not implemented for integrated analysis yet.")
+
+    base_result = _build_no_ai_result(
+        interview_id=interview_id,
+        max_quotes=max_quotes,
+        include_needs_review=include_needs_review,
+    )
+    if no_ai:
+        return base_result
+
+    payload = dict(base_result["payload"])
+    (
+        ai_summary,
+        quote_id_validation_ok,
+        evidence_segment_validation_ok,
+        generated_quote_text_absent,
+        ai_cautions,
+    ) = _run_ai_dry_run(payload)
+
+    payload["mode"] = "ai_dry_run"
+    payload["ai_summary"] = ai_summary
+    payload["cautions"] = sorted(list(dict.fromkeys((payload.get("cautions") or []) + ai_cautions)))
+    payload["models"] = dict(payload.get("models") or {})
+    payload["models"]["integrator_model"] = INTEGRATOR_MODEL
+
+    return {
+        "ok": True,
+        "payload": payload,
+        "supporting_quote_count": base_result["supporting_quote_count"],
+        "semantic_cluster_insight_count": base_result["semantic_cluster_insight_count"],
+        "question_insight_count": base_result["question_insight_count"],
+        "participant_insight_count": base_result["participant_insight_count"],
+        "excluded_segment_count": base_result["excluded_segment_count"],
+        "unresolved_speaker_labels": base_result["unresolved_speaker_labels"],
+        "source_quote_exact_match_count": base_result["source_quote_exact_match_count"],
+        "api_call_count": 1,
+        "db_update_performed": False,
+        "save_available": False,
+        "ai_dry_run_ok": True,
+        "quote_id_validation_ok": quote_id_validation_ok,
+        "evidence_segment_validation_ok": evidence_segment_validation_ok,
+        "generated_quote_text_absent": generated_quote_text_absent,
+        "ai_key_findings_count": len(ai_summary.get("key_findings") or []),
+        "ai_implications_count": len(ai_summary.get("implications") or []),
+        "ai_unresolved_questions_count": len(ai_summary.get("unresolved_questions") or []),
     }
