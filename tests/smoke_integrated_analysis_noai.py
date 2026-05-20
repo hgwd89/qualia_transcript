@@ -1,4 +1,4 @@
-import subprocess
+﻿import subprocess
 import sys
 from pathlib import Path
 
@@ -35,7 +35,7 @@ def main() -> int:
     failures = 0
 
     try:
-        from app import create_app
+        from scripts.run_integrated_analysis import create_analysis_app
         from models.analysis import AIAnalysis
         from models.interview import Interview
         from models.segment import Segment
@@ -46,7 +46,7 @@ def main() -> int:
         print_result("imports", False, f"{type(e).__name__}: {e}")
         return 1
 
-    app = create_app()
+    app = create_analysis_app()
     with app.app_context():
         interview = Interview.query.get(TARGET_INTERVIEW_ID)
         failures += 0 if print_result(
@@ -250,3 +250,6 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+

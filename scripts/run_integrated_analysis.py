@@ -1,14 +1,31 @@
-import argparse
+﻿import argparse
 import json
 import os
 import sys
+
+from flask import Flask
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from app import create_app
+import config
+from models import db
 from services.integrated_analysis import run_integrated_interview_analysis
+
+
+def create_analysis_app() -> Flask:
+    """Create a minimal app context for DB-backed analysis without importing route modules.
+
+    Do not import app.create_app here: app.py imports transcription routes, which import
+    faster_whisper/transformers. This CLI must remain no-Whisper and no-external-API by default.
+    """
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = config.SECRET_KEY
+    app.config["SQLALCHEMY_DATABASE_URI"] = config.DATABASE_URI
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+    db.init_app(app)
+    return app
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,10 +43,10 @@ def main() -> int:
     args = parse_args()
 
     # Current phase: no-ai dry-run only.
-    no_ai = True if not args.no_ai else True
+    no_ai = True
     save = bool(args.save)
 
-    app = create_app()
+    app = create_analysis_app()
     with app.app_context():
         try:
             result = run_integrated_interview_analysis(
