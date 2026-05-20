@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 import os
 import sys
@@ -11,15 +11,25 @@ if ROOT_DIR not in sys.path:
 
 import config
 from models import db
+
+# Register model classes so SQLAlchemy relationship strings resolve without importing app.py/routes.
+# This keeps the integrated-analysis check no-Whisper and no-external-API.
+from models.project import Project  # noqa: F401
+from models.participant import Participant, ParticipantAttribute  # noqa: F401
+from models.interview_flow import InterviewFlow, InterviewFlowSection, InterviewFlowQuestion  # noqa: F401
+from models.interview import Interview, MediaFile, Transcription  # noqa: F401
+from models.segment import Segment, UtteranceMapping  # noqa: F401
+from models.segment_flag import SegmentFlag  # noqa: F401
+from models.speaker_assignment import SpeakerAssignment  # noqa: F401
+from models.analysis import AIAnalysis  # noqa: F401
+from models.generated_file import GeneratedFile  # noqa: F401
+from models.setting import AppSetting  # noqa: F401
+
 from services.integrated_analysis import run_integrated_interview_analysis
 
 
 def create_analysis_app() -> Flask:
-    """Create a minimal app context for DB-backed analysis without importing route modules.
-
-    Do not import app.create_app here: app.py imports transcription routes, which import
-    faster_whisper/transformers. This CLI must remain no-Whisper and no-external-API by default.
-    """
+    """Create a minimal app context for DB-backed analysis without importing route modules."""
     app = Flask(__name__)
     app.config["SECRET_KEY"] = config.SECRET_KEY
     app.config["SQLALCHEMY_DATABASE_URI"] = config.DATABASE_URI

@@ -19,8 +19,6 @@ from models.participant import Participant
 from models.segment import Segment
 from models.segment_flag import SegmentFlag
 from models.speaker_assignment import SpeakerAssignment
-from services.ai_client import MODEL as INTEGRATOR_MODEL
-from services.ai_client import call_structured
 
 
 AI_SUMMARY_SCHEMA = {
@@ -705,7 +703,11 @@ def _normalize_ai_summary(
     )
 
 
-def _run_ai_dry_run(payload: dict[str, Any]) -> tuple[dict[str, Any], bool, bool, bool, list[str]]:
+def _run_ai_dry_run(payload: dict[str, Any]) -> tuple[dict[str, Any], bool, bool, bool, list[str], str]:
+    # Lazy import: no-ai smoke checks must not import OpenAI/httpx at module import time.
+    from services.ai_client import MODEL as integrator_model
+    from services.ai_client import call_structured
+
     ai_input = _build_ai_input(payload)
     system, user = _ai_prompt_messages(ai_input)
     ai_raw = call_structured(
@@ -714,7 +716,21 @@ def _run_ai_dry_run(payload: dict[str, Any]) -> tuple[dict[str, Any], bool, bool
         json_schema=AI_SUMMARY_SCHEMA,
         schema_name="integrated_ai_summary",
     )
-    return _normalize_ai_summary(ai_raw, payload)
+    (
+        normalized_summary,
+        quote_id_validation_ok,
+        evidence_segment_validation_ok,
+        generated_quote_text_absent,
+        cautions,
+    ) = _normalize_ai_summary(ai_raw, payload)
+    return (
+        normalized_summary,
+        quote_id_validation_ok,
+        evidence_segment_validation_ok,
+        generated_quote_text_absent,
+        cautions,
+        integrator_model,
+    )
 
 
 def run_integrated_interview_analysis(
@@ -742,13 +758,14 @@ def run_integrated_interview_analysis(
         evidence_segment_validation_ok,
         generated_quote_text_absent,
         ai_cautions,
+        integrator_model,
     ) = _run_ai_dry_run(payload)
 
     payload["mode"] = "ai_dry_run"
     payload["ai_summary"] = ai_summary
     payload["cautions"] = sorted(list(dict.fromkeys((payload.get("cautions") or []) + ai_cautions)))
     payload["models"] = dict(payload.get("models") or {})
-    payload["models"]["integrator_model"] = INTEGRATOR_MODEL
+    payload["models"]["integrator_model"] = integrator_model
 
     return {
         "ok": True,
