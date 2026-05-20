@@ -12,9 +12,10 @@
    - Resolve quote body from stored `source_segment_quotes` on the app side.
 
 3. Add explicit AI-run option only  
-   - Add `--ai` (or `--with-ai`) for AI-enabled dry-run.
-   - Without that flag, keep current no-ai behavior.
-   - Keep `--save` disabled for this phase.
+   - `--ai` enables AI dry-run explicitly.
+   - Without `--ai`, keep current no-ai behavior.
+   - `--no-ai` remains available as an explicit no-ai override.
+   - `--save` remains disabled for this phase.
 
 ## Out of Scope for This Phase
 
@@ -32,3 +33,11 @@
 - `needs_review` segments are handled as `cautions`
 - `quote` flag segments are prioritized for candidate evidence
 - Unresolved participant/speaker assignments are added to `cautions`
+
+
+## Implemented in `feature/integrated-analysis-ai-flag`
+
+- CLI now exposes `--ai` as the only way to enable AI dry-run.
+- Default CLI behavior remains no-ai.
+- `--ai` and `--no-ai` are mutually exclusive.
+- No validation command in this step calls OpenAI API.
