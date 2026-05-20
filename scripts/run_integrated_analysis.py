@@ -43,7 +43,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interview-id", type=int, required=True, help="target interview id")
     parser.add_argument("--dry-run", action="store_true", help="run without saving (default)")
     parser.add_argument("--save", action="store_true", help="not supported yet")
-    parser.add_argument("--no-ai", action="store_true", help="no-ai mode (default true)")
+    parser.add_argument("--no-ai", action="store_true", help="force no-ai mode; default behavior")
+    parser.add_argument("--ai", action="store_true", help="enable AI dry-run; calls OpenAI API once")
     parser.add_argument("--max-quotes", type=int, default=20, help="max supporting quotes in payload")
     parser.add_argument("--include-needs-review", action="store_true", help="include needs_review segments")
     return parser.parse_args()
@@ -52,8 +53,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    # Current phase: no-ai dry-run only.
-    no_ai = True
+    if args.ai and args.no_ai:
+        print(json.dumps({
+            "ok": False,
+            "error_type": "ArgumentError",
+            "error_message": "--ai and --no-ai cannot be used together",
+        }, ensure_ascii=False, indent=2))
+        return 2
+
+    # Default remains no-ai. AI dry-run is opt-in only.
+    no_ai = not bool(args.ai)
     save = bool(args.save)
 
     app = create_analysis_app()
