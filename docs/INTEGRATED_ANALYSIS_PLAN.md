@@ -56,3 +56,10 @@
 - Added link from interview detail screen.
 - Added preview sections for findings, quotes, participant insights, question insights, semantic clusters, cautions, and evidence map.
 - Added smoke check confirming no API call, no DB save, and unchanged Segment.text.
+
+## Implemented in `feature/integrated-analysis-preview-controls`
+
+- Added GET form controls to the integrated analysis preview UI.
+- Added `max_quotes` control for limiting supporting quotes.
+- Added `include_needs_review` checkbox for opt-in review-sensitive evidence preview.
+- Added smoke coverage for rendered controls and query parameter state.
