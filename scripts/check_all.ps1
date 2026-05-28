@@ -1,4 +1,5 @@
 param(
+    [switch]$IntegratedPreview,
     [switch]$Mapping,
     [switch]$Analysis,
     [switch]$Transcription,
@@ -39,7 +40,7 @@ if ($AllPaid) {
     $Outputs = $true
 }
 
-$hasAnyFlag = $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid
+$hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid
 
 if (-not $hasAnyFlag) {
     Invoke-Check -Name "Safe Smoke Check" -ScriptPath (Join-Path $scriptDir "check_safe.ps1") -Paid:$false
@@ -49,6 +50,9 @@ if (-not $hasAnyFlag) {
 
 if ($Mapping) {
     Invoke-Check -Name "Mapping Smoke Check" -ScriptPath (Join-Path $scriptDir "check_mapping.ps1") -Paid:$true
+}
+if ($IntegratedPreview) {
+    Invoke-Check -Name "Integrated Analysis Preview UI Check" -ScriptPath (Join-Path $scriptDir "check_integrated_analysis_preview_ui.ps1") -Paid:$false
 }
 if ($Analysis) {
     Invoke-Check -Name "Analysis Smoke Check" -ScriptPath (Join-Path $scriptDir "check_analysis.ps1") -Paid:$true
