@@ -49,3 +49,10 @@
 - Verified `--save` remains disabled in this phase.
 - Verified `--help` exposes `--ai`.
 - Verified integrated analysis keeps `ai_client` import lazy for no-ai checks.
+## Implemented in `feature/integrated-analysis-preview-ui`
+
+- Added interview-level no-ai integrated analysis preview UI.
+- Added route `/interviews/<id>/integrated-analysis/dry-run`.
+- Added link from interview detail screen.
+- Added preview sections for findings, quotes, participant insights, question insights, semantic clusters, cautions, and evidence map.
+- Added smoke check confirming no API call, no DB save, and unchanged Segment.text.

@@ -136,6 +136,37 @@ def detail(interview_id):
                            semantic_error=semantic_error)
 
 
+@bp.route("/interviews/<int:interview_id>/integrated-analysis/dry-run")
+def integrated_analysis_preview(interview_id):
+    interview = Interview.query.get_or_404(interview_id)
+    try:
+        max_quotes = int(request.args.get("max_quotes", 20))
+    except (TypeError, ValueError):
+        max_quotes = 20
+    max_quotes = max(1, min(max_quotes, 100))
+    include_needs_review = request.args.get("include_needs_review") == "1"
+
+    # Lazy import keeps this read-only preview from importing AI clients unless needed elsewhere.
+    from services.integrated_analysis import run_integrated_interview_analysis
+
+    result = run_integrated_interview_analysis(
+        interview_id=interview.id,
+        no_ai=True,
+        save=False,
+        max_quotes=max_quotes,
+        include_needs_review=include_needs_review,
+    )
+    return render_template(
+        "interviews/integrated_analysis_preview.html",
+        interview=interview,
+        project=interview.project,
+        result=result,
+        payload=result.get("payload") or {},
+        max_quotes=max_quotes,
+        include_needs_review=include_needs_review,
+    )
+
+
 @bp.route("/interviews/<int:interview_id>/unclassified")
 def unclassified_review(interview_id):
     interview = Interview.query.get_or_404(interview_id)

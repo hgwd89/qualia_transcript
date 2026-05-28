@@ -94,6 +94,10 @@
        class="text-sm text-amber-700 border border-amber-300 rounded px-3 py-1.5 hover:bg-amber-50 transition">
       未分類レビュー（{{ unclassified_count }}）
     </a>
+    <a href="{{ url_for('interviews.integrated_analysis_preview', interview_id=interview.id) }}"
+       class="text-sm text-emerald-700 border border-emerald-300 rounded px-3 py-1.5 hover:bg-emerald-50 transition">
+      統合分析 dry-run
+    </a>
     {% if interview.segments %}
     <button onclick="genVerbatim()"
             class="text-sm text-brand-500 border border-brand-500 rounded px-3 py-1.5 hover:bg-brand-50 transition">
