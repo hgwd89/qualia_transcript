@@ -1,13 +1,14 @@
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from docx import Document
 from openpyxl import load_workbook
 
 
-TARGET_SEGMENT_ID = 257
 FLAG_TYPES = ("favorite", "quote", "exclude", "needs_review")
+SEGMENT_TEXT = "出力フラグ確認用の発話です。"
 
 
 def print_result(name: str, ok: bool, detail: str = "") -> bool:
@@ -31,9 +32,102 @@ def run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def is_ignored(path: str, repo_root: Path) -> bool:
-    proc = run_git(repo_root, "check-ignore", "-q", path)
-    return proc.returncode == 0
+def repo_state(repo_root: Path) -> dict[str, bool]:
+    return {
+        "instance": (repo_root / "instance").exists(),
+        "uploads": (repo_root / "uploads").exists(),
+        "outputs": (repo_root / "outputs").exists(),
+    }
+
+
+def create_fixture(
+    db,
+    Project,
+    Participant,
+    Interview,
+    InterviewFlow,
+    InterviewFlowSection,
+    InterviewFlowQuestion,
+    Segment,
+    UtteranceMapping,
+    SegmentFlag,
+) -> dict[str, int]:
+    project = Project(name="Output Flag Smoke Project", client="Smoke Client")
+    db.session.add(project)
+    db.session.flush()
+
+    participant = Participant(
+        project_id=project.id,
+        participant_code="P01",
+        display_name="Smoke Participant",
+    )
+    db.session.add(participant)
+    db.session.flush()
+
+    flow = InterviewFlow(project_id=project.id, title="Smoke Flow")
+    db.session.add(flow)
+    db.session.flush()
+
+    section = InterviewFlowSection(flow_id=flow.id, title="Smoke Section", seq=1)
+    db.session.add(section)
+    db.session.flush()
+
+    question = InterviewFlowQuestion(
+        section_id=section.id,
+        question_code="Q1",
+        question_text="Smoke question",
+        question_type="open",
+        is_key_question=True,
+        seq=1,
+    )
+    db.session.add(question)
+    db.session.flush()
+
+    interview = Interview(
+        project_id=project.id,
+        participant_id=participant.id,
+        flow_id=flow.id,
+        status="mapped",
+    )
+    db.session.add(interview)
+    db.session.flush()
+
+    segment = Segment(
+        interview_id=interview.id,
+        participant_id=participant.id,
+        speaker_label="SPEAKER_00",
+        speaker_role="respondent",
+        start_sec=12.0,
+        end_sec=18.0,
+        text=SEGMENT_TEXT,
+        seq=1,
+    )
+    db.session.add(segment)
+    db.session.flush()
+
+    db.session.add(
+        UtteranceMapping(
+            segment_id=segment.id,
+            question_id=question.id,
+            mapped_by="manual",
+            confidence=1.0,
+            is_unclassified=True,
+        )
+    )
+    for flag_type in FLAG_TYPES:
+        db.session.add(
+            SegmentFlag(
+                segment_id=segment.id,
+                flag_type=flag_type,
+                note=f"__smoke_outputs_flags_{flag_type}__",
+            )
+        )
+    db.session.commit()
+    return {
+        "project_id": project.id,
+        "interview_id": interview.id,
+        "segment_id": segment.id,
+    }
 
 
 def main() -> int:
@@ -42,183 +136,154 @@ def main() -> int:
         sys.path.insert(0, str(repo_root))
 
     failures = 0
-    cleanup_failures = 0
+    before_repo_state = repo_state(repo_root)
 
     try:
         import config
-        from app import create_app
-        from models import db
-        from models.segment import Segment
-        from models.segment_flag import SegmentFlag
-        from services.report_verbatim import generate_verbatim
-        from services.report_formatted import generate_formatted_sheet
+
+        original_config = {
+            "DATABASE_URI": config.DATABASE_URI,
+            "UPLOAD_DIR": config.UPLOAD_DIR,
+            "OUTPUT_DIR": config.OUTPUT_DIR,
+        }
     except Exception as e:
-        print_result("imports", False, f"{type(e).__name__}: {e}")
+        print_result("config import", False, f"{type(e).__name__}: {e}")
         return 1
 
-    app = create_app()
-    with app.app_context():
-        seg = Segment.query.get(TARGET_SEGMENT_ID)
-        if not seg:
-            print_result("target segment exists", False, f"segment_id={TARGET_SEGMENT_ID} not found")
-            return 1
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        try:
+            config.DATABASE_URI = f"sqlite:///{(tmp_dir / 'outputs_flags_smoke.db').as_posix()}"
+            config.UPLOAD_DIR = str(tmp_dir / "uploads")
+            config.OUTPUT_DIR = str(tmp_dir / "outputs")
 
-        baseline_text = seg.text
-        baseline_flags = {
-            f.flag_type: (f.note or "")
-            for f in SegmentFlag.query.filter_by(segment_id=TARGET_SEGMENT_ID).all()
-        }
-        failures += 0 if print_result(
-            "record baseline",
-            True,
-            f"segment_id={TARGET_SEGMENT_ID}, baseline_flags={sorted(list(baseline_flags.keys()))}",
-        ) else 1
+            from app import create_app
+            from models import db
+            from models.interview import Interview
+            from models.interview_flow import InterviewFlow, InterviewFlowQuestion, InterviewFlowSection
+            from models.participant import Participant
+            from models.project import Project
+            from models.segment import Segment, UtteranceMapping
+            from models.segment_flag import SegmentFlag
+            from services.report_formatted import generate_formatted_sheet
+            from services.report_verbatim import generate_verbatim
 
-        # Add all target flags temporarily (preserve baseline notes if already present).
-        created_flags = []
-        for flag_type in FLAG_TYPES:
-            row = SegmentFlag.query.filter_by(segment_id=TARGET_SEGMENT_ID, flag_type=flag_type).first()
-            if row is None:
-                row = SegmentFlag(
-                    segment_id=TARGET_SEGMENT_ID,
-                    flag_type=flag_type,
-                    note=f"__smoke_outputs_flags_{flag_type}__",
+            app = create_app()
+            failures += 0 if print_result(
+                "temporary database configured",
+                app.config.get("SQLALCHEMY_DATABASE_URI") == config.DATABASE_URI,
+                app.config.get("SQLALCHEMY_DATABASE_URI", ""),
+            ) else 1
+            failures += 0 if print_result(
+                "temporary output dir configured",
+                str(tmp_dir) in config.OUTPUT_DIR,
+                config.OUTPUT_DIR,
+            ) else 1
+
+            with app.app_context():
+                ids = create_fixture(
+                    db,
+                    Project,
+                    Participant,
+                    Interview,
+                    InterviewFlow,
+                    InterviewFlowSection,
+                    InterviewFlowQuestion,
+                    Segment,
+                    UtteranceMapping,
+                    SegmentFlag,
                 )
-                db.session.add(row)
-                db.session.flush()
-                created_flags.append(row.id)
-        db.session.commit()
-        failures += 0 if print_result(
-            "temporary flags attached",
-            True,
-            f"created_count={len(created_flags)}",
-        ) else 1
+                segment_id = ids["segment_id"]
+                project_id = ids["project_id"]
+                interview_id = ids["interview_id"]
+                baseline_text = db.session.get(Segment, segment_id).text
+                failures += 0 if print_result(
+                    "self-contained output fixture created",
+                    baseline_text == SEGMENT_TEXT,
+                    f"segment_id={segment_id}",
+                ) else 1
 
-        gf_word = None
-        gf_excel = None
-        word_path = None
-        excel_path = None
+                gf_word = generate_verbatim(interview_id)
+                word_path = Path(config.OUTPUT_DIR) / gf_word.stored_path
+                failures += 0 if print_result(
+                    "generate_verbatim",
+                    word_path.is_file() and str(word_path).startswith(str(tmp_dir)),
+                    str(word_path),
+                ) else 1
 
-        try:
-            gf_word = generate_verbatim(seg.interview_id)
-            word_path = Path(config.OUTPUT_DIR) / gf_word.stored_path
-            failures += 0 if print_result(
-                "generate_verbatim",
-                True,
-                f"file_id={gf_word.id}, filename={gf_word.original_filename}",
-            ) else 1
-        except Exception as e:
-            failures += 0 if print_result("generate_verbatim", False, f"{type(e).__name__}: {e}") else 1
+                gf_excel = generate_formatted_sheet(project_id)
+                excel_path = Path(config.OUTPUT_DIR) / gf_excel.stored_path
+                failures += 0 if print_result(
+                    "generate_formatted_sheet",
+                    excel_path.is_file() and str(excel_path).startswith(str(tmp_dir)),
+                    str(excel_path),
+                ) else 1
 
-        try:
-            gf_excel = generate_formatted_sheet(seg.interview.project_id)
-            excel_path = Path(config.OUTPUT_DIR) / gf_excel.stored_path
-            failures += 0 if print_result(
-                "generate_formatted_sheet",
-                True,
-                f"file_id={gf_excel.id}, filename={gf_excel.original_filename}",
-            ) else 1
-        except Exception as e:
-            failures += 0 if print_result("generate_formatted_sheet", False, f"{type(e).__name__}: {e}") else 1
+                final_text = db.session.get(Segment, segment_id).text
+                db.session.remove()
+                db.engine.dispose()
 
-        # Word: marker check
-        if word_path and word_path.is_file():
-            doc = Document(str(word_path))
-            texts = [p.text for p in doc.paragraphs]
-            marker_found = any("★引用候補" in t for t in texts)
-            marker_with_target = any(("★引用候補" in t and baseline_text in t) for t in texts)
-            failures += 0 if print_result(
-                "word marker present",
-                marker_found,
-                f"path={word_path.name}",
-            ) else 1
-            failures += 0 if print_result(
-                "word marker linked to target segment",
-                marker_with_target,
-            ) else 1
-        else:
-            failures += 0 if print_result("word output exists", False, str(word_path)) else 1
-
-        # Excel: columns + values
-        if excel_path and excel_path.is_file():
-            wb = load_workbook(str(excel_path), data_only=True)
-            ws_unclassified = wb["未分類発言"]
-
-            headers = [str(c.value) if c.value is not None else "" for c in ws_unclassified[1]]
-            header_ok = all(name in headers for name in FLAG_TYPES)
-            failures += 0 if print_result(
-                "excel unclassified flag columns",
-                header_ok,
-                ",".join(headers),
-            ) else 1
-
-            flag_values_ok = False
-            if header_ok and "発言テキスト" in headers:
-                text_col = headers.index("発言テキスト") + 1
-                idx = {name: headers.index(name) + 1 for name in FLAG_TYPES}
-                for r in range(2, ws_unclassified.max_row + 1):
-                    if ws_unclassified.cell(r, text_col).value == baseline_text:
-                        vals = {
-                            k: str(ws_unclassified.cell(r, c).value or "").strip().lower()
-                            for k, c in idx.items()
-                        }
-                        if all(vals[k] == "true" for k in FLAG_TYPES):
-                            flag_values_ok = True
-                            break
-
-            failures += 0 if print_result(
-                "excel flag values true for target segment",
-                flag_values_ok,
-            ) else 1
-        else:
-            failures += 0 if print_result("excel output exists", False, str(excel_path)) else 1
-
-        # outputs ignore check
-        ignored_ok = True
-        if gf_word is not None:
-            ignored_ok = ignored_ok and is_ignored(
-                str(Path("outputs") / gf_word.stored_path.replace("\\", "/")),
-                repo_root,
-            )
-        if gf_excel is not None:
-            ignored_ok = ignored_ok and is_ignored(
-                str(Path("outputs") / gf_excel.stored_path.replace("\\", "/")),
-                repo_root,
-            )
-        failures += 0 if print_result("generated outputs are git-ignored", ignored_ok) else 1
-
-        # Cleanup flags: return to baseline
-        for flag_type in FLAG_TYPES:
-            row = SegmentFlag.query.filter_by(segment_id=TARGET_SEGMENT_ID, flag_type=flag_type).first()
-            if flag_type not in baseline_flags:
-                if row is not None:
-                    db.session.delete(row)
+            if word_path.is_file():
+                doc = Document(str(word_path))
+                texts = [p.text for p in doc.paragraphs]
+                marker_found = any("★引用候補" in t for t in texts)
+                marker_with_target = any(("★引用候補" in t and SEGMENT_TEXT in t) for t in texts)
+                failures += 0 if print_result(
+                    "word marker present",
+                    marker_found,
+                    f"path={word_path.name}",
+                ) else 1
+                failures += 0 if print_result(
+                    "word marker linked to target segment",
+                    marker_with_target,
+                ) else 1
             else:
-                if row is None:
-                    row = SegmentFlag(
-                        segment_id=TARGET_SEGMENT_ID,
-                        flag_type=flag_type,
-                        note=baseline_flags[flag_type],
-                    )
-                    db.session.add(row)
-                else:
-                    row.note = baseline_flags[flag_type]
-        db.session.commit()
+                failures += 0 if print_result("word output exists", False, str(word_path)) else 1
 
-        final_flags = {
-            f.flag_type: (f.note or "")
-            for f in SegmentFlag.query.filter_by(segment_id=TARGET_SEGMENT_ID).all()
-        }
-        if final_flags != baseline_flags:
-            cleanup_failures += 1
-        failures += 0 if print_result(
-            "cleanup restored baseline flags",
-            final_flags == baseline_flags and cleanup_failures == 0,
-            f"final={sorted(list(final_flags.keys()))}, baseline={sorted(list(baseline_flags.keys()))}",
-        ) else 1
+            if excel_path.is_file():
+                wb = load_workbook(str(excel_path), data_only=True)
+                ws_unclassified = wb["未分類発言"]
+                headers = [str(c.value) if c.value is not None else "" for c in ws_unclassified[1]]
+                header_ok = all(name in headers for name in FLAG_TYPES)
+                failures += 0 if print_result(
+                    "excel unclassified flag columns",
+                    header_ok,
+                    ",".join(headers),
+                ) else 1
 
-        final_text = Segment.query.get(TARGET_SEGMENT_ID).text
-        failures += 0 if print_result("segment text unchanged", final_text == baseline_text) else 1
+                flag_values_ok = False
+                if header_ok and "発言テキスト" in headers:
+                    text_col = headers.index("発言テキスト") + 1
+                    idx = {name: headers.index(name) + 1 for name in FLAG_TYPES}
+                    for row in range(2, ws_unclassified.max_row + 1):
+                        if ws_unclassified.cell(row, text_col).value == SEGMENT_TEXT:
+                            vals = {
+                                k: str(ws_unclassified.cell(row, c).value or "").strip().lower()
+                                for k, c in idx.items()
+                            }
+                            flag_values_ok = all(vals[k] == "true" for k in FLAG_TYPES)
+                            break
+                failures += 0 if print_result(
+                    "excel flag values true for target segment",
+                    flag_values_ok,
+                ) else 1
+            else:
+                failures += 0 if print_result("excel output exists", False, str(excel_path)) else 1
+
+            failures += 0 if print_result("segment text unchanged", final_text == SEGMENT_TEXT) else 1
+        except Exception as e:
+            failures += 0 if print_result("output flag smoke", False, f"{type(e).__name__}: {e}") else 1
+        finally:
+            config.DATABASE_URI = original_config["DATABASE_URI"]
+            config.UPLOAD_DIR = original_config["UPLOAD_DIR"]
+            config.OUTPUT_DIR = original_config["OUTPUT_DIR"]
+
+    after_repo_state = repo_state(repo_root)
+    failures += 0 if print_result(
+        "repo instance/uploads/outputs state unchanged",
+        before_repo_state == after_repo_state,
+        f"before={before_repo_state}, after={after_repo_state}",
+    ) else 1
 
     status_proc = run_git(repo_root, "status", "--short")
     if status_proc.returncode == 0:
