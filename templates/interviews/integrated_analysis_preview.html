@@ -48,6 +48,23 @@
     <div class="mt-4 text-xs text-gray-500">
       max_quotes={{ max_quotes }} / include_needs_review={{ '1' if include_needs_review else '0' }} / mode={{ payload.mode or '-' }}
     </div>
+    <form method="get" class="mt-4 flex flex-wrap items-end gap-3" data-testid="integrated-preview-controls">
+      <label class="text-sm text-gray-700">
+        <span class="block text-xs text-gray-500 mb-1">max_quotes</span>
+        <input type="number" name="max_quotes" min="1" max="100" value="{{ max_quotes }}"
+               class="w-28 rounded border border-gray-300 px-2 py-1 text-sm">
+      </label>
+      <label class="inline-flex items-center gap-2 text-sm text-gray-700">
+        <input type="checkbox" name="include_needs_review" value="1"
+               {% if include_needs_review %}checked{% endif %}
+               class="rounded border-gray-300">
+        needs_review を含める
+      </label>
+      <button type="submit"
+              class="text-sm text-emerald-700 border border-emerald-300 rounded px-3 py-1.5 hover:bg-emerald-50 transition">
+        dry-run 再表示
+      </button>
+    </form>
   </section>
 
   <section class="grid grid-cols-1 md:grid-cols-5 gap-3">

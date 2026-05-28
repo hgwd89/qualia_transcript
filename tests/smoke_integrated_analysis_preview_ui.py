@@ -225,6 +225,10 @@ def main() -> int:
                     'data-testid="integrated-analysis-preview"' in html,
                 ) else 1
                 failures += 0 if print_result(
+                    "preview controls rendered",
+                    'data-testid="integrated-preview-controls"' in html and 'name="max_quotes"' in html,
+                ) else 1
+                failures += 0 if print_result(
                     "api call count shown as zero",
                     'data-testid="api-call-count"' in html and ">0<" in html,
                 ) else 1
@@ -243,6 +247,20 @@ def main() -> int:
                 failures += 0 if print_result(
                     "participant insights render bucket fields",
                     "segment_count=" in html and "quote_segment_count=" in html and "speaker_labels:" in html,
+                ) else 1
+
+                response_with_params = client.get(
+                    f"/interviews/{TARGET_INTERVIEW_ID}/integrated-analysis/dry-run"
+                    "?max_quotes=1&include_needs_review=1"
+                )
+                html_with_params = response_with_params.get_data(as_text=True)
+                failures += 0 if print_result(
+                    "preview query controls affect rendered state",
+                    response_with_params.status_code == 200
+                    and "max_quotes=1 / include_needs_review=1" in html_with_params
+                    and 'value="1"' in html_with_params
+                    and "checked" in html_with_params,
+                    f"status={response_with_params.status_code}",
                 ) else 1
 
                 after_analysis_count = AIAnalysis.query.count()
