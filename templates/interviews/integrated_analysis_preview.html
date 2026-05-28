@@ -53,7 +53,7 @@
   <section class="grid grid-cols-1 md:grid-cols-5 gap-3">
     <div class="bg-white rounded-lg border border-gray-200 p-4">
       <div class="text-xs text-gray-500">API呼び出し</div>
-      <div class="mt-1 text-2xl font-semibold text-brand-900">{{ result.api_call_count }}</div>
+      <div data-testid="api-call-count" class="mt-1 text-2xl font-semibold text-brand-900">{{ result.api_call_count }}</div>
     </div>
     <div class="bg-white rounded-lg border border-gray-200 p-4">
       <div class="text-xs text-gray-500">DB保存</div>
@@ -137,7 +137,21 @@
       {% for item in payload.participant_insights or [] %}
         <div class="border-b border-gray-100 py-2 text-sm">
           <div class="font-medium">{{ item.participant_code or '-' }}</div>
-          <div>{{ item.summary or '-' }}</div>
+          <div class="text-xs text-gray-500">
+            segment_count={{ item.segment_count or 0 }} / quote_segment_count={{ item.quote_segment_count or 0 }}
+          </div>
+          {% if item.speaker_labels %}
+            <div class="text-xs text-gray-500">speaker_labels: {{ item.speaker_labels|join(', ') }}</div>
+          {% endif %}
+          {% if item.insights %}
+            <ul class="mt-1 list-disc pl-5">
+              {% for insight in item.insights %}
+                <li>{{ insight }}</li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <div>-</div>
+          {% endif %}
         </div>
       {% else %}<p class="text-sm text-gray-500">なし</p>{% endfor %}
     </div>

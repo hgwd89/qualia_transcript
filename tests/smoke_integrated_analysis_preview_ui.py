@@ -226,7 +226,7 @@ def main() -> int:
                 ) else 1
                 failures += 0 if print_result(
                     "api call count shown as zero",
-                    "API呼び出し" in html and ">0<" in html,
+                    'data-testid="api-call-count"' in html and ">0<" in html,
                 ) else 1
                 failures += 0 if print_result(
                     "supporting quotes section rendered",
@@ -239,6 +239,10 @@ def main() -> int:
                 failures += 0 if print_result(
                     "supporting quote text rendered",
                     fixture["quote_text"] in html,
+                ) else 1
+                failures += 0 if print_result(
+                    "participant insights render bucket fields",
+                    "segment_count=" in html and "quote_segment_count=" in html and "speaker_labels:" in html,
                 ) else 1
 
                 after_analysis_count = AIAnalysis.query.count()
