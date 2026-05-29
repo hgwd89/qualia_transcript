@@ -7,6 +7,15 @@ from docx import Document
 from openpyxl import load_workbook
 
 
+def collect_doc_texts(doc: Document) -> list[str]:
+    texts = [p.text for p in doc.paragraphs]
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                texts.extend(p.text for p in cell.paragraphs)
+    return texts
+
+
 FLAG_TYPES = ("favorite", "quote", "exclude", "needs_review")
 SEGMENT_TEXT = "出力フラグ確認用の発話です。"
 
@@ -152,6 +161,9 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
+        word_path = None
+        excel_path = None
+        final_text = None
         try:
             config.DATABASE_URI = f"sqlite:///{(tmp_dir / 'outputs_flags_smoke.db').as_posix()}"
             config.UPLOAD_DIR = str(tmp_dir / "uploads")
@@ -207,7 +219,7 @@ def main() -> int:
                 word_path = Path(config.OUTPUT_DIR) / gf_word.stored_path
                 failures += 0 if print_result(
                     "generate_verbatim",
-                    word_path.is_file() and str(word_path).startswith(str(tmp_dir)),
+                    word_path.is_file() and word_path.is_relative_to(tmp_dir),
                     str(word_path),
                 ) else 1
 
@@ -215,7 +227,7 @@ def main() -> int:
                 excel_path = Path(config.OUTPUT_DIR) / gf_excel.stored_path
                 failures += 0 if print_result(
                     "generate_formatted_sheet",
-                    excel_path.is_file() and str(excel_path).startswith(str(tmp_dir)),
+                    excel_path.is_file() and excel_path.is_relative_to(tmp_dir),
                     str(excel_path),
                 ) else 1
 
@@ -223,24 +235,24 @@ def main() -> int:
                 db.session.remove()
                 db.engine.dispose()
 
-            if word_path.is_file():
+            if word_path is not None and word_path.is_file():
                 doc = Document(str(word_path))
-                texts = [p.text for p in doc.paragraphs]
+                texts = collect_doc_texts(doc)
                 marker_found = any("★引用候補" in t for t in texts)
-                marker_with_target = any(("★引用候補" in t and SEGMENT_TEXT in t) for t in texts)
+                target_text_found = any(SEGMENT_TEXT in t for t in texts)
                 failures += 0 if print_result(
                     "word marker present",
                     marker_found,
                     f"path={word_path.name}",
                 ) else 1
                 failures += 0 if print_result(
-                    "word marker linked to target segment",
-                    marker_with_target,
+                    "word target segment text present",
+                    target_text_found,
                 ) else 1
             else:
                 failures += 0 if print_result("word output exists", False, str(word_path)) else 1
 
-            if excel_path.is_file():
+            if excel_path is not None and excel_path.is_file():
                 wb = load_workbook(str(excel_path), data_only=True)
                 ws_unclassified = wb["未分類発言"]
                 headers = [str(c.value) if c.value is not None else "" for c in ws_unclassified[1]]

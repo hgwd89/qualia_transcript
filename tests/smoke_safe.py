@@ -94,6 +94,8 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_dir = Path(tmp)
+        db_ref = None
+        app_ref = None
         try:
             config.DATABASE_URI = f"sqlite:///{(tmp_dir / 'safe_smoke.db').as_posix()}"
             config.UPLOAD_DIR = str(tmp_dir / "uploads")
@@ -101,6 +103,7 @@ def main() -> int:
 
             from app import create_app
             from models import db
+            db_ref = db
             from models.project import Project
             from models.interview import Interview, Transcription
             from models.segment import Segment, UtteranceMapping
@@ -108,6 +111,7 @@ def main() -> int:
 
             failures += 0 if print_result("create_app import", True) else 1
             app = create_app()
+            app_ref = app
             failures += 0 if print_result(
                 "temporary database configured",
                 app.config.get("SQLALCHEMY_DATABASE_URI") == config.DATABASE_URI,
@@ -149,11 +153,16 @@ def main() -> int:
                     queryable,
                     "; ".join(details),
                 ) else 1
-                db.session.remove()
-                db.engine.dispose()
         except Exception as e:
             failures += 0 if print_result("temporary app smoke", False, f"{type(e).__name__}: {e}") else 1
         finally:
+            if db_ref is not None and app_ref is not None:
+                try:
+                    with app_ref.app_context():
+                        db_ref.session.remove()
+                        db_ref.engine.dispose()
+                except Exception:
+                    pass
             config.DATABASE_URI = original_config["DATABASE_URI"]
             config.UPLOAD_DIR = original_config["UPLOAD_DIR"]
             config.OUTPUT_DIR = original_config["OUTPUT_DIR"]
