@@ -1,0 +1,34 @@
+name: Investigation
+description: Request a read-only investigation before implementation.
+title: "[Investigation]: "
+labels: ["investigation"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What needs to be understood before implementation?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Files, routes, services, models, or checks to inspect.
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Constraints
+      options:
+        - label: Read-only investigation.
+        - label: Do not call OpenAI or paid APIs.
+        - label: Do not run Whisper.
+        - label: Do not modify DB, uploads, outputs, logs, or raw transcript snapshots.
+        - label: Do not change Segment.text.
+  - type: textarea
+    id: output
+    attributes:
+      label: Expected output
+      description: What should the investigation report include?

@@ -1,0 +1,47 @@
+name: Test hardening
+description: Propose safer or more reliable tests/checks.
+title: "[Test]: "
+labels: ["test-hardening"]
+body:
+  - type: textarea
+    id: target
+    attributes:
+      label: Target check or behavior
+      description: Which script, smoke test, route, service, or model needs stronger validation?
+    validations:
+      required: true
+  - type: checkboxes
+    id: category
+    attributes:
+      label: Check category
+      options:
+        - label: Safe local check, no external API
+        - label: Reversible local DB write
+        - label: Word/Excel/CSV output generation
+        - label: OpenAI or other paid/API check
+        - label: Whisper/transcription check
+        - label: Semantic dry-run/no-ai check
+  - type: textarea
+    id: gap
+    attributes:
+      label: Current gap
+      description: What can currently fail without being detected?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed validation
+      description: Describe the smallest test that covers the gap without weakening expectations.
+    validations:
+      required: true
+  - type: checkboxes
+    id: guardrails
+    attributes:
+      label: Required guardrails
+      options:
+        - label: Must not call OpenAI unless explicitly categorized as paid/API.
+        - label: Must not run Whisper unless explicitly categorized as transcription.
+        - label: Must not modify Segment.text.
+        - label: Must not modify raw transcript snapshots.
+        - label: Must not commit generated files, DB files, logs, uploads, or outputs.

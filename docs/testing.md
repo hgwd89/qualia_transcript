@@ -172,6 +172,8 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 
 If generated files appear in `git status --short`, do not stage them. Identify which command created them and report it.
 
+For GitHub review and branch-protection guidance, also read `docs/github-operations.md`.
+
 ## Git Hygiene Checks
 
 Before staging:

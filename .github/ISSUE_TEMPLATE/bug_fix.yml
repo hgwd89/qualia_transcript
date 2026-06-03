@@ -1,0 +1,52 @@
+name: Bug fix
+description: Report a defect with concrete reproduction and safety impact.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for defects. Do not include API keys, raw transcript snapshots, uploaded media, or private respondent data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is broken?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: List exact steps and commands. Mark any paid/API or Whisper steps clearly.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety impact
+      options:
+        - label: This may affect raw transcript snapshots.
+        - label: This may affect Segment.text.
+        - label: This may affect uploaded media.
+        - label: This may affect generated Word/Excel/CSV outputs.
+        - label: This may call OpenAI or another paid API.
+        - label: This may run Whisper/transcription.
+        - label: This may affect DB schema or migrations.
+  - type: textarea
+    id: validation
+    attributes:
+      label: Checks already run
+      description: Include command names and results. Do not paste secrets.

@@ -54,4 +54,5 @@ This file is a companion guide for Claude Code work on Qualia Transcript.
 
 - Update `docs/architecture.md` when model, route, service, or data-flow responsibilities change.
 - Update `docs/testing.md` when a check script, smoke test, safe check, paid check, or output-generation check changes.
+- Update `docs/github-operations.md` when branch protection, PR review, CODEOWNERS, or GitHub Actions guidance changes.
 - Keep PR descriptions explicit about external API usage, database writes, generated outputs, and raw transcript or `Segment.text` safety.
