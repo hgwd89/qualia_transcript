@@ -14,6 +14,14 @@ This repository is `Qualia Transcript`, a local Flask application for qualitativ
 - Do not expose secrets from `.env`, logs, or command output.
 - Do not print API key values. Report keys only as `set` or `not set`.
 
+## Cross-agent documentation
+
+- `CLAUDE.md` is a companion guide for Claude Code. `AGENTS.md` remains the highest-priority repository rule.
+- `docs/architecture.md` describes the current app structure and raw-data versus derived-data boundaries.
+- `docs/testing.md` describes safe checks, paid/API checks, output-generation checks, and PR preflight checks.
+- When architecture, check behavior, or quality gates change, update the relevant documentation in the same PR.
+- Text analysis, segmentation, semantic analysis, and output generation must preserve source traceability and must not overwrite raw transcript data or `Segment.text`.
+
 ## Do not touch unless explicitly requested
 
 Do not modify these areas during launcher, README, or operations tasks:
