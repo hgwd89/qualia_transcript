@@ -1,0 +1,35 @@
+name: Safe Smoke Check
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  safe-smoke:
+    name: safe-smoke
+    runs-on: windows-latest
+    env:
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      RAKUTEN_APP_ID: ""
+      GOOGLE_BOOKS_API_KEY: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run safe smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
