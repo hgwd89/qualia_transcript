@@ -23,7 +23,7 @@ Recommended settings:
 
 Recommended required check:
 
-- Safe smoke check only.
+- `safe-smoke` from `.github/workflows/safe-check.yml`.
 
 Do not make these required by default unless the PR explicitly targets them:
 
@@ -46,6 +46,8 @@ Safe checks must not:
 - print `.env` values or API keys
 
 If a check violates one of these rules, it belongs in a manual or paid/API category, not in required CI.
+
+The safe workflow intentionally runs only `scripts/check_safe.ps1`. Do not add mapping, analysis, transcription, or output-generation checks to this workflow.
 
 ## Paid/API and Whisper Checks
 

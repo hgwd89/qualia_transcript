@@ -36,6 +36,10 @@ Results:
 
 ```
 
+Required GitHub check:
+
+- [ ] `safe-smoke` passed, or the failure is explained and unrelated to this PR.
+
 ## Raw Data and Evidence Safety
 
 - [ ] Analysis results remain derived data.

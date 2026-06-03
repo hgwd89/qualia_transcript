@@ -49,6 +49,8 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 
 This check must not call OpenAI or Whisper. If it starts requiring an external provider, treat that as a regression.
 
+GitHub Actions runs the same safe category through `.github/workflows/safe-check.yml` with the `safe-smoke` job.
+
 ## Integrated Analysis No-AI Checks
 
 Run integrated analysis checks only when validating no-ai integrated assembly:
