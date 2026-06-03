@@ -11,6 +11,7 @@ Focus on:
 - Whether tests were removed, weakened, or made less meaningful.
 - Whether DB schema, API format, save format, or output columns changed without approval.
 - Whether paid/API or Whisper checks were mixed into safe checks.
+- Whether local-data-integrity checks that depend on an existing DB were mixed into CI-required safe checks.
 - Whether `.env`, API keys, real data, generated outputs, logs, or DB files are included.
 - Whether large refactors or UI changes were introduced without need.
 - Whether branch protection and manual GitHub settings are documented.

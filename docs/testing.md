@@ -16,6 +16,8 @@ Output-generation checks may create Word, Excel, CSV, or `GeneratedFile` records
 
 Reversible-write checks may create and restore local database rows. They are not fully read-only and should not be treated as default safe checks unless they have been made self-contained in the current branch.
 
+Manual local-data-integrity checks inspect an existing local database in read-only mode. They are not CI-required safe checks because their result depends on local research data.
+
 ## Current Aggregate Runner
 
 On current `master`, run:
@@ -50,6 +52,28 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 This check must not call OpenAI or Whisper. If it starts requiring an external provider, treat that as a regression.
 
 GitHub Actions runs the same safe category through `.github/workflows/safe-check.yml` with the `safe-smoke` job.
+
+## Manual Local Data Integrity Check
+
+Use this only when a human wants to inspect the existing local SQLite database without modifying it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_local_data_integrity.ps1
+```
+
+Contract:
+
+- opens the SQLite database in read-only mode
+- does not call OpenAI
+- does not run Whisper
+- does not generate Word or Excel outputs
+- does not call `create_app()` or `db.create_all()`
+- reports structural integrity for `Segment`, `UtteranceMapping`, `SegmentFlag`, `SpeakerAssignment`, and `AIAnalysis`
+- reports a representative `Segment.text` fingerprint for manual comparison
+- optionally compares against `QUALIA_LOCAL_DATA_BASELINE`
+- skips successfully when the configured DB exists but contains no segments
+
+This check is manual-only. Do not add it to `.github/workflows/safe-check.yml` and do not make it a required branch-protection check.
 
 ## Integrated Analysis No-AI Checks
 

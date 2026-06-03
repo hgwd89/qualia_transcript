@@ -32,6 +32,7 @@ Do not make these required by default unless the PR explicitly targets them:
 - Whisper/transcription checks.
 - Bulk Word or Excel output generation checks.
 - Checks that require private local fixture data.
+- Manual local-data-integrity checks that inspect an existing local database.
 
 ## Safe Check Policy
 
@@ -48,6 +49,8 @@ Safe checks must not:
 If a check violates one of these rules, it belongs in a manual or paid/API category, not in required CI.
 
 The safe workflow intentionally runs only `scripts/check_safe.ps1`. Do not add mapping, analysis, transcription, or output-generation checks to this workflow.
+
+`scripts/check_local_data_integrity.ps1` is a manual read-only local database check. It is useful for validating a research workstation, but it depends on local data and must not be a required CI check.
 
 ## Paid/API and Whisper Checks
 
