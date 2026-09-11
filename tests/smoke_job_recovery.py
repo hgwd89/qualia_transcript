@@ -86,20 +86,20 @@ def main() -> int:
                     created_at=now - timedelta(minutes=6),
                     started_at=now - timedelta(minutes=6),
                 )
-                stale_running = ProcessingJob(
+                old_running_with_pid = ProcessingJob(
                     project_id=project_id,
                     job_type="map",
                     status="running",
                     worker_pid=99999,
-                    created_at=now - timedelta(hours=13),
-                    started_at=now - timedelta(hours=13),
+                    created_at=now - timedelta(hours=24),
+                    started_at=now - timedelta(hours=24),
                 )
-                db.session.add_all([fresh, stale_pending, stale_running_no_pid, stale_running])
+                db.session.add_all([fresh, stale_pending, stale_running_no_pid, old_running_with_pid])
                 db.session.commit()
                 fresh_id = fresh.id
                 stale_pending_id = stale_pending.id
                 stale_running_no_pid_id = stale_running_no_pid.id
-                stale_running_id = stale_running.id
+                old_running_with_pid_id = old_running_with_pid.id
 
                 failures += check(
                     "fresh pending job is not stale",
@@ -114,20 +114,25 @@ def main() -> int:
                     stale_reason(stale_running_no_pid, now=now) is not None,
                 )
                 failures += check(
-                    "very old running job is stale",
-                    stale_reason(stale_running, now=now) is not None,
+                    "PID-backed running job is never auto-stale by age alone",
+                    stale_reason(old_running_with_pid, now=now) is None,
                 )
 
                 recovered = recover_stale_jobs(project_id=project_id)
                 recovered_ids = {job.id for job in recovered}
                 failures += check(
-                    "stale jobs are recovered",
-                    {stale_pending_id, stale_running_no_pid_id, stale_running_id}.issubset(recovered_ids),
+                    "unambiguous stale jobs are recovered",
+                    {stale_pending_id, stale_running_no_pid_id}.issubset(recovered_ids)
+                    and old_running_with_pid_id not in recovered_ids,
                     str(recovered_ids),
                 )
                 failures += check(
                     "fresh active job remains pending",
                     db.session.get(ProcessingJob, fresh_id).status == "pending",
+                )
+                failures += check(
+                    "PID-backed running job remains protected",
+                    db.session.get(ProcessingJob, old_running_with_pid_id).status == "running",
                 )
                 failures += check(
                     "recovered job becomes retryable failed state",
@@ -148,9 +153,9 @@ def main() -> int:
             )
 
             with app.app_context():
-                # Remove the intentionally fresh project-wide job, then verify a
-                # stale conflicting row is cleared before conflict evaluation.
+                # Remove intentional live blockers before testing stale conflict cleanup.
                 db.session.delete(db.session.get(ProcessingJob, fresh_id))
+                db.session.delete(db.session.get(ProcessingJob, old_running_with_pid_id))
                 conflict_stale = ProcessingJob(
                     project_id=project_id,
                     interview_id=123,
