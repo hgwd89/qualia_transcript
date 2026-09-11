@@ -8,7 +8,7 @@ class GeneratedFile(db.Model):
     id                     = db.Column(db.Integer, primary_key=True)
     project_id             = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False)
     interview_id           = db.Column(db.Integer, db.ForeignKey("interviews.id"))  # NULL = 全体出力
-    # verbatim / formatted_sheet / analysis / report / integrated
+    # verbatim / formatted_sheet / analysis / approved_analysis / report / integrated
     file_type              = db.Column(db.Text, nullable=False)
     # docx / xlsx / csv
     file_format            = db.Column(db.Text, nullable=False)
