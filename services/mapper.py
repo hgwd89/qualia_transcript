@@ -126,12 +126,18 @@ def run_mapping(
     if result_write_guard is not None:
         result_write_guard()
 
-    # 既存マッピングを削除して再挿入。既にロード済みの mapping がある場合も
-    # identity map を同期し、SQLite の ROWID 再利用で stale ORM state を残さない。
+    # 既存マッピングを ORM 経由で削除し、DELETE を先に flush する。
+    # SQLite は削除直後の ROWID を再利用し得るため、bulk delete のまま新規
+    # mapping を追加すると同一 PK の stale object が identity map に残る。
     seg_ids = [s.id for s in segments]
-    UtteranceMapping.query.filter(UtteranceMapping.segment_id.in_(seg_ids)).delete(
-        synchronize_session="fetch"
+    existing_mappings = (
+        UtteranceMapping.query
+        .filter(UtteranceMapping.segment_id.in_(seg_ids))
+        .all()
     )
+    for existing_mapping in existing_mappings:
+        db.session.delete(existing_mapping)
+    db.session.flush()
 
     for m in normalized_mappings:
         db.session.add(UtteranceMapping(
