@@ -6,13 +6,13 @@ OpenAI GPT API 共通クライアント。
 import json
 import openai
 import config
-from models.setting import AppSetting
+from services.secret_store import get_secret_setting
 
 MODEL = "gpt-4o"
 
 
 def _client() -> openai.OpenAI:
-    api_key = AppSetting.get("openai_api_key") or config.OPENAI_API_KEY
+    api_key = get_secret_setting("openai_api_key", config.OPENAI_API_KEY)
     return openai.OpenAI(api_key=api_key)
 
 
