@@ -99,10 +99,9 @@ def assert_job_lease(job: ProcessingJob) -> ProcessingJob:
 def begin_job_result_write(job: ProcessingJob) -> ProcessingJob:
     """Acquire a DB write reservation and validate the immutable attempt token.
 
-    This is called only after expensive external work has completed and before
-    canonical result rows are changed. On SQLite, BEGIN IMMEDIATE serializes this
-    lease check with stale recovery/retry updates and keeps the reservation until
-    the caller commits its result. Other databases use a row lock.
+    Called after expensive external work and before canonical result rows change.
+    SQLite uses BEGIN IMMEDIATE so stale recovery/retry cannot pass between this
+    lease check and the caller's result commit. Other databases use a row lock.
     """
     job_id = int(job.id)
     attempt_count = _attempt_number(job)
@@ -159,7 +158,6 @@ def _refresh_job(job_id: int) -> ProcessingJob:
 
 
 def _reserve_worker_launch(job_id: int) -> tuple[ProcessingJob, bool]:
-    """Reserve the right to spawn a worker exactly once for a pending job."""
     reserved = (
         ProcessingJob.query
         .filter(ProcessingJob.id == job_id)
@@ -178,7 +176,6 @@ def _reserve_worker_launch(job_id: int) -> tuple[ProcessingJob, bool]:
 
 
 def _release_worker_launch_reservation(job_id: int) -> None:
-    """Release only this launcher's unmaterialized reservation after Popen fails."""
     (
         ProcessingJob.query
         .filter(ProcessingJob.id == job_id)
@@ -197,7 +194,6 @@ def _release_worker_launch_reservation(job_id: int) -> None:
 
 
 def _record_worker_launch(job_id: int, pid: int) -> bool:
-    """Persist a spawned PID without resurrecting or overwriting a terminal job."""
     pid = int(pid)
     pending_updated = (
         ProcessingJob.query
@@ -230,7 +226,6 @@ def _record_worker_launch(job_id: int, pid: int) -> bool:
 
 
 def launch_job_worker(job_id: int) -> int:
-    """Launch one detached worker process and durably associate its PID."""
     job = db.session.get(ProcessingJob, job_id)
     if not job:
         raise ValueError("processing job not found")
@@ -315,7 +310,6 @@ def retry_failed_job(job: ProcessingJob) -> ProcessingJob:
 
 
 def _claim_pending_job(job_id: int, worker_pid: int | None = None) -> tuple[ProcessingJob, bool]:
-    """Atomically transition pending -> running and freeze its fencing token."""
     values = {
         ProcessingJob.status: "running",
         ProcessingJob.started_at: _utcnow(),
@@ -340,7 +334,6 @@ def _claim_pending_job(job_id: int, worker_pid: int | None = None) -> tuple[Proc
 
 
 def _finish_job_success(job_id: int, attempt_count: int, result) -> tuple[ProcessingJob, bool]:
-    """Finish only the still-current running attempt."""
     updated = _owned_running_query(job_id, attempt_count).update(
         {
             ProcessingJob.status: "succeeded",
@@ -357,7 +350,6 @@ def _finish_job_success(job_id: int, attempt_count: int, result) -> tuple[Proces
 
 
 def _finish_job_failure(job_id: int, attempt_count: int, exc: Exception) -> tuple[ProcessingJob, bool]:
-    """Fail only the still-current running attempt."""
     partial_result = getattr(exc, "job_result", None)
     values = {
         ProcessingJob.status: "failed",
@@ -435,10 +427,17 @@ def _perform_transcription(job: ProcessingJob) -> dict:
 def _perform_mapping(job: ProcessingJob) -> dict:
     from models.interview import Interview
     from services.mapper import run_mapping
+    from services.processing_result_guard import find_completed_mapping_count_for_job
 
     interview = db.session.get(Interview, job.interview_id)
     if not interview or interview.project_id != job.project_id:
         raise ValueError("interview not found in job project")
+
+    existing_count = find_completed_mapping_count_for_job(job)
+    if existing_count is not None:
+        update_progress(job, "mapping", mapped_count=existing_count, already_done=True)
+        return {"mapped_count": existing_count, "already_done": True}
+
     update_progress(job, "mapping")
     count = run_mapping(
         interview.id,
@@ -481,7 +480,6 @@ def execute_job(
     *,
     worker_pid: int | None = None,
 ) -> ProcessingJob:
-    """Atomically claim and execute one durable job in the current app context."""
     job, claimed = _claim_pending_job(job_id, worker_pid=worker_pid)
     if not claimed:
         return job
