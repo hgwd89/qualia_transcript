@@ -4,8 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from werkzeug.utils import secure_filename
-
 import config
 from models import db
 from models.interview import Interview, MediaFile
@@ -38,8 +36,12 @@ def _resolve_stored_path(stored_path: str) -> Path:
 
 
 def media_extension(original_filename: str) -> str:
-    safe = secure_filename(str(original_filename or ""))
-    ext = Path(safe).suffix.lower()
+    # The original name is metadata only; the stored filename is always a UUID.
+    # Inspect the original Unicode extension directly so names such as
+    # "インタビュー音声.mp3" do not lose their suffix through ASCII sanitization.
+    normalized = str(original_filename or "").replace("\\", "/")
+    basename = normalized.rsplit("/", 1)[-1]
+    ext = Path(basename).suffix.lower()
     if not ext or ext not in config.ALLOWED_AUDIO_EXTENSIONS:
         raise ValueError("unsupported media extension")
     return ext
