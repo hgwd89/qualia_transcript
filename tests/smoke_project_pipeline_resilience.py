@@ -72,12 +72,14 @@ def main():
             def fake_roles(interview_id):
                 processed.append((interview_id, "roles"))
 
-            def fake_mapping(interview_id):
+            def fake_mapping(interview_id, *, result_write_guard=None):
                 processed.append((interview_id, "map"))
                 if interview_id == iv1_id and failure_modes["iv1"]:
                     raise RuntimeError("intentional mapping failure")
                 if interview_id == iv4_id and failure_modes["iv4_zero"]:
                     return 0
+                if result_write_guard is not None:
+                    result_write_guard()
                 interview = db.session.get(Interview, interview_id)
                 interview.status = "mapped"
                 db.session.commit()
@@ -87,8 +89,10 @@ def main():
                 def __init__(self, ident):
                     self.id = ident
 
-            def fake_analysis(interview_id):
+            def fake_analysis(interview_id, *, result_write_guard=None):
                 processed.append((interview_id, "analyze"))
+                if result_write_guard is not None:
+                    result_write_guard()
                 interview = db.session.get(Interview, interview_id)
                 interview.status = "analyzed"
                 db.session.commit()
