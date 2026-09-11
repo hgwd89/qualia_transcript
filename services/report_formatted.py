@@ -2,7 +2,7 @@
 整形シート .xlsx 生成。
 
 行：質問項目、列：インタビュー、セル：該当発言テキスト。
-同一参加者の複数回インタビューを潰さず、未マッピング発言も未分類シートへ保持する。
+同一参加者の複数回インタビューを潰さず、複数フローと未マッピング発言も保持する。
 """
 import os
 from datetime import datetime
@@ -68,10 +68,10 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
         .all()
     )
 
-    flows = project.interview_flows
+    flows = sorted(project.interview_flows, key=lambda f: f.id or 0)
     if not flows:
         raise ValueError("インタビューフローが設定されていません")
-    flow = flows[0]
+    multiple_flows = len(flows) > 1
 
     wb = Workbook()
     ws = wb.active
@@ -106,49 +106,55 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
 
     max_col = 3 + (len(interviews) * 2)
     row = 2
-    for section in flow.sections:
-        for q in section.questions:
-            ws.cell(row, 1, section.title)
-            ws.cell(row, 2, q.question_code)
-            ws.cell(row, 3, q.question_text).alignment = Alignment(wrap_text=True)
+    for flow in flows:
+        for section in flow.sections:
+            section_label = (
+                f"{flow.title} / {section.title}"
+                if multiple_flows
+                else section.title
+            )
+            for q in section.questions:
+                ws.cell(row, 1, section_label)
+                ws.cell(row, 2, q.question_code)
+                ws.cell(row, 3, q.question_text).alignment = Alignment(wrap_text=True)
 
-            if q.is_key_question:
-                for col in range(1, max_col + 1):
-                    ws.cell(row, col).fill = _KEY_FILL
+                if q.is_key_question:
+                    for col in range(1, max_col + 1):
+                        ws.cell(row, col).fill = _KEY_FILL
 
-            for i, iv in enumerate(interviews):
-                mappings = (
-                    UtteranceMapping.query
-                    .filter_by(question_id=q.id)
-                    .join(Segment, UtteranceMapping.segment_id == Segment.id)
-                    .filter(
-                        Segment.interview_id == iv.id,
-                        Segment.speaker_role == "respondent",
+                for i, iv in enumerate(interviews):
+                    mappings = (
+                        UtteranceMapping.query
+                        .filter_by(question_id=q.id)
+                        .join(Segment, UtteranceMapping.segment_id == Segment.id)
+                        .filter(
+                            Segment.interview_id == iv.id,
+                            Segment.speaker_role == "respondent",
+                        )
+                        .order_by(Segment.seq.asc(), UtteranceMapping.id.asc())
+                        .all()
                     )
-                    .order_by(Segment.seq.asc(), UtteranceMapping.id.asc())
-                    .all()
-                )
-                text_col = col_offset + (i * 2)
-                flag_col = text_col + 1
+                    text_col = col_offset + (i * 2)
+                    flag_col = text_col + 1
 
-                texts = "\n".join(f"・{m.segment.text}" for m in mappings)
-                flags = "\n".join(
-                    f"・{_segment_flag_value_line(m.segment)}"
-                    for m in mappings
-                )
+                    texts = "\n".join(f"・{m.segment.text}" for m in mappings)
+                    flags = "\n".join(
+                        f"・{_segment_flag_value_line(m.segment)}"
+                        for m in mappings
+                    )
 
-                ws.cell(row, text_col, texts).alignment = Alignment(
-                    wrap_text=True, vertical="top"
-                )
-                ws.cell(row, flag_col, flags).alignment = Alignment(
-                    wrap_text=True, vertical="top"
-                )
+                    ws.cell(row, text_col, texts).alignment = Alignment(
+                        wrap_text=True, vertical="top"
+                    )
+                    ws.cell(row, flag_col, flags).alignment = Alignment(
+                        wrap_text=True, vertical="top"
+                    )
 
-            for col in range(1, max_col + 1):
-                ws.cell(row, col).border = _BORDER
-            row += 1
+                for col in range(1, max_col + 1):
+                    ws.cell(row, col).border = _BORDER
+                row += 1
 
-    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["A"].width = 26 if multiple_flows else 18
     ws.column_dimensions["B"].width = 12
     ws.column_dimensions["C"].width = 40
     for i in range(len(interviews)):
