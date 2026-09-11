@@ -27,6 +27,7 @@ def _launch_or_fail(job: ProcessingJob):
         job.status = "failed"
         job.error_message = f"worker launch failed: {exc}"[:4000]
         job.finished_at = datetime.now(timezone.utc)
+        job.worker_pid = None
         db.session.add(job)
         db.session.commit()
         return str(exc), None
@@ -134,6 +135,23 @@ def process_all(project_id):
     if error:
         return jsonify({"ok": False, "job_id": job.id, "error": error}), 500
     return _queued_response(job, True, pid)
+
+
+@bp.route("/api/projects/<int:project_id>/processing-status")
+def get_project_processing_status(project_id):
+    project = Project.query.get_or_404(project_id)
+    recover_stale_jobs(project_id=project.id)
+    latest_job = (
+        ProcessingJob.query
+        .filter_by(project_id=project.id, interview_id=None, job_type="project_pipeline")
+        .order_by(ProcessingJob.id.desc())
+        .first()
+    )
+    return jsonify({
+        "ok": True,
+        "project_id": project.id,
+        "latest_job": latest_job.to_dict() if latest_job else None,
+    })
 
 
 @bp.route("/api/interviews/<int:interview_id>/status")
