@@ -33,3 +33,7 @@ jobs:
       - name: Run safe smoke check
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
+
+      - name: Run atomic processing job smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_processing_jobs.ps1
