@@ -56,6 +56,17 @@ def _safe_member_name(name: str) -> str:
     return p.as_posix()
 
 
+def _is_within(root: Path, target: Path) -> bool:
+    """Return True when target resolves to root or a descendant of root.
+
+    Resolve both sides first because Windows temporary paths can mix 8.3 short
+    names (for example RUNNER~1) and long names for the same directory.
+    """
+    resolved_root = root.resolve()
+    resolved_target = target.resolve()
+    return resolved_target == resolved_root or resolved_root in resolved_target.parents
+
+
 def _sqlite_snapshot(source: Path, destination: Path) -> None:
     if not source.is_file():
         raise FileNotFoundError(f"SQLite database not found: {source}")
@@ -118,7 +129,7 @@ def create_backup(
     archive = destination / f"qualia_backup_{ts}_{safe_label}_{uuid.uuid4().hex[:8]}.zip"
 
     with tempfile.TemporaryDirectory(prefix="qualia_backup_stage_") as tmp:
-        staging = Path(tmp)
+        staging = Path(tmp).resolve()
         db_stage = staging / DB_ARCHIVE_PATH
         _sqlite_snapshot(database_path, db_stage)
 
@@ -158,7 +169,7 @@ def validate_backup(archive_path: str | os.PathLike) -> dict:
         raise FileNotFoundError(f"backup archive not found: {archive}")
 
     with tempfile.TemporaryDirectory(prefix="qualia_backup_validate_") as tmp:
-        root = Path(tmp)
+        root = Path(tmp).resolve()
         with zipfile.ZipFile(archive, "r") as zf:
             file_infos = [info for info in zf.infolist() if not info.is_dir()]
             names = [_safe_member_name(info.filename) for info in file_infos]
@@ -195,8 +206,8 @@ def validate_backup(archive_path: str | os.PathLike) -> dict:
 
             for info in file_infos:
                 safe_name = _safe_member_name(info.filename)
-                target = (root / Path(safe_name)).resolve()
-                if root not in target.parents and target != root:
+                target = root / Path(safe_name)
+                if not _is_within(root, target):
                     raise ValueError(f"unsafe archive member: {info.filename}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info, "r") as src, target.open("wb") as dst:
@@ -277,13 +288,15 @@ def restore_backup(
         )
 
     with tempfile.TemporaryDirectory(prefix="qualia_restore_stage_") as tmp:
-        stage = Path(tmp)
+        stage = Path(tmp).resolve()
         with zipfile.ZipFile(Path(archive_path).resolve(), "r") as zf:
             for info in zf.infolist():
                 if info.is_dir():
                     continue
                 safe_name = _safe_member_name(info.filename)
                 target = stage / safe_name
+                if not _is_within(stage, target):
+                    raise ValueError(f"unsafe archive member: {info.filename}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info, "r") as src, target.open("wb") as dst:
                     shutil.copyfileobj(src, dst)
