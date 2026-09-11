@@ -157,6 +157,14 @@ def get_status(interview_id):
         "interview_status": interview.status,
         "transcription_status": tr.status if tr else None,
         "segment_count": len(interview.segments),
+        "segment_roles": [
+            {
+                "segment_id": seg.id,
+                "speaker_role": seg.speaker_role or "unknown",
+                "participant_id": seg.participant_id,
+            }
+            for seg in interview.segments
+        ],
         "latest_job": latest_job.to_dict() if latest_job else None,
     })
 
