@@ -53,12 +53,15 @@ def main() -> int:
         try:
             from app import create_app
             from models import db
+            from models.interview import Interview
             from models.processing_job import ProcessingJob
             from models.project import Project
             from services.job_conflicts import find_conflicting_active_job
             from services.job_recovery import recover_stale_jobs, stale_reason
 
             app = create_app()
+            app.config["TESTING"] = True
+            client = app.test_client()
             now = datetime.now(timezone.utc)
 
             with app.app_context():
@@ -66,6 +69,10 @@ def main() -> int:
                 db.session.add(project)
                 db.session.flush()
                 project_id = project.id
+                interview = Interview(project_id=project_id, status="pending")
+                db.session.add(interview)
+                db.session.flush()
+                interview_id = interview.id
 
                 fresh = ProcessingJob(
                     project_id=project_id,
@@ -101,18 +108,9 @@ def main() -> int:
                 stale_running_no_pid_id = stale_running_no_pid.id
                 old_running_with_pid_id = old_running_with_pid.id
 
-                failures += check(
-                    "fresh pending job is not stale",
-                    stale_reason(fresh, now=now) is None,
-                )
-                failures += check(
-                    "old pending job without worker is stale",
-                    stale_reason(stale_pending, now=now) is not None,
-                )
-                failures += check(
-                    "old running job without worker is stale",
-                    stale_reason(stale_running_no_pid, now=now) is not None,
-                )
+                failures += check("fresh pending job is not stale", stale_reason(fresh, now=now) is None)
+                failures += check("old pending job without worker is stale", stale_reason(stale_pending, now=now) is not None)
+                failures += check("old running job without worker is stale", stale_reason(stale_running_no_pid, now=now) is not None)
                 failures += check(
                     "PID-backed running job is never auto-stale by age alone",
                     stale_reason(old_running_with_pid, now=now) is None,
@@ -126,20 +124,13 @@ def main() -> int:
                     and old_running_with_pid_id not in recovered_ids,
                     str(recovered_ids),
                 )
-                failures += check(
-                    "fresh active job remains pending",
-                    db.session.get(ProcessingJob, fresh_id).status == "pending",
-                )
-                failures += check(
-                    "PID-backed running job remains protected",
-                    db.session.get(ProcessingJob, old_running_with_pid_id).status == "running",
-                )
+                failures += check("fresh active job remains pending", db.session.get(ProcessingJob, fresh_id).status == "pending")
+                failures += check("PID-backed running job remains protected", db.session.get(ProcessingJob, old_running_with_pid_id).status == "running")
                 failures += check(
                     "recovered job becomes retryable failed state",
                     db.session.get(ProcessingJob, stale_pending_id).status == "failed"
                     and "job recovery:" in (db.session.get(ProcessingJob, stale_pending_id).error_message or ""),
                 )
-
                 db.session.remove()
 
             before = file_hash(db_path)
@@ -153,12 +144,11 @@ def main() -> int:
             )
 
             with app.app_context():
-                # Remove intentional live blockers before testing stale conflict cleanup.
                 db.session.delete(db.session.get(ProcessingJob, fresh_id))
                 db.session.delete(db.session.get(ProcessingJob, old_running_with_pid_id))
                 conflict_stale = ProcessingJob(
                     project_id=project_id,
-                    interview_id=123,
+                    interview_id=interview_id,
                     job_type="map",
                     status="pending",
                     created_at=now - timedelta(minutes=6),
@@ -167,12 +157,41 @@ def main() -> int:
                 db.session.commit()
                 conflict_stale_id = conflict_stale.id
 
-                conflict = find_conflicting_active_job(project_id, "analyze", 123)
+                conflict = find_conflicting_active_job(project_id, "analyze", interview_id)
                 failures += check(
                     "conflict check clears stale blocker",
-                    conflict is None
-                    and db.session.get(ProcessingJob, conflict_stale_id).status == "failed",
+                    conflict is None and db.session.get(ProcessingJob, conflict_stale_id).status == "failed",
                 )
+
+                status_stale = ProcessingJob(
+                    project_id=project_id,
+                    interview_id=interview_id,
+                    job_type="transcribe",
+                    status="pending",
+                    created_at=now - timedelta(minutes=6),
+                )
+                db.session.add(status_stale)
+                db.session.commit()
+                status_stale_id = status_stale.id
+
+            status_response = client.get(f"/api/interviews/{interview_id}/status")
+            status_payload = status_response.get_json() or {}
+            failures += check(
+                "interview status polling recovers stale job",
+                status_response.status_code == 200
+                and status_payload.get("latest_job", {}).get("id") == status_stale_id
+                and status_payload.get("latest_job", {}).get("status") == "failed",
+                str(status_payload.get("latest_job")),
+            )
+
+            job_response = client.get(f"/api/processing-jobs/{status_stale_id}")
+            job_payload = job_response.get_json() or {}
+            failures += check(
+                "job polling returns recovered failed state",
+                job_response.status_code == 200
+                and job_payload.get("job", {}).get("status") == "failed",
+                str(job_payload),
+            )
         except Exception as exc:
             failures += check("job recovery smoke", False, f"{type(exc).__name__}: {exc}")
         finally:
