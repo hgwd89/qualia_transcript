@@ -7,7 +7,7 @@ from models.processing_job import ProcessingJob
 
 
 ACTIVE_STATUSES = ("pending", "running")
-PENDING_WITHOUT_WORKER_GRACE = timedelta(minutes=5)
+ACTIVE_WITHOUT_WORKER_GRACE = timedelta(minutes=5)
 MAX_RUNNING_AGE = timedelta(hours=12)
 
 
@@ -26,9 +26,11 @@ def stale_reason(job: ProcessingJob, now: datetime | None = None) -> str | None:
     created = _utc(job.created_at)
     started = _utc(job.started_at)
 
-    if job.status == "pending" and not job.worker_pid and created:
-        if current - created > PENDING_WITHOUT_WORKER_GRACE:
-            return "pending job has no worker after launch grace period"
+    # A launcher/worker can fail between status transitions. Treat either
+    # pending or running as stale when no worker PID appears after the grace.
+    if not job.worker_pid and created:
+        if current - created > ACTIVE_WITHOUT_WORKER_GRACE:
+            return "active job has no worker after launch grace period"
 
     reference = started or created
     if reference and current - reference > MAX_RUNNING_AGE:
