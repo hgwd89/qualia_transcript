@@ -1,11 +1,13 @@
 $ErrorActionPreference = "Stop"
 
-$ProjectDir = "C:\Users\hagawa.InsightFactory\qualia_transcript"
+$ProjectDir = $PSScriptRoot
 $LogsDir = Join-Path $ProjectDir "logs"
 $OutLog = Join-Path $LogsDir "flask_out.log"
 $ErrLog = Join-Path $LogsDir "flask_err.log"
-$AppUrl = "http://127.0.0.1:5000/"
-$Port = 5000
+$HostAddress = if ($env:APP_HOST) { $env:APP_HOST } else { "127.0.0.1" }
+$Port = if ($env:APP_PORT) { [int]$env:APP_PORT } else { 5000 }
+$BrowserHost = if ($HostAddress -eq "0.0.0.0") { "127.0.0.1" } else { $HostAddress }
+$AppUrl = "http://${BrowserHost}:${Port}/"
 $MaxWaitSeconds = 30
 
 function Get-PortProcessInfo {
@@ -23,13 +25,6 @@ function Get-PortProcessInfo {
         Name        = if ($proc) { $proc.ProcessName } else { "" }
         CommandLine = if ($wmi) { $wmi.CommandLine } else { "" }
     }
-}
-
-function Is-QualiaFlaskProcess {
-    param([object]$ProcessInfo)
-    if (-not $ProcessInfo) { return $false }
-    $line = "$($ProcessInfo.CommandLine)".ToLowerInvariant()
-    return ($line -like "*python*" -and $line -like "*app.py*")
 }
 
 function Test-AppHttp200 {
@@ -62,11 +57,21 @@ function Wait-AppReady {
 }
 
 function Get-PythonExecutable {
+    $venvCandidates = @(
+        (Join-Path $ProjectDir ".venv\Scripts\python.exe"),
+        (Join-Path $ProjectDir "venv\Scripts\python.exe")
+    )
+    foreach ($candidate in $venvCandidates) {
+        if (Test-Path $candidate) {
+            return (Resolve-Path $candidate).Path
+        }
+    }
+
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source) {
         return $cmd.Source
     }
-    throw "python 実行ファイルが見つかりません。Python をインストールし、PATH を確認してください。"
+    throw "python 実行ファイルが見つかりません。Python またはプロジェクトの仮想環境を確認してください。"
 }
 
 Set-Location $ProjectDir
@@ -96,7 +101,6 @@ if ($existing) {
     exit 1
 }
 
-# ポート占有プロセスを取得できない環境でも、HTTP 200 なら既に起動中とみなす
 if ($httpAlreadyOk) {
     Write-Host "HTTP 200 応答を確認しました。既に起動中として扱い、二重起動しません。" -ForegroundColor Green
     Start-Process $AppUrl
@@ -106,7 +110,9 @@ if ($httpAlreadyOk) {
 
 Write-Host "Qualia Transcript を起動します..." -ForegroundColor Cyan
 $pythonExe = Get-PythonExecutable
+Write-Host "Project: $ProjectDir" -ForegroundColor DarkGray
 Write-Host "Python: $pythonExe" -ForegroundColor DarkGray
+Write-Host "URL: $AppUrl" -ForegroundColor DarkGray
 $launched = Start-Process -FilePath $pythonExe -ArgumentList "app.py" -WorkingDirectory $ProjectDir -WindowStyle Hidden -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -PassThru
 
 $ready = Wait-AppReady -Url $AppUrl -MaxSeconds $MaxWaitSeconds
