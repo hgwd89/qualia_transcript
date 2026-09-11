@@ -91,6 +91,10 @@ def main() -> int:
                     and "\\" not in media.stored_path,
                     f"media_id={media.id} stored_path={media.stored_path}",
                 )
+                failures += check(
+                    "Japanese media filename preserves allowed extension",
+                    media_extension("インタビュー音声.MP3") == ".mp3",
+                )
 
                 unsupported_rejected = False
                 try:
