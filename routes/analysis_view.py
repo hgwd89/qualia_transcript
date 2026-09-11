@@ -2,14 +2,22 @@
 分析結果表示・プロジェクトレベル AI 分析トリガー・人手レビュー。
 """
 import json
+from datetime import datetime, timezone
+
 from flask import Blueprint, render_template, jsonify, request
+
+from models import db
 from models.project import Project
 from models.interview_flow import InterviewFlowQuestion
 from models.analysis import AIAnalysis
-from services.analyzer import analyze_cross_participants, analyze_project_integrated
+from models.processing_job import ProcessingJob
 from services.analysis_review import set_analysis_review_status
+from services.job_admission import admit_processing_job
+from services.job_recovery import recover_stale_jobs
+from services.processing_jobs import launch_job_worker
 
 bp = Blueprint("analysis_view", __name__)
+_PROJECT_ANALYSIS_JOB_TYPES = {"analyze_cross", "analyze_integrated"}
 
 
 def _parse(a: AIAnalysis) -> dict:
@@ -20,6 +28,67 @@ def _parse(a: AIAnalysis) -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
     return {"obj": a, "content": content}
+
+
+def _conflict_response(conflict: ProcessingJob):
+    return jsonify({
+        "ok": False,
+        "error": "別の処理ジョブが実行中です。完了または失敗後に再実行してください。",
+        "conflicting_job": conflict.to_dict(),
+    }), 409
+
+
+def _queued_response(job: ProcessingJob, *, created: bool, worker_pid=None):
+    return jsonify({
+        "ok": True,
+        "queued": True,
+        "created": created,
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "question_id": job.question_id,
+        "job_status": job.status,
+        "worker_pid": worker_pid if created else job.worker_pid,
+    }), 202
+
+
+def _launch_or_fail(job: ProcessingJob):
+    try:
+        return launch_job_worker(job.id), None
+    except Exception as exc:
+        db.session.rollback()
+        current = db.session.get(ProcessingJob, job.id)
+        if current:
+            current.status = "failed"
+            current.error_message = f"worker launch failed: {exc}"[:4000]
+            current.finished_at = datetime.now(timezone.utc)
+            current.worker_pid = None
+            db.session.add(current)
+            db.session.commit()
+        return None, exc
+
+
+def _queue_project_analysis(project_id: int, job_type: str, *, question_id: int | None = None):
+    admission = admit_processing_job(
+        project_id,
+        job_type,
+        question_id=question_id,
+    )
+    if admission.conflict_job_id:
+        conflict = db.session.get(ProcessingJob, admission.conflict_job_id)
+        return _conflict_response(conflict)
+    if admission.error:
+        return jsonify({"ok": False, "error": admission.error}), 409
+
+    job = db.session.get(ProcessingJob, admission.job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "processing job not found after admission"}), 500
+    if not admission.created:
+        return _queued_response(job, created=False)
+
+    pid, launch_error = _launch_or_fail(job)
+    if launch_error is not None:
+        return jsonify({"ok": False, "job_id": job.id, "error": str(launch_error)}), 500
+    return _queued_response(job, created=True, worker_pid=pid)
 
 
 @bp.route("/projects/<int:project_id>/analysis")
@@ -119,18 +188,28 @@ def review_analysis(project_id, analysis_id):
 
 @bp.route("/api/projects/<int:project_id>/analyze/cross/<int:question_id>", methods=["POST"])
 def run_cross(project_id, question_id):
-    try:
-        analysis = analyze_cross_participants(project_id, question_id)
-        return jsonify({"ok": True, "analysis_id": analysis.id})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    Project.query.get_or_404(project_id)
+    question = InterviewFlowQuestion.query.get_or_404(question_id)
+    if not question.section or not question.section.flow or question.section.flow.project_id != project_id:
+        return jsonify({"ok": False, "error": "質問がこのプロジェクトに属していません"}), 404
+    return _queue_project_analysis(project_id, "analyze_cross", question_id=question_id)
 
 
 @bp.route("/api/projects/<int:project_id>/analyze/integrated", methods=["POST"])
 def run_integrated(project_id):
-    try:
-        analysis = analyze_project_integrated(project_id)
-        return jsonify({"ok": True, "analysis_id": analysis.id,
-                        "summary": analysis.summary_text})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    Project.query.get_or_404(project_id)
+    return _queue_project_analysis(project_id, "analyze_integrated")
+
+
+@bp.route("/api/projects/<int:project_id>/analysis-processing-status")
+def analysis_processing_status(project_id):
+    Project.query.get_or_404(project_id)
+    recover_stale_jobs(project_id=project_id)
+    latest = (
+        ProcessingJob.query
+        .filter_by(project_id=project_id)
+        .filter(ProcessingJob.job_type.in_(_PROJECT_ANALYSIS_JOB_TYPES))
+        .order_by(ProcessingJob.id.desc())
+        .first()
+    )
+    return jsonify({"ok": True, "latest_job": latest.to_dict() if latest else None})
