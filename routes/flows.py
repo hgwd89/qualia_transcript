@@ -1,9 +1,50 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, jsonify
+from flask import Blueprint, render_template, request, redirect, url_for, flash
 from models import db
 from models.project import Project
+from models.interview import Interview
+from models.analysis import AIAnalysis
+from models.segment import UtteranceMapping
 from models.interview_flow import InterviewFlow, InterviewFlowSection, InterviewFlowQuestion
 
 bp = Blueprint("flows", __name__)
+
+
+def _get_project_flow_or_404(project_id: int, flow_id: int) -> InterviewFlow:
+    return (
+        InterviewFlow.query
+        .filter_by(id=flow_id, project_id=project_id)
+        .first_or_404()
+    )
+
+
+def _get_flow_section_or_404(flow_id: int, section_id: int) -> InterviewFlowSection:
+    return (
+        InterviewFlowSection.query
+        .filter_by(id=section_id, flow_id=flow_id)
+        .first_or_404()
+    )
+
+
+def _flow_usage_counts(flow_id: int) -> dict[str, int]:
+    mapping_count = (
+        UtteranceMapping.query
+        .join(InterviewFlowQuestion, UtteranceMapping.question_id == InterviewFlowQuestion.id)
+        .join(InterviewFlowSection, InterviewFlowQuestion.section_id == InterviewFlowSection.id)
+        .filter(InterviewFlowSection.flow_id == flow_id)
+        .count()
+    )
+    analysis_count = (
+        AIAnalysis.query
+        .join(InterviewFlowQuestion, AIAnalysis.question_id == InterviewFlowQuestion.id)
+        .join(InterviewFlowSection, InterviewFlowQuestion.section_id == InterviewFlowSection.id)
+        .filter(InterviewFlowSection.flow_id == flow_id)
+        .count()
+    )
+    return {
+        "interviews": Interview.query.filter_by(flow_id=flow_id).count(),
+        "mappings": mapping_count,
+        "analyses": analysis_count,
+    }
 
 
 @bp.route("/projects/<int:project_id>/flows")
@@ -32,16 +73,17 @@ def new(project_id):
 @bp.route("/projects/<int:project_id>/flows/<int:flow_id>")
 def detail(project_id, flow_id):
     project = Project.query.get_or_404(project_id)
-    flow    = InterviewFlow.query.get_or_404(flow_id)
+    flow = _get_project_flow_or_404(project_id, flow_id)
     return render_template("flows/detail.html", project=project, flow=flow)
 
 
 @bp.route("/projects/<int:project_id>/flows/<int:flow_id>/sections/new", methods=["POST"])
 def add_section(project_id, flow_id):
-    flow = InterviewFlow.query.get_or_404(flow_id)
-    seq  = len(flow.sections) + 1
+    Project.query.get_or_404(project_id)
+    flow = _get_project_flow_or_404(project_id, flow_id)
+    seq = len(flow.sections) + 1
     section = InterviewFlowSection(
-        flow_id=flow_id,
+        flow_id=flow.id,
         title=request.form.get("title", f"セクション {seq}").strip(),
         description=request.form.get("description", "").strip() or None,
         seq=seq,
@@ -49,16 +91,18 @@ def add_section(project_id, flow_id):
     db.session.add(section)
     db.session.commit()
     flash("セクションを追加しました", "success")
-    return redirect(url_for("flows.detail", project_id=project_id, flow_id=flow_id))
+    return redirect(url_for("flows.detail", project_id=project_id, flow_id=flow.id))
 
 
 @bp.route("/projects/<int:project_id>/flows/<int:flow_id>/sections/<int:section_id>/questions/new",
           methods=["POST"])
 def add_question(project_id, flow_id, section_id):
-    section = InterviewFlowSection.query.get_or_404(section_id)
-    seq     = len(section.questions) + 1
+    Project.query.get_or_404(project_id)
+    flow = _get_project_flow_or_404(project_id, flow_id)
+    section = _get_flow_section_or_404(flow.id, section_id)
+    seq = len(section.questions) + 1
     q = InterviewFlowQuestion(
-        section_id=section_id,
+        section_id=section.id,
         question_code=request.form.get("question_code", "").strip() or f"Q{section.seq}-{seq}",
         question_text=request.form.get("question_text", "").strip(),
         question_type=request.form.get("question_type", "open"),
@@ -68,12 +112,21 @@ def add_question(project_id, flow_id, section_id):
     db.session.add(q)
     db.session.commit()
     flash("質問項目を追加しました", "success")
-    return redirect(url_for("flows.detail", project_id=project_id, flow_id=flow_id))
+    return redirect(url_for("flows.detail", project_id=project_id, flow_id=flow.id))
 
 
 @bp.route("/projects/<int:project_id>/flows/<int:flow_id>/delete", methods=["POST"])
 def delete(project_id, flow_id):
-    flow = InterviewFlow.query.get_or_404(flow_id)
+    Project.query.get_or_404(project_id)
+    flow = _get_project_flow_or_404(project_id, flow_id)
+    usage = _flow_usage_counts(flow.id)
+    if any(usage.values()):
+        flash(
+            "このインタビューフローはインタビュー／マッピング／分析で使用されているため削除できません",
+            "error",
+        )
+        return redirect(url_for("flows.index", project_id=project_id))
+
     db.session.delete(flow)
     db.session.commit()
     flash("インタビューフローを削除しました", "info")
