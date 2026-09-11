@@ -72,16 +72,17 @@ def _refresh_job(job_id: int) -> ProcessingJob:
 
 
 def _reserve_worker_launch(job_id: int) -> tuple[ProcessingJob, bool]:
-    """Reserve the right to spawn a worker exactly once for an active job.
+    """Reserve the right to spawn a worker exactly once for a pending job.
 
     worker_pid=0 is a short-lived durable sentinel meaning "launcher owns the
     spawn slot but the OS PID has not been persisted yet". Existing recovery
     treats 0 as no PID and therefore still gives the normal five-minute grace.
+    A running job is never eligible for a new spawn reservation.
     """
     reserved = (
         ProcessingJob.query
         .filter(ProcessingJob.id == job_id)
-        .filter(ProcessingJob.status.in_(ACTIVE_STATUSES))
+        .filter(ProcessingJob.status == "pending")
         .filter(ProcessingJob.worker_pid.is_(None))
         .update(
             {
@@ -166,9 +167,8 @@ def launch_job_worker(job_id: int) -> int:
 
     job, reserved = _reserve_worker_launch(job_id)
     if not reserved:
-        # Another request/process already owns or completed the launch. Do not
-        # spawn a second worker. A positive PID can be returned to the caller;
-        # zero means the winning launcher has reserved but not persisted PID yet.
+        # Another launcher already owns the pending spawn slot, the worker has
+        # already claimed the job, or the job has completed. Never spawn again.
         if job.status in ACTIVE_STATUSES:
             return int(job.worker_pid or 0)
         raise ValueError(f"job cannot be launched from status={job.status}")
