@@ -6,6 +6,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from openpyxl import Workbook
+
 
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
@@ -21,15 +23,20 @@ def check(name: str, ok: bool, detail: str = "") -> int:
 
 
 def load_audit(repo_root: Path):
-    path = repo_root / "scripts" / "audit_production_readiness.py"
-    spec = importlib.util.spec_from_file_location("audit_production_readiness", path)
+    scripts_dir = repo_root / "scripts"
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    path = scripts_dir / "audit_production_readiness_v2.py"
+    spec = importlib.util.spec_from_file_location("audit_production_readiness_v2", path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
 
-def create_fixture(db_path: Path, output_dir: Path, backup_dir: Path) -> None:
+def create_fixture(db_path: Path, output_dir: Path) -> None:
     con = sqlite3.connect(db_path)
     try:
         con.executescript(
@@ -123,17 +130,31 @@ def create_fixture(db_path: Path, output_dir: Path, backup_dir: Path) -> None:
 
     artifact = output_dir / "1" / "deliverable.xlsx"
     artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_bytes(b"xlsx-fixture")
+    workbook = Workbook()
+    workbook.active["A1"] = "professional smoke"
+    workbook.save(artifact)
 
+    raw_text = "raw"
     raw_dir = output_dir / "raw_transcripts"
     raw_dir.mkdir(parents=True, exist_ok=True)
     (raw_dir / "transcription_1_smoke.json").write_text(
-        json.dumps({"transcription_id": 1, "interview_id": 1, "text": "raw"}),
+        json.dumps(
+            {
+                "transcription_id": 1,
+                "interview_id": 1,
+                "text": raw_text,
+                "sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    (backup_dir / "qualia_backup_smoke.zip").write_bytes(b"backup-fixture")
+
+def save_valid_xlsx(path: Path) -> None:
+    workbook = Workbook()
+    workbook.active["A1"] = "restored valid workbook"
+    workbook.save(path)
 
 
 def main() -> int:
@@ -141,14 +162,27 @@ def main() -> int:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     audit_mod = load_audit(repo_root)
+    from services.local_backup import create_backup
+
     failures = 0
 
     with tempfile.TemporaryDirectory(prefix="qualia_readiness_smoke_") as tmp:
         root = Path(tmp)
         db_path = root / "smoke.db"
+        upload_dir = root / "uploads"
         output_dir = root / "outputs"
         backup_dir = root / "backups"
-        create_fixture(db_path, output_dir, backup_dir)
+        upload_dir.mkdir(parents=True)
+        (upload_dir / "fixture.txt").write_text("upload fixture", encoding="utf-8")
+        create_fixture(db_path, output_dir)
+
+        create_backup(
+            backup_dir,
+            database_uri=f"sqlite:///{db_path.as_posix()}",
+            upload_dir=upload_dir,
+            output_dir=output_dir,
+            label="readiness_smoke",
+        )
 
         before_hash = sha256(db_path)
         report = audit_mod.audit(db_path, output_dir, backup_dir)
@@ -162,7 +196,22 @@ def main() -> int:
         missing_report = audit_mod.audit(db_path, output_dir, backup_dir)
         missing_codes = {item["code"] for item in missing_report["blockers"]}
         failures += check("missing registered output is a blocker", "generated_file_missing" in missing_codes, str(missing_codes))
-        artifact.write_bytes(b"xlsx-fixture")
+
+        artifact.write_bytes(b"not-an-xlsx")
+        invalid_artifact_report = audit_mod.audit(db_path, output_dir, backup_dir)
+        invalid_artifact_codes = {item["code"] for item in invalid_artifact_report["blockers"]}
+        failures += check("corrupt Office artifact is a blocker", "generated_file_invalid" in invalid_artifact_codes, str(invalid_artifact_codes))
+        save_valid_xlsx(artifact)
+
+        raw_path = output_dir / "raw_transcripts" / "transcription_1_smoke.json"
+        raw_payload = json.loads(raw_path.read_text(encoding="utf-8"))
+        raw_payload["sha256"] = "0" * 64
+        raw_path.write_text(json.dumps(raw_payload, ensure_ascii=False), encoding="utf-8")
+        raw_report = audit_mod.audit(db_path, output_dir, backup_dir)
+        raw_codes = {item["code"] for item in raw_report["blockers"]}
+        failures += check("raw snapshot hash mismatch is a blocker", "raw_snapshot_invalid" in raw_codes, str(raw_codes))
+        raw_payload["sha256"] = hashlib.sha256(raw_payload["text"].encode("utf-8")).hexdigest()
+        raw_path.write_text(json.dumps(raw_payload, ensure_ascii=False), encoding="utf-8")
 
         con = sqlite3.connect(db_path)
         try:
