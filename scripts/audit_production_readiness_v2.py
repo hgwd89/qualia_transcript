@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -29,6 +30,12 @@ from services.readiness_validation import (
     load_raw_text_snapshots,
     validate_generated_artifact,
     validate_latest_backup,
+)
+from services.secret_store import (
+    PROTECTED_PREFIX,
+    SECRET_SETTING_KEYS,
+    SecretStorageError,
+    unprotect_secret,
 )
 
 
@@ -85,6 +92,51 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 violations=violations,
                 count=len(fk_rows),
             )
+
+        if "app_settings" in tables:
+            secret_keys = sorted(SECRET_SETTING_KEYS)
+            placeholders = ",".join("?" for _ in secret_keys)
+            secret_rows = con.execute(
+                f"SELECT key, value FROM app_settings WHERE key IN ({placeholders}) ORDER BY key",
+                secret_keys,
+            ).fetchall()
+            plaintext_keys: list[str] = []
+            unreadable_keys: list[dict] = []
+            protected_count = 0
+            for row in secret_rows:
+                key = str(row["key"] or "")
+                value = str(row["value"] or "")
+                if not value:
+                    continue
+                if not value.startswith(PROTECTED_PREFIX):
+                    plaintext_keys.append(key)
+                    continue
+                protected_count += 1
+                if os.name == "nt":
+                    try:
+                        unprotect_secret(value)
+                    except SecretStorageError as exc:
+                        unreadable_keys.append({
+                            "key": key,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        })
+            info["protected_secret_setting_count"] = protected_count
+            if plaintext_keys:
+                _issue(
+                    blockers,
+                    "secret_settings_plaintext",
+                    "Sensitive API settings remain stored as plaintext",
+                    keys=plaintext_keys,
+                    count=len(plaintext_keys),
+                )
+            if unreadable_keys:
+                _issue(
+                    blockers,
+                    "secret_settings_unreadable",
+                    "DPAPI-protected settings cannot be decrypted by the current Windows user",
+                    settings=unreadable_keys,
+                    count=len(unreadable_keys),
+                )
 
         if "processing_jobs" not in tables:
             _issue(
