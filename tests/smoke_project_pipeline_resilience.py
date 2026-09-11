@@ -47,7 +47,12 @@ def main():
                 iv3 = Interview(project_id=project.id, status="pending")
                 db.session.add_all([iv1, iv2, iv3])
                 db.session.flush()
-                job = ProcessingJob(project_id=project.id, job_type="project_pipeline", status="pending")
+                job = ProcessingJob(
+                    project_id=project.id,
+                    job_type="project_pipeline",
+                    status="pending",
+                    worker_pid=4242,
+                )
                 db.session.add(job)
                 db.session.commit()
                 project_id, iv1_id, iv2_id, iv3_id, job_id = project.id, iv1.id, iv2.id, iv3.id, job.id
@@ -92,6 +97,7 @@ def main():
                     payload = json.loads(failed_job.result_json or "{}")
                     rows = {row["interview_id"]: row for row in payload.get("interviews") or []}
                     failures += check("partial pipeline is failed", failed_job.status == "failed")
+                    failures += check("failed terminal job clears worker pid", failed_job.worker_pid is None)
                     failures += check(
                         "partial result is persisted",
                         payload.get("interview_count") == 3
@@ -126,6 +132,8 @@ def main():
                     db.session.get(Interview, iv3_id).status = "analyzed"
                     db.session.commit()
                     retry_failed_job(failed_job)
+                    failed_job.worker_pid = 4343
+                    db.session.commit()
                     fail_first["enabled"] = False
                     retried = execute_job(job_id)
                     retry_payload = json.loads(retried.result_json or "{}")
@@ -138,19 +146,27 @@ def main():
                         and retry_payload.get("failed_interview_count") == 0,
                         str(retry_payload),
                     )
+                    failures += check("successful terminal job clears worker pid", retried.worker_pid is None)
                     failures += check(
                         "completed interview is not remapped on retry",
                         processed.count((iv2_id, "map")) == 1,
                         str(processed),
                     )
 
-                    missing_job = ProcessingJob(project_id=project_id, job_type="map", status="pending")
+                    missing_job = ProcessingJob(
+                        project_id=project_id,
+                        job_type="map",
+                        status="pending",
+                        worker_pid=4444,
+                    )
                     db.session.add(missing_job)
                     db.session.commit()
                     missing = execute_job(missing_job.id, handlers={"other": lambda _: {}})
                     failures += check(
                         "missing handler becomes failed",
-                        missing.status == "failed" and "no handler" in (missing.error_message or ""),
+                        missing.status == "failed"
+                        and "no handler" in (missing.error_message or "")
+                        and missing.worker_pid is None,
                     )
             finally:
                 (
