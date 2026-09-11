@@ -1,3 +1,4 @@
+import sys
 import tempfile
 from pathlib import Path
 
@@ -11,16 +12,20 @@ def check(name: str, ok: bool, detail: str = "") -> int:
 
 def main() -> int:
     failures = 0
+    repo_root = Path(__file__).resolve().parents[1]
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+    import config
+
+    original = {
+        "DATABASE_URI": config.DATABASE_URI,
+        "UPLOAD_DIR": config.UPLOAD_DIR,
+        "OUTPUT_DIR": config.OUTPUT_DIR,
+    }
 
     with tempfile.TemporaryDirectory(prefix="qualia_processing_jobs_") as tmp:
         tmp_dir = Path(tmp)
-        import config
-
-        original = {
-            "DATABASE_URI": config.DATABASE_URI,
-            "UPLOAD_DIR": config.UPLOAD_DIR,
-            "OUTPUT_DIR": config.OUTPUT_DIR,
-        }
         config.DATABASE_URI = f"sqlite:///{(tmp_dir / 'jobs.db').as_posix()}"
         config.UPLOAD_DIR = str(tmp_dir / "uploads")
         config.OUTPUT_DIR = str(tmp_dir / "outputs")
@@ -149,7 +154,6 @@ def main() -> int:
                         str(retried.to_dict()),
                     )
 
-                    # Make the interview eligible for mapping/analyze route guards.
                     interview = db.session.get(Interview, interview_id)
                     interview.status = "mapped"
                     db.session.add(Segment(
