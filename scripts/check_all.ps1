@@ -49,6 +49,7 @@ $doAnalysisReview = $false
 $doProfessionalIntegrity = $false
 $doLocalProduction = $false
 $doProductionReadinessSmoke = $false
+$doProcessingJobs = $false
 
 if ($AllLocal) {
     $doSafe = $true
@@ -59,6 +60,7 @@ if ($AllLocal) {
     $doProfessionalIntegrity = $true
     $doLocalProduction = $true
     $doProductionReadinessSmoke = $true
+    $doProcessingJobs = $true
 }
 
 $hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
@@ -96,6 +98,9 @@ if ($doLocalProduction) {
 }
 if ($doProductionReadinessSmoke) {
     Invoke-Check -Name "Production Readiness Audit Smoke Check" -ScriptPath (Join-Path $scriptDir "check_production_readiness_smoke.ps1") -Paid:$false
+}
+if ($doProcessingJobs) {
+    Invoke-Check -Name "Durable Processing Job Check" -ScriptPath (Join-Path $scriptDir "check_processing_jobs.ps1") -Paid:$false
 }
 if ($Mapping) {
     Invoke-Check -Name "Mapping Smoke Check" -ScriptPath (Join-Path $scriptDir "check_mapping.ps1") -Paid:$true
