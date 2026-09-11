@@ -76,6 +76,27 @@ def _owned_running_query(job_id: int, attempt_count: int):
     )
 
 
+def assert_job_lease(job: ProcessingJob) -> ProcessingJob:
+    """Verify that this worker attempt still owns the durable job row.
+
+    Call only at clean stage boundaries. The attempt number captured by the worker
+    acts as a fencing token, so a recovered/retried job invalidates older workers.
+    """
+    job_id = int(job.id)
+    attempt_count = _attempt_number(job)
+    db.session.expire_all()
+    current = db.session.get(ProcessingJob, job_id)
+    if (
+        not current
+        or current.status != "running"
+        or int(current.attempt_count or 0) != attempt_count
+    ):
+        raise JobLeaseLost(
+            f"processing job lease lost: job_id={job_id} attempt={attempt_count}"
+        )
+    return current
+
+
 def update_progress(job: ProcessingJob, stage: str, **details) -> None:
     """Persist progress only while this worker attempt still owns the job."""
     job_id = int(job.id)
@@ -345,7 +366,8 @@ def _finish_job_failure(job_id: int, attempt_count: int, exc: Exception) -> tupl
 def _perform_transcription(job: ProcessingJob) -> dict:
     from models.interview import Interview, Transcription
     from services.processing_result_guard import discard_incomplete_transcription_segments
-    from services.transcription import get_default_transcription_model, run_transcription
+    from services.transcription import get_default_transcription_model
+    from services.transcription_dispatch import run_transcription
 
     interview = db.session.get(Interview, job.interview_id)
     if not interview or interview.project_id != job.project_id:
@@ -380,7 +402,10 @@ def _perform_transcription(job: ProcessingJob) -> dict:
     db.session.add(tr)
     db.session.commit()
     update_progress(job, "transcribing", transcription_id=tr.id)
-    result = run_transcription(tr.id)
+    result = run_transcription(
+        tr.id,
+        lease_check=lambda: assert_job_lease(job),
+    )
     return {
         "transcription_id": tr.id,
         "discarded_partial_segment_count": cleanup["deleted_segment_count"],
