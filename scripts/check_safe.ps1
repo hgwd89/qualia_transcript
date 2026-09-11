@@ -23,4 +23,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] generated-file integrity smoke checks passed."
 
+Write-Host "[INFO] Running media upload integrity smoke check..."
+python tests/smoke_media_upload_integrity.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] media upload integrity smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] media upload integrity smoke checks passed."
+
 exit 0
