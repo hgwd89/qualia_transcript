@@ -19,6 +19,10 @@ _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
 _LAUNCH_RESERVED_PID = 0
 
 
+class JobLeaseLost(RuntimeError):
+    """The worker attempt no longer owns the durable job row."""
+
+
 def _utcnow():
     return datetime.now(timezone.utc)
 
@@ -56,11 +60,37 @@ def create_or_get_active_job(project_id: int, job_type: str, interview_id: int |
     return job, True
 
 
+def _attempt_number(job: ProcessingJob) -> int:
+    attempt = int(job.attempt_count or 0)
+    if attempt <= 0:
+        raise JobLeaseLost(f"processing job has no active attempt: job_id={job.id}")
+    return attempt
+
+
+def _owned_running_query(job_id: int, attempt_count: int):
+    return (
+        ProcessingJob.query
+        .filter(ProcessingJob.id == int(job_id))
+        .filter(ProcessingJob.status == "running")
+        .filter(ProcessingJob.attempt_count == int(attempt_count))
+    )
+
+
 def update_progress(job: ProcessingJob, stage: str, **details) -> None:
+    """Persist progress only while this worker attempt still owns the job."""
+    job_id = int(job.id)
+    attempt_count = _attempt_number(job)
     payload = {"stage": stage, **details}
-    job.progress_json = _json_dump(payload)
-    db.session.add(job)
+    updated = _owned_running_query(job_id, attempt_count).update(
+        {ProcessingJob.progress_json: _json_dump(payload)},
+        synchronize_session=False,
+    )
     db.session.commit()
+    db.session.expire_all()
+    if updated != 1:
+        raise JobLeaseLost(
+            f"processing job lease lost: job_id={job_id} attempt={attempt_count}"
+        )
 
 
 def _refresh_job(job_id: int) -> ProcessingJob:
@@ -245,6 +275,7 @@ def _claim_pending_job(job_id: int, worker_pid: int | None = None) -> tuple[Proc
     The conditional UPDATE is the execution lease: if multiple workers reach
     this function, exactly one can change the row from pending to running. All
     others observe rowcount=0 and return without executing the handler.
+    `attempt_count` is also the fencing token for all later worker writes.
     """
     values = {
         ProcessingJob.status: "running",
@@ -265,6 +296,50 @@ def _claim_pending_job(job_id: int, worker_pid: int | None = None) -> tuple[Proc
     db.session.commit()
     current = _refresh_job(job_id)
     return current, claimed == 1
+
+
+def _finish_job_success(job_id: int, attempt_count: int, result) -> tuple[ProcessingJob, bool]:
+    """Finish only the still-current running attempt."""
+    updated = _owned_running_query(job_id, attempt_count).update(
+        {
+            ProcessingJob.status: "succeeded",
+            ProcessingJob.result_json: _json_dump(result or {}),
+            ProcessingJob.progress_json: _json_dump({"stage": "completed"}),
+            ProcessingJob.error_message: None,
+            ProcessingJob.finished_at: _utcnow(),
+            ProcessingJob.worker_pid: None,
+        },
+        synchronize_session=False,
+    )
+    db.session.commit()
+    return _refresh_job(job_id), updated == 1
+
+
+def _finish_job_failure(job_id: int, attempt_count: int, exc: Exception) -> tuple[ProcessingJob, bool]:
+    """Fail only the still-current running attempt."""
+    partial_result = getattr(exc, "job_result", None)
+    values = {
+        ProcessingJob.status: "failed",
+        ProcessingJob.error_message: _safe_error(exc),
+        ProcessingJob.finished_at: _utcnow(),
+        ProcessingJob.worker_pid: None,
+    }
+    if partial_result is not None:
+        values[ProcessingJob.result_json] = _json_dump(partial_result)
+        values[ProcessingJob.progress_json] = _json_dump({
+            "stage": "failed_partial",
+            "failed_interview_count": partial_result.get("failed_interview_count", 0),
+            "interview_count": partial_result.get("interview_count", 0),
+        })
+    else:
+        values[ProcessingJob.progress_json] = _json_dump({"stage": "failed"})
+
+    updated = _owned_running_query(job_id, attempt_count).update(
+        values,
+        synchronize_session=False,
+    )
+    db.session.commit()
+    return _refresh_job(job_id), updated == 1
 
 
 def _perform_transcription(job: ProcessingJob) -> dict:
@@ -291,6 +366,9 @@ def _perform_transcription(job: ProcessingJob) -> dict:
             "segment_count": len(interview.segments),
         }
 
+    # Fence the attempt before creating a new transcription row. A worker that
+    # was explicitly recovered/retried must not start another expensive stage.
+    update_progress(job, "transcribing")
     tr = Transcription(
         media_file_id=media.id,
         whisper_model=get_default_transcription_model(),
@@ -344,6 +422,7 @@ def execute_job(
     job, claimed = _claim_pending_job(job_id, worker_pid=worker_pid)
     if not claimed:
         return job
+    attempt_count = _attempt_number(job)
 
     default_handlers = {
         "transcribe": _perform_transcription,
@@ -359,30 +438,9 @@ def execute_job(
             raise ValueError(f"no handler for job_type={job.job_type}")
 
         result = handler(job)
-        job.status = "succeeded"
-        job.result_json = _json_dump(result or {})
-        job.progress_json = _json_dump({"stage": "completed"})
-        job.finished_at = _utcnow()
-        job.worker_pid = None
-        db.session.add(job)
-        db.session.commit()
+        current, _ = _finish_job_success(job_id, attempt_count, result)
+        return current
     except Exception as exc:
         db.session.rollback()
-        job = db.session.get(ProcessingJob, job_id)
-        job.status = "failed"
-        partial_result = getattr(exc, "job_result", None)
-        if partial_result is not None:
-            job.result_json = _json_dump(partial_result)
-            job.progress_json = _json_dump({
-                "stage": "failed_partial",
-                "failed_interview_count": partial_result.get("failed_interview_count", 0),
-                "interview_count": partial_result.get("interview_count", 0),
-            })
-        else:
-            job.progress_json = _json_dump({"stage": "failed"})
-        job.error_message = _safe_error(exc)
-        job.finished_at = _utcnow()
-        job.worker_pid = None
-        db.session.add(job)
-        db.session.commit()
-    return job
+        current, _ = _finish_job_failure(job_id, attempt_count, exc)
+        return current
