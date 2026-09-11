@@ -10,6 +10,11 @@ from models.generated_file import GeneratedFile
 
 
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_WINDOWS_RESERVED_STEMS = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 @dataclass(frozen=True)
@@ -30,6 +35,10 @@ def safe_output_filename(filename: str) -> str:
     value = value.strip(" .")
     if not value or value in {".", ".."}:
         raise ValueError("output filename is empty or invalid")
+
+    stem = value.split(".", 1)[0].upper()
+    if stem in _WINDOWS_RESERVED_STEMS:
+        value = f"_{value}"
     return value
 
 
