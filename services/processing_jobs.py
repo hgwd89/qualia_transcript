@@ -61,7 +61,8 @@ def create_or_get_active_job(project_id: int, job_type: str, interview_id: int |
 
 
 def _attempt_number(job: ProcessingJob) -> int:
-    attempt = int(job.attempt_count or 0)
+    frozen = getattr(job, "_lease_attempt", None)
+    attempt = int(frozen if frozen is not None else (job.attempt_count or 0))
     if attempt <= 0:
         raise JobLeaseLost(f"processing job has no active attempt: job_id={job.id}")
     return attempt
@@ -316,6 +317,8 @@ def _claim_pending_job(job_id: int, worker_pid: int | None = None) -> tuple[Proc
     )
     db.session.commit()
     current = _refresh_job(job_id)
+    if claimed == 1:
+        current._lease_attempt = int(current.attempt_count or 0)
     return current, claimed == 1
 
 
