@@ -120,6 +120,23 @@
     }
   }
 
+  function applyCanonicalRoles(segmentRoles) {
+    for (const item of segmentRoles || []) {
+      const row = document.getElementById(`segment-${item.segment_id}`);
+      const select = row ? row.querySelector('select') : null;
+      if (!select) continue;
+
+      let value = item.speaker_role || 'unknown';
+      if (value === 'moderator') value = 'interviewer';
+      if (value === 'respondent' && item.participant_id != null) {
+        value = `respondent_${item.participant_id}`;
+      }
+      if ([...select.options].some(option => option.value === value)) {
+        select.value = value;
+      }
+    }
+  }
+
   const interviewId = interviewIdFromPath();
   if (!interviewId) return;
 
@@ -139,10 +156,30 @@
     'AI考察ジョブを登録中…',
   );
 
+  // The legacy template labels the moderator as "interviewer". Keep that
+  // presentation label while persisting the canonical backend role "moderator".
+  window.updateRole = async (segId, select) => {
+    const raw = select.value;
+    const body = raw.startsWith('respondent_')
+      ? {speaker_role: 'respondent', participant_id: Number(raw.split('_')[1])}
+      : {speaker_role: raw === 'interviewer' ? 'moderator' : raw, participant_id: null};
+
+    const response = await fetch(`/interviews/${interviewId}/segments/${segId}/role`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      message(`話者更新に失敗: ${data.error || `HTTP ${response.status}`}`, 'error');
+    }
+  };
+
   window.addEventListener('DOMContentLoaded', async () => {
     try {
       const response = await fetch(`/api/interviews/${interviewId}/status`, {cache: 'no-store'});
       const data = await response.json();
+      applyCanonicalRoles(data.segment_roles);
       const job = data.latest_job;
       if (job && (job.status === 'pending' || job.status === 'running')) {
         pollJob(job.id, job.job_type);
