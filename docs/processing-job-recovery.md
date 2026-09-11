@@ -8,10 +8,10 @@ Before a new conflicting job is accepted, the app checks active jobs in the same
 
 An active job is automatically moved to `failed` when either condition is true:
 
-- `pending` has no worker PID for more than 5 minutes.
+- `pending` or `running` has no worker PID for more than 5 minutes.
 - `pending` or `running` has remained active for more than 12 hours.
 
-The conservative 12-hour ceiling avoids treating a legitimate long transcription as dead while ensuring a crashed/rebooted worker cannot block the project forever. Recovered jobs retain an error message beginning with `job recovery:` and can be retried through the normal job retry path.
+The 5-minute grace covers launcher/worker failures without racing normal startup. The conservative 12-hour ceiling avoids treating a legitimate long transcription as dead while ensuring a crashed/rebooted worker cannot block the project forever. Recovered jobs retain an error message beginning with `job recovery:` and can be retried through the normal job retry path.
 
 ## Immediate operator recovery
 
@@ -21,7 +21,7 @@ If the app/worker was explicitly stopped or the PC restarted and you do not want
 python scripts/recover_processing_job.py --job-id 123
 ```
 
-The command is validation-only by default and does not change the database.
+The inspection path opens SQLite with `mode=ro`. It does not call the application factory, run migrations, create tables, or change job state.
 
 After you have confirmed the worker is no longer running, explicitly mark the job failed:
 
