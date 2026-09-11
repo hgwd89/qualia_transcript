@@ -7,6 +7,7 @@ from models.interview import Interview, Transcription
 from models.processing_job import ProcessingJob
 from models.project import Project
 from services.job_conflicts import find_conflicting_active_job
+from services.job_recovery import recover_stale_jobs
 from services.processing_jobs import (
     create_or_get_active_job,
     launch_job_worker,
@@ -138,6 +139,8 @@ def process_all(project_id):
 @bp.route("/api/interviews/<int:interview_id>/status")
 def get_status(interview_id):
     interview = Interview.query.get_or_404(interview_id)
+    recover_stale_jobs(project_id=interview.project_id)
+
     tr = None
     if interview.media_files:
         tr = (
@@ -172,6 +175,8 @@ def get_status(interview_id):
 @bp.route("/api/processing-jobs/<int:job_id>")
 def processing_job_status(job_id):
     job = ProcessingJob.query.get_or_404(job_id)
+    recover_stale_jobs(project_id=job.project_id)
+    job = db.session.get(ProcessingJob, job_id)
     return jsonify({"ok": True, "job": job.to_dict()})
 
 
