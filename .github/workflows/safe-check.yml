@@ -37,3 +37,7 @@ jobs:
       - name: Run atomic job admission smoke check
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/check_job_admission.ps1
+
+      - name: Run processing job regression smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_processing_jobs.ps1
