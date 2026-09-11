@@ -56,6 +56,7 @@ $doResultIdempotency = $false
 $doResultWriteFencing = $false
 $doMappingRetryIdempotency = $false
 $doJobRecovery = $false
+$doJobRecoveryFencing = $false
 $doProjectPipelineResilience = $false
 
 if ($AllLocal) {
@@ -74,6 +75,7 @@ if ($AllLocal) {
     $doResultWriteFencing = $true
     $doMappingRetryIdempotency = $true
     $doJobRecovery = $true
+    $doJobRecoveryFencing = $true
     $doProjectPipelineResilience = $true
 }
 
@@ -133,6 +135,9 @@ if ($doMappingRetryIdempotency) {
 }
 if ($doJobRecovery) {
     Invoke-Check -Name "Stale Processing Job Recovery Check" -ScriptPath (Join-Path $scriptDir "check_job_recovery.ps1") -Paid:$false
+}
+if ($doJobRecoveryFencing) {
+    Invoke-Check -Name "Stale Job Recovery Fencing Check" -ScriptPath (Join-Path $scriptDir "check_job_recovery_fencing.ps1") -Paid:$false
 }
 if ($doProjectPipelineResilience) {
     Invoke-Check -Name "Project Pipeline Resilience Check" -ScriptPath (Join-Path $scriptDir "check_project_pipeline_resilience.ps1") -Paid:$false
