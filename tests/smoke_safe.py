@@ -161,6 +161,55 @@ def main() -> int:
                     failures, "GET /settings returns 200", False, f"{type(e).__name__}: {e}"
                 )
 
+            try:
+                with app.app_context():
+                    project_a = Project(name="Safe Output Project A", client="Smoke Client")
+                    project_b = Project(name="Safe Output Project B", client="Smoke Client")
+                    db.session.add_all([project_a, project_b])
+                    db.session.flush()
+                    interview_b = Interview(project_id=project_b.id, status="pending")
+                    db.session.add(interview_b)
+                    db.session.commit()
+                    project_a_id = project_a.id
+                    interview_b_id = interview_b.id
+
+                response = client.get(f"/projects/{project_a_id}/outputs")
+                failures = add_failure(
+                    failures,
+                    "GET /projects/<id>/outputs returns 200",
+                    response.status_code == 200 and "出力管理".encode("utf-8") in response.data,
+                    f"status={response.status_code}",
+                )
+
+                response = client.post(
+                    f"/api/projects/{project_a_id}/generate/verbatim",
+                    json={"interview_id": interview_b_id},
+                )
+                failures = add_failure(
+                    failures,
+                    "verbatim generation rejects cross-project interview",
+                    response.status_code == 404,
+                    f"status={response.status_code}",
+                )
+
+                response = client.post(
+                    f"/api/projects/{project_a_id}/generate/analysis",
+                    json={"format": "pdf"},
+                )
+                failures = add_failure(
+                    failures,
+                    "analysis generation rejects invalid format",
+                    response.status_code == 400,
+                    f"status={response.status_code}",
+                )
+            except Exception as e:
+                failures = add_failure(
+                    failures,
+                    "output management route guards",
+                    False,
+                    f"{type(e).__name__}: {e}",
+                )
+
             with app.app_context():
                 model_checks = [
                     ("Project query", Project),

@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}出力管理 | {{ project.name }}{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a>
+  <span class="mx-1">/</span>
+  <span class="text-gray-700">出力管理</span>
+</nav>
+
+<div class="flex items-center justify-between mb-6">
+  <div>
+    <h1 class="text-2xl font-bold text-brand-900">出力管理</h1>
+    <p class="text-sm text-gray-500 mt-1">発言録・整形シート・分析用フラットデータを生成します。</p>
+  </div>
+  <a href="{{ url_for('analysis_view.index', project_id=project.id) }}"
+     class="text-sm text-gray-500 border border-gray-300 rounded px-3 py-1.5 hover:border-gray-400 transition">
+    分析画面 →
+  </a>
+</div>
+
+<div id="status-msg" class="hidden mb-5 p-3 rounded text-sm"></div>
+
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
+  <section class="bg-white rounded-lg border border-gray-200 p-5">
+    <h2 class="font-semibold text-brand-900 mb-2">Word 発言録</h2>
+    <p class="text-xs text-gray-500 mb-4">インタビューを1件選び、逐語発言録を生成します。</p>
+
+    {% if project.interviews %}
+    <select id="verbatim-interview" class="w-full border border-gray-300 rounded px-3 py-2 text-sm mb-3 bg-white">
+      {% for iv in project.interviews %}
+      <option value="{{ iv.id }}">
+        {% if iv.participant %}{{ iv.participant.participant_code }}{% else %}参加者未設定{% endif %}
+        {% if iv.interview_date %} / {{ iv.interview_date }}{% endif %}
+      </option>
+      {% endfor %}
+    </select>
+    <button id="btn-verbatim" onclick="generateVerbatim()"
+            class="w-full bg-brand-500 text-white text-sm px-4 py-2 rounded hover:bg-brand-700 transition">
+      Word発言録を生成
+    </button>
+    {% else %}
+    <p class="text-sm text-gray-400">インタビューがありません。</p>
+    {% endif %}
+  </section>
+
+  <section class="bg-white rounded-lg border border-gray-200 p-5">
+    <h2 class="font-semibold text-brand-900 mb-2">整形 Excel</h2>
+    <p class="text-xs text-gray-500 mb-4">質問別・参加者別に整理したプロジェクト用Excelを生成します。</p>
+    <button id="btn-formatted" onclick="generateFormatted()"
+            class="w-full bg-brand-500 text-white text-sm px-4 py-2 rounded hover:bg-brand-700 transition">
+      整形Excelを生成
+    </button>
+  </section>
+
+  <section class="bg-white rounded-lg border border-gray-200 p-5">
+    <h2 class="font-semibold text-brand-900 mb-2">分析用フラットデータ</h2>
+    <p class="text-xs text-gray-500 mb-4">発言・質問マッピング・属性を行単位で出力します。現時点ではAI考察の正式納品シートではありません。</p>
+    <div class="grid grid-cols-2 gap-2">
+      <button id="btn-analysis-xlsx" onclick="generateAnalysis('xlsx')"
+              class="border border-brand-500 text-brand-700 text-sm px-3 py-2 rounded hover:bg-brand-50 transition">
+        XLSX
+      </button>
+      <button id="btn-analysis-csv" onclick="generateAnalysis('csv')"
+              class="border border-brand-500 text-brand-700 text-sm px-3 py-2 rounded hover:bg-brand-50 transition">
+        CSV
+      </button>
+    </div>
+  </section>
+</div>
+
+<section>
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-lg font-semibold text-brand-900">生成済みファイル</h2>
+    <span class="text-xs text-gray-400">{{ files|length }} 件</span>
+  </div>
+
+  {% if files %}
+  <div class="bg-white rounded-lg border border-gray-200 overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+        <tr>
+          <th class="px-4 py-3 text-left">生成日時</th>
+          <th class="px-4 py-3 text-left">種類</th>
+          <th class="px-4 py-3 text-left">形式</th>
+          <th class="px-4 py-3 text-left">ファイル名</th>
+          <th class="px-4 py-3 text-right">操作</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-gray-100">
+        {% set type_labels = {'verbatim':'発言録', 'formatted_sheet':'整形シート', 'analysis':'分析データ', 'report':'レポート', 'integrated':'統合分析'} %}
+        {% for f in files %}
+        <tr class="hover:bg-gray-50">
+          <td class="px-4 py-3 text-gray-500 whitespace-nowrap">
+            {{ f.created_at.strftime('%Y/%m/%d %H:%M') if f.created_at else '' }}
+          </td>
+          <td class="px-4 py-3">{{ type_labels.get(f.file_type, f.file_type) }}</td>
+          <td class="px-4 py-3 uppercase text-gray-500">{{ f.file_format }}</td>
+          <td class="px-4 py-3 font-medium text-gray-800 break-all">{{ f.original_filename }}</td>
+          <td class="px-4 py-3 text-right">
+            <a href="{{ url_for('outputs.download', file_id=f.id) }}"
+               class="text-brand-500 hover:underline text-xs">ダウンロード</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="text-center py-10 text-gray-400 bg-white rounded-lg border border-dashed border-gray-300">
+    <p class="text-sm">生成済みファイルはありません。</p>
+  </div>
+  {% endif %}
+</section>
+
+<script>
+const projectId = {{ project.id }};
+
+function showMsg(text, type='info') {
+  const el = document.getElementById('status-msg');
+  el.className = `mb-5 p-3 rounded text-sm flash-${type}`;
+  el.textContent = text;
+  el.classList.remove('hidden');
+}
+
+async function postJson(url, payload, buttonIds) {
+  const buttons = buttonIds.map(id => document.getElementById(id)).filter(Boolean);
+  buttons.forEach(btn => btn.disabled = true);
+  showMsg('生成中…', 'info');
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    showMsg(`生成しました: ${data.filename}`, 'success');
+    setTimeout(() => location.reload(), 700);
+  } catch (e) {
+    showMsg('生成エラー: ' + e.message, 'error');
+    buttons.forEach(btn => btn.disabled = false);
+  }
+}
+
+function generateVerbatim() {
+  const select = document.getElementById('verbatim-interview');
+  if (!select) return;
+  postJson(`/api/projects/${projectId}/generate/verbatim`, {interview_id: Number(select.value)}, ['btn-verbatim']);
+}
+
+function generateFormatted() {
+  postJson(`/api/projects/${projectId}/generate/formatted`, {}, ['btn-formatted']);
+}
+
+function generateAnalysis(format) {
+  postJson(`/api/projects/${projectId}/generate/analysis`, {format}, ['btn-analysis-xlsx', 'btn-analysis-csv']);
+}
+</script>
+{% endblock %}
