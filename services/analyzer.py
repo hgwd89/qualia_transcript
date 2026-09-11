@@ -2,6 +2,7 @@
 AI 考察生成サービス。
 evidence_quote（実発言引用）を必ず含む findings を生成する。
 """
+from collections.abc import Callable
 import json
 from models import db
 from models.interview import Interview
@@ -9,6 +10,8 @@ from models.interview_flow import InterviewFlowQuestion
 from models.segment import Segment, UtteranceMapping
 from models.analysis import AIAnalysis
 from services.ai_client import call_structured, MODEL
+
+ResultWriteGuard = Callable[[], object]
 
 # ── 共通スキーマ定義 ──────────────────────────────────────────
 
@@ -137,9 +140,13 @@ def analyze_per_question(interview_id: int, question_id: int) -> AIAnalysis:
     return analysis
 
 
-def analyze_interview_summary(interview_id: int) -> AIAnalysis:
+def analyze_interview_summary(
+    interview_id: int,
+    *,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> AIAnalysis:
     """インタビュー全体の要約考察（参加者別）。"""
-    interview   = Interview.query.get(interview_id)
+    interview = Interview.query.get(interview_id)
     if not interview:
         raise ValueError("interview が見つかりません")
 
@@ -151,7 +158,7 @@ def analyze_interview_summary(interview_id: int) -> AIAnalysis:
         code = "P??"
         participant_name = "参加者未設定"
 
-    segments  = (
+    segments = (
         Segment.query
         .filter_by(interview_id=interview_id, speaker_role="respondent")
         .order_by(Segment.seq)
@@ -176,6 +183,11 @@ def analyze_interview_summary(interview_id: int) -> AIAnalysis:
     )
 
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="summary_result")
+
+    # External AI work is finished. Durable callers now acquire/verify their
+    # result write lease before this analysis becomes canonical DB state.
+    if result_write_guard is not None:
+        result_write_guard()
 
     analysis = AIAnalysis(
         project_id=interview.project_id,
@@ -302,8 +314,8 @@ def analyze_project_integrated(project_id: int) -> AIAnalysis:
     if not sections_data:
         raise ValueError("分析対象の発言が見つかりません（先にマッピングを実行してください）")
 
-    full_text   = "\n\n".join(sections_data)
-    p_count     = sum(1 for iv in project.interviews if iv.participant)
+    full_text = "\n\n".join(sections_data)
+    p_count = sum(1 for iv in project.interviews if iv.participant)
 
     system = (
         "あなたは定性調査の専門アナリストです。"
