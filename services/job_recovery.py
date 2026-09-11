@@ -115,15 +115,54 @@ def stale_reason(
     return None
 
 
-def mark_job_failed(job: ProcessingJob, reason: str) -> ProcessingJob:
-    job.status = "failed"
-    job.error_message = f"job recovery: {reason}"[:4000]
-    job.progress_json = '{"stage":"recovered_failed"}'
-    job.finished_at = datetime.now(timezone.utc)
-    job.worker_pid = None
-    db.session.add(job)
+def _mark_job_failed_if_unchanged(
+    job: ProcessingJob,
+    reason: str,
+) -> tuple[ProcessingJob, bool]:
+    """Fail only the exact active job state that recovery inspected.
+
+    Recovery performs an OS liveness check outside the database transaction.
+    During that gap the worker may finish, a launcher may attach a PID, or the
+    job may be retried and claimed by a newer attempt. Treat the observed
+    status/attempt/PID as a compare-and-swap token so an old recovery decision
+    cannot overwrite newer durable state.
+    """
+    job_id = int(job.id)
+    observed_status = str(job.status)
+    observed_attempt = int(job.attempt_count or 0)
+    observed_pid = job.worker_pid
+
+    query = (
+        ProcessingJob.query
+        .filter(ProcessingJob.id == job_id)
+        .filter(ProcessingJob.status == observed_status)
+        .filter(ProcessingJob.attempt_count == observed_attempt)
+    )
+    if observed_pid is None:
+        query = query.filter(ProcessingJob.worker_pid.is_(None))
+    else:
+        query = query.filter(ProcessingJob.worker_pid == int(observed_pid))
+
+    updated = query.update(
+        {
+            ProcessingJob.status: "failed",
+            ProcessingJob.error_message: f"job recovery: {reason}"[:4000],
+            ProcessingJob.progress_json: '{"stage":"recovered_failed"}',
+            ProcessingJob.finished_at: datetime.now(timezone.utc),
+            ProcessingJob.worker_pid: None,
+        },
+        synchronize_session=False,
+    )
     db.session.commit()
-    return job
+    db.session.expire_all()
+    current = db.session.get(ProcessingJob, job_id)
+    return (current or job), updated == 1
+
+
+def mark_job_failed(job: ProcessingJob, reason: str) -> ProcessingJob:
+    """Compatibility wrapper for callers that only need the current job row."""
+    current, _ = _mark_job_failed_if_unchanged(job, reason)
+    return current
 
 
 def recover_stale_jobs(
@@ -139,6 +178,7 @@ def recover_stale_jobs(
     for job in query.order_by(ProcessingJob.id.asc()).all():
         reason = stale_reason(job, pid_checker=pid_checker)
         if reason:
-            mark_job_failed(job, reason)
-            recovered.append(job)
+            current, changed = _mark_job_failed_if_unchanged(job, reason)
+            if changed:
+                recovered.append(current)
     return recovered
