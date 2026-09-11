@@ -1,15 +1,29 @@
 """
-発言録 .docx 生成（タイムスタンプ＋話者名＋発言テキスト）
+発言録 .docx 生成。
+
+納品用の発言録は分析用マッピングに依存させず、Interview に属する全 Segment を
+seq 順に欠落なく出力する。質問別の整理は formatted sheet 側の責務とする。
 """
 import os
 from datetime import datetime
+
 from docx import Document
-from docx.shared import Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt
+
 import config
-from models.interview import Interview
-from models.generated_file import GeneratedFile
 from models import db
+from models.generated_file import GeneratedFile
+from models.interview import Interview
+from models.speaker_assignment import SpeakerAssignment
+
+
+ROLE_LABELS = {
+    "moderator": "モデレーター",
+    "interviewer": "モデレーター",
+    "respondent": "参加者",
+    "observer": "オブザーバー",
+    "unknown": "話者未確定",
+}
 
 
 def _fmt_time(sec: float | None) -> str:
@@ -24,14 +38,55 @@ def _has_quote_flag(seg) -> bool:
     return any(f.flag_type == "quote" for f in (seg.segment_flags or []))
 
 
+def _speaker_name(interview: Interview, seg, assignment_map: dict) -> str:
+    """人が確認しやすい話者名を返す。元の speaker_label も失わない。"""
+    assignment = assignment_map.get(seg.speaker_label or "")
+    role = (
+        assignment.speaker_role
+        if assignment and assignment.speaker_role
+        else (seg.speaker_role or "unknown")
+    )
+
+    participant = None
+    if assignment and assignment.participant:
+        participant = assignment.participant
+    elif seg.participant:
+        participant = seg.participant
+    elif role == "respondent":
+        participant = interview.participant
+
+    if participant:
+        display = participant.display_name or participant.participant_code or "参加者"
+    elif role in {"moderator", "interviewer"} and interview.interviewer_name:
+        display = interview.interviewer_name
+    else:
+        display = ROLE_LABELS.get(role, role or "話者")
+
+    label = seg.speaker_label or ""
+    return f"{display} [{label}]" if label and label not in display else display
+
+
 def generate_verbatim(interview_id: int) -> GeneratedFile:
-    interview   = Interview.query.get(interview_id)
+    interview = Interview.query.get(interview_id)
+    if not interview:
+        raise ValueError("interview が見つかりません")
+
     participant = interview.participant
-    project     = interview.project
+    project = interview.project
+    segments = sorted(
+        interview.segments,
+        key=lambda s: (
+            s.seq if s.seq is not None else 10**9,
+            s.start_sec if s.start_sec is not None else 10**12,
+            s.id or 0,
+        ),
+    )
+
+    assignments = SpeakerAssignment.query.filter_by(interview_id=interview.id).all()
+    assignment_map = {a.speaker_label: a for a in assignments if a.speaker_label}
 
     doc = Document()
 
-    # タイトル
     title = doc.add_heading(level=1)
     run = title.add_run(
         f"発言録｜{participant.display_name if participant else '参加者未設定'}"
@@ -42,58 +97,32 @@ def generate_verbatim(interview_id: int) -> GeneratedFile:
     doc.add_paragraph(f"プロジェクト：{project.name}")
     if project.client:
         doc.add_paragraph(f"クライアント：{project.client}")
+    if participant and participant.participant_code:
+        doc.add_paragraph(f"参加者ID：{participant.participant_code}")
+    if interview.interviewer_name:
+        doc.add_paragraph(f"モデレーター：{interview.interviewer_name}")
+    doc.add_paragraph(f"収録Segment数：{len(segments)}")
     doc.add_paragraph()
 
-    # 発言セクション（フロー順）
-    flow = interview.flow
-    if flow:
-        for section in flow.sections:
-            doc.add_heading(section.title, level=2)
-            for q in section.questions:
-                # この質問に対する発言
-                mappings = [
-                    um for um in q.utterance_mappings
-                    if um.segment and um.segment.interview_id == interview_id
-                ]
-                if mappings:
-                    p = doc.add_paragraph()
-                    p.add_run(f"[{q.question_code}] {q.question_text}").bold = True
-                    for um in mappings:
-                        seg = um.segment
-                        row = doc.add_paragraph()
-                        speaker = (
-                            participant.display_name if participant
-                            else seg.speaker_label or "話者"
-                        )
-                        time_str = f"[{_fmt_time(seg.start_sec)}–{_fmt_time(seg.end_sec)}]"
-                        run1 = row.add_run(f"{time_str} {speaker}：")
-                        run1.bold = True
-                        if _has_quote_flag(seg):
-                            quote_mark = row.add_run("★引用候補 ")
-                            quote_mark.bold = True
-                        row.add_run(seg.text)
+    doc.add_heading("逐語発言録（時系列）", level=2)
 
-    # 未分類発言
-    unclassified = [
-        s for s in interview.segments
-        if s.speaker_role == "respondent"
-        and all(um.is_unclassified for um in s.utterance_mappings)
-        and s.utterance_mappings
-    ]
-    if unclassified:
-        doc.add_heading("【未分類発言】", level=2)
-        for seg in unclassified:
-            row = doc.add_paragraph()
-            row.add_run(f"[{_fmt_time(seg.start_sec)}] ").bold = True
-            if _has_quote_flag(seg):
-                quote_mark = row.add_run("★引用候補 ")
-                quote_mark.bold = True
-            row.add_run(seg.text)
+    for seg in segments:
+        row = doc.add_paragraph()
+        time_str = f"[{_fmt_time(seg.start_sec)}–{_fmt_time(seg.end_sec)}]"
+        speaker = _speaker_name(interview, seg, assignment_map)
+        lead = row.add_run(f"{time_str} {speaker}：")
+        lead.bold = True
+        if _has_quote_flag(seg):
+            quote_mark = row.add_run("★引用候補 ")
+            quote_mark.bold = True
+        row.add_run(seg.text)
 
-    # 保存
-    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if not segments:
+        doc.add_paragraph("（発言Segmentがありません）")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"発言録_{participant.participant_code if participant else 'unknown'}_{ts}.docx"
-    out_dir  = os.path.join(config.OUTPUT_DIR, str(interview.project_id))
+    out_dir = os.path.join(config.OUTPUT_DIR, str(interview.project_id))
     os.makedirs(out_dir, exist_ok=True)
     full_path = os.path.join(out_dir, filename)
     doc.save(full_path)
