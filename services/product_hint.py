@@ -19,6 +19,7 @@ from urllib.request import urlopen
 import config
 from models.setting import AppSetting
 from services.domain_glossary import find_glossary_hints
+from services.secret_store import get_secret_setting
 
 _RAKUTEN_ENDPOINTS = [
     "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260401",
@@ -43,11 +44,11 @@ def _provider(provider_override: str | None = None) -> str:
 
 
 def _rakuten_app_id() -> str:
-    return _get_setting("rakuten_application_id", config.RAKUTEN_APPLICATION_ID)
+    return get_secret_setting("rakuten_application_id", config.RAKUTEN_APPLICATION_ID).strip()
 
 
 def _rakuten_access_key() -> str:
-    return _get_setting("rakuten_access_key", config.RAKUTEN_ACCESS_KEY)
+    return get_secret_setting("rakuten_access_key", config.RAKUTEN_ACCESS_KEY).strip()
 
 
 def _rakuten_affiliate_id() -> str:

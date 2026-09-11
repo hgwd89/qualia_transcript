@@ -150,6 +150,22 @@ def create_app():
 
     _run_migrations(app)
 
+    # Existing installations may contain plaintext API credentials from older
+    # versions. On Windows, migrate them to current-user DPAPI storage at startup.
+    with app.app_context():
+        try:
+            from services.secret_store import migrate_legacy_plaintext_secrets
+            migrated = migrate_legacy_plaintext_secrets()
+            if migrated.migrated_keys:
+                app.logger.info(
+                    "migrated legacy plaintext secret settings to DPAPI: %s",
+                    ", ".join(migrated.migrated_keys),
+                )
+        except Exception:
+            # Preserve startup/data access if Windows credential protection fails;
+            # readiness/security checks can then surface the remaining plaintext.
+            app.logger.exception("secret setting DPAPI migration failed")
+
     return app
 
 
