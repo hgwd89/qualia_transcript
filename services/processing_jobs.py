@@ -416,6 +416,7 @@ def _perform_transcription(job: ProcessingJob) -> dict:
     result = run_transcription(
         tr.id,
         lease_check=lambda: assert_job_lease(job),
+        result_write_guard=lambda: begin_job_result_write(job),
     )
     return {
         "transcription_id": tr.id,

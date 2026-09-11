@@ -12,7 +12,7 @@ import tempfile
 import wave
 import contextlib
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 import av
 from faster_whisper import WhisperModel
@@ -51,6 +51,9 @@ _OPENAI_TRANSCRIBE_VERBATIM_PROMPT = (
 _LONG_AUDIO_THRESHOLD_SEC = 360.0
 _OPENAI_CHUNK_DURATION_SEC = 300.0
 _OPENAI_CHUNK_OVERLAP_SEC = 0.0
+
+LeaseCheck = Callable[[], object]
+ResultWriteGuard = Callable[[], object]
 
 
 def _sanitize_error_message(message: str) -> str:
@@ -617,7 +620,12 @@ def infer_speaker_roles_from_diarized_segments(segments: list[dict]) -> dict[str
     return role_map
 
 
-def run_transcription(transcription_id: int) -> dict:
+def run_transcription(
+    transcription_id: int,
+    *,
+    lease_check: LeaseCheck | None = None,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> dict:
     """
     設定された provider に応じて文字起こしを実行するディスパッチャ。
     """
@@ -625,16 +633,31 @@ def run_transcription(transcription_id: int) -> dict:
 
     if provider == "openai":
         try:
-            return run_openai_transcription(transcription_id)
+            return run_openai_transcription(
+                transcription_id,
+                lease_check=lease_check,
+                result_write_guard=result_write_guard,
+            )
         except Exception:
             if get_fallback_provider() == "local_whisper":
-                return run_local_whisper_transcription(transcription_id)
+                return run_local_whisper_transcription(
+                    transcription_id,
+                    result_write_guard=result_write_guard,
+                )
             raise
 
-    return run_local_whisper_transcription(transcription_id)
+    return run_local_whisper_transcription(
+        transcription_id,
+        result_write_guard=result_write_guard,
+    )
 
 
-def run_openai_transcription(transcription_id: int) -> dict:
+def run_openai_transcription(
+    transcription_id: int,
+    *,
+    lease_check: LeaseCheck | None = None,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> dict:
     """
     OpenAI transcription API で文字起こしし、Segment を保存する。
     返却全文を簡易分割して複数Segment保存する。
@@ -679,6 +702,11 @@ def run_openai_transcription(transcription_id: int) -> dict:
             diarized_segments: list[dict] = []
             if _is_diarize_model(model_name):
                 diarized_segments = _parse_diarized_segments(resp)
+
+            # External API work is complete. Durable callers acquire the result
+            # write reservation before any canonical Segment/done state is written.
+            if result_write_guard is not None:
+                result_write_guard()
 
             if diarized_segments:
                 speaker_role_map = infer_speaker_roles_from_diarized_segments(diarized_segments)
@@ -904,6 +932,8 @@ def run_openai_transcription(transcription_id: int) -> dict:
                     chunk_records.append(record)
                     seg_count += chunk_seg_count
                     word_count += int(record["word_count"])
+                    if lease_check is not None:
+                        lease_check()
                     db.session.commit()
 
                 except Exception as chunk_error:
@@ -941,6 +971,11 @@ def run_openai_transcription(transcription_id: int) -> dict:
             status="done",
         )
 
+        # Partial chunks are auditable/retry-cleanable, but the final canonical
+        # done transition must be fenced against a recovered newer attempt.
+        if result_write_guard is not None:
+            result_write_guard()
+
         tr.status = "done"
         tr.word_count = word_count
         tr.completed_at = datetime.now(timezone.utc)
@@ -956,13 +991,20 @@ def run_openai_transcription(transcription_id: int) -> dict:
         }
 
     except Exception as e:
+        # Never let uncommitted Segment rows hitchhike on the error-state commit.
+        # Completed long-audio chunks were committed earlier and remain auditable.
+        db.session.rollback()
         tr.status = "error"
         tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()
         raise
 
 
-def run_local_whisper_transcription(transcription_id: int) -> dict:
+def run_local_whisper_transcription(
+    transcription_id: int,
+    *,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> dict:
     """
     faster-whisper（ローカルCPU）で文字起こしし、Segment を保存する。
     """
@@ -999,8 +1041,14 @@ def run_local_whisper_transcription(transcription_id: int) -> dict:
         word_count = 0
         seg_count = 0
 
+        # faster-whisper yields lazily. Materialize inference first so the
+        # durable SQLite write reservation is not held during CPU-heavy decoding.
+        local_segments = list(segments_gen)
+        if result_write_guard is not None:
+            result_write_guard()
+
         speaker_labels: dict[str, str] = {}
-        for seg in segments_gen:
+        for seg in local_segments:
             speaker = getattr(seg, "speaker", None) or "SPEAKER_00"
             if speaker not in speaker_labels:
                 n = len(speaker_labels)
@@ -1029,6 +1077,9 @@ def run_local_whisper_transcription(transcription_id: int) -> dict:
         return {"segment_count": seg_count, "word_count": word_count}
 
     except Exception as e:
+        # Never let uncommitted Segment rows hitchhike on the error-state commit.
+        # Completed long-audio chunks were committed earlier and remain auditable.
+        db.session.rollback()
         tr.status = "error"
         tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()

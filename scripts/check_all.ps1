@@ -59,6 +59,7 @@ $doJobRecovery = $false
 $doJobRecoveryFencing = $false
 $doProjectPipelineResilience = $false
 $doProjectPipelineWriteFencing = $false
+$doTranscriptionFinalWriteFencing = $false
 
 if ($AllLocal) {
     $doSafe = $true
@@ -79,6 +80,7 @@ if ($AllLocal) {
     $doJobRecoveryFencing = $true
     $doProjectPipelineResilience = $true
     $doProjectPipelineWriteFencing = $true
+    $doTranscriptionFinalWriteFencing = $true
 }
 
 $hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
@@ -146,6 +148,9 @@ if ($doProjectPipelineResilience) {
 }
 if ($doProjectPipelineWriteFencing) {
     Invoke-Check -Name "Project Pipeline Write Fencing Check" -ScriptPath (Join-Path $scriptDir "check_project_pipeline_write_fencing.ps1") -Paid:$false
+}
+if ($doTranscriptionFinalWriteFencing) {
+    Invoke-Check -Name "Transcription Final Write Fencing Check" -ScriptPath (Join-Path $scriptDir "check_transcription_final_write_fencing.ps1") -Paid:$false
 }
 if ($Mapping) {
     Invoke-Check -Name "Mapping Smoke Check" -ScriptPath (Join-Path $scriptDir "check_mapping.ps1") -Paid:$true

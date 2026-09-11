@@ -15,6 +15,7 @@ from services.transcription import (
 
 
 LeaseCheck = Callable[[], object]
+ResultWriteGuard = Callable[[], object]
 
 
 def _check_or_invalidate(transcription_id: int, lease_check: LeaseCheck | None) -> None:
@@ -27,7 +28,12 @@ def _check_or_invalidate(transcription_id: int, lease_check: LeaseCheck | None) 
         raise
 
 
-def run_transcription(transcription_id: int, *, lease_check: LeaseCheck | None = None) -> dict:
+def run_transcription(
+    transcription_id: int,
+    *,
+    lease_check: LeaseCheck | None = None,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> dict:
     """Run transcription with fallback cleanup and optional durable-job fencing.
 
     OpenAI long-audio mode commits successful chunks incrementally. Before local
@@ -41,7 +47,11 @@ def run_transcription(transcription_id: int, *, lease_check: LeaseCheck | None =
 
     if provider == "openai":
         try:
-            result = run_openai_transcription(transcription_id)
+            result = run_openai_transcription(
+                transcription_id,
+                lease_check=lease_check,
+                result_write_guard=result_write_guard,
+            )
         except Exception:
             _check_or_invalidate(transcription_id, lease_check)
             if get_fallback_provider() != "local_whisper":
@@ -49,7 +59,14 @@ def run_transcription(transcription_id: int, *, lease_check: LeaseCheck | None =
 
             discarded = discard_transcription_segments(transcription_id)
             _check_or_invalidate(transcription_id, lease_check)
-            result = run_local_whisper_transcription(transcription_id)
+            try:
+                result = run_local_whisper_transcription(
+                    transcription_id,
+                    result_write_guard=result_write_guard,
+                )
+            except Exception:
+                _check_or_invalidate(transcription_id, lease_check)
+                raise
             _check_or_invalidate(transcription_id, lease_check)
             return {
                 **(result or {}),
@@ -60,6 +77,13 @@ def run_transcription(transcription_id: int, *, lease_check: LeaseCheck | None =
         _check_or_invalidate(transcription_id, lease_check)
         return result
 
-    result = run_local_whisper_transcription(transcription_id)
+    try:
+        result = run_local_whisper_transcription(
+            transcription_id,
+            result_write_guard=result_write_guard,
+        )
+    except Exception:
+        _check_or_invalidate(transcription_id, lease_check)
+        raise
     _check_or_invalidate(transcription_id, lease_check)
     return result
