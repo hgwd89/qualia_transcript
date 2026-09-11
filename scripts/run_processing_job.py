@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +21,7 @@ def main() -> int:
 
     app = create_app()
     with app.app_context():
-        job = execute_job(args.job_id)
+        job = execute_job(args.job_id, worker_pid=os.getpid())
         print(f"job_id={job.id} status={job.status}")
         if job.error_message:
             print(job.error_message)

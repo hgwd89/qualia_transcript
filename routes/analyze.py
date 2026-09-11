@@ -42,6 +42,7 @@ def analyze_interview(interview_id):
         job.status = "failed"
         job.error_message = f"worker launch failed: {exc}"[:4000]
         job.finished_at = datetime.now(timezone.utc)
+        job.worker_pid = None
         db.session.add(job)
         db.session.commit()
         return jsonify({"ok": False, "job_id": job.id, "error": str(exc)}), 500
