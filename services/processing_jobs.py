@@ -402,8 +402,15 @@ def _perform_transcription(job: ProcessingJob) -> dict:
         }
 
     update_progress(job, "transcribing")
+
+    # Cleanup is a destructive canonical write. Fence it so an old transcribe
+    # worker cannot delete partial rows that now belong to a newer retry.
+    begin_job_result_write(job)
     cleanup = discard_incomplete_transcription_segments(media.id)
 
+    # Cleanup commits and releases the reservation. Revalidate the immutable
+    # attempt token before creating the next Transcription attempt.
+    begin_job_result_write(job)
     tr = Transcription(
         media_file_id=media.id,
         whisper_model=get_default_transcription_model(),
