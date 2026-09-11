@@ -7,6 +7,15 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 
+# Windows PowerShell runners may expose a legacy charmap stdout encoding. The
+# smoke intentionally exercises Japanese filenames/sheet names, so keep logs UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
+
+
 SEGMENT_TEXT = "保湿すると肌が落ち着いて安心します。"
 
 
@@ -194,6 +203,8 @@ def main() -> int:
         print_result("config import", False, f"{type(e).__name__}: {e}")
         return 1
 
+    app = None
+    db = None
     with tempfile.TemporaryDirectory(prefix="qualia_analysis_review_") as tmp:
         tmp_dir = Path(tmp)
         try:
@@ -302,36 +313,39 @@ def main() -> int:
                     failures,
                     "approved analysis workbook generated in temp output",
                     output_path.is_file() and output_path.is_relative_to(tmp_dir),
-                    str(output_path),
+                    output_path.name,
                 )
 
                 wb = load_workbook(output_path, data_only=True)
-                failures = add_failure(
-                    failures,
-                    "approved workbook sheets",
-                    set(wb.sheetnames) == {"承認済AI分析", "根拠引用"},
-                    ", ".join(wb.sheetnames),
-                )
+                try:
+                    failures = add_failure(
+                        failures,
+                        "approved workbook sheets",
+                        set(wb.sheetnames) == {"承認済AI分析", "根拠引用"},
+                        ", ".join(wb.sheetnames),
+                    )
 
-                ws_summary = wb["承認済AI分析"]
-                summary_ids = [ws_summary.cell(row, 1).value for row in range(2, ws_summary.max_row + 1)]
-                failures = add_failure(
-                    failures,
-                    "formal output contains approved analysis only",
-                    summary_ids == [ids["good_analysis_id"]],
-                    str(summary_ids),
-                )
+                    ws_summary = wb["承認済AI分析"]
+                    summary_ids = [ws_summary.cell(row, 1).value for row in range(2, ws_summary.max_row + 1)]
+                    failures = add_failure(
+                        failures,
+                        "formal output contains approved analysis only",
+                        summary_ids == [ids["good_analysis_id"]],
+                        str(summary_ids),
+                    )
 
-                ws_evidence = wb["根拠引用"]
-                evidence_headers = [c.value for c in ws_evidence[1]]
-                source_col = evidence_headers.index("source_segment_ids") + 1
-                evidence_source_ids = str(ws_evidence.cell(2, source_col).value or "")
-                failures = add_failure(
-                    failures,
-                    "formal output preserves source_segment_ids",
-                    evidence_source_ids == str(ids["segment_id"]),
-                    evidence_source_ids,
-                )
+                    ws_evidence = wb["根拠引用"]
+                    evidence_headers = [c.value for c in ws_evidence[1]]
+                    source_col = evidence_headers.index("source_segment_ids") + 1
+                    evidence_source_ids = str(ws_evidence.cell(2, source_col).value or "")
+                    failures = add_failure(
+                        failures,
+                        "formal output preserves source_segment_ids",
+                        evidence_source_ids == str(ids["segment_id"]),
+                        evidence_source_ids,
+                    )
+                finally:
+                    wb.close()
 
                 segment = db.session.get(Segment, ids["segment_id"])
                 failures = add_failure(
@@ -339,9 +353,6 @@ def main() -> int:
                     "Segment.text unchanged",
                     segment.text == baseline_text == SEGMENT_TEXT,
                 )
-
-                db.session.remove()
-                db.engine.dispose()
         except Exception as e:
             failures = add_failure(
                 failures,
@@ -350,6 +361,13 @@ def main() -> int:
                 f"{type(e).__name__}: {e}",
             )
         finally:
+            if app is not None and db is not None:
+                try:
+                    with app.app_context():
+                        db.session.remove()
+                        db.engine.dispose()
+                except Exception:
+                    pass
             config.DATABASE_URI = original_config["DATABASE_URI"]
             config.UPLOAD_DIR = original_config["UPLOAD_DIR"]
             config.OUTPUT_DIR = original_config["OUTPUT_DIR"]
