@@ -22,20 +22,23 @@ def _safe_error(exc: Exception) -> str:
 
 
 class ProjectPipelinePartialFailure(RuntimeError):
-    """All interviews were attempted, but one or more interview steps failed."""
+    """All interviews were inspected/attempted, but one or more were incomplete."""
 
     def __init__(self, result: dict):
         self.job_result = result
         failed = int(result.get("failed_interview_count") or 0)
-        super().__init__(f"project pipeline completed with {failed} failed interview(s)")
+        super().__init__(f"project pipeline completed with {failed} incomplete/failed interview(s)")
 
 
-def _step_error(row: dict, step: str, exc: Exception) -> None:
-    row["steps"].append({
+def _step_error(row: dict, step: str, exc: Exception, *, code: str | None = None) -> None:
+    item = {
         "step": step,
         "error": _safe_error(exc),
         "error_type": type(exc).__name__,
-    })
+    }
+    if code:
+        item["code"] = code
+    row["steps"].append(item)
 
 
 def run_project_pipeline(job, update_progress) -> dict:
@@ -43,7 +46,9 @@ def run_project_pipeline(job, update_progress) -> dict:
     if not project:
         raise ValueError("project not found")
 
-    interviews = [iv for iv in project.interviews if iv.status != "error"]
+    # Do not silently drop interviews already marked error. They remain part of
+    # the project and must make an all-project operation visibly incomplete.
+    interviews = list(project.interviews)
     first_flow_id = project.interview_flows[0].id if project.interview_flows else None
     results = []
 
@@ -61,7 +66,12 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         interview = db.session.get(Interview, interview_id)
         if not interview:
-            _step_error(row, "load_interview", RuntimeError("interview disappeared during pipeline"))
+            _step_error(row, "load_interview", RuntimeError("interview disappeared during pipeline"), code="missing_interview")
+            results.append(row)
+            continue
+
+        if interview.status == "error":
+            _step_error(row, "precheck", RuntimeError("interview is already in error status"), code="interview_error_status")
             results.append(row)
             continue
 
@@ -78,44 +88,51 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         if interview.status == "pending":
             if not interview.media_files:
-                row["steps"].append({"step": "transcribe", "result": "skipped_no_media"})
-            else:
-                media = interview.media_files[-1]
-                existing = (
-                    Transcription.query
-                    .filter_by(media_file_id=media.id, status="done")
-                    .order_by(Transcription.id.desc())
-                    .first()
+                _step_error(
+                    row,
+                    "transcribe",
+                    RuntimeError("audio file is not registered"),
+                    code="missing_media",
                 )
-                if existing:
-                    interview.status = "transcribed"
+                results.append(row)
+                continue
+
+            media = interview.media_files[-1]
+            existing = (
+                Transcription.query
+                .filter_by(media_file_id=media.id, status="done")
+                .order_by(Transcription.id.desc())
+                .first()
+            )
+            if existing:
+                interview.status = "transcribed"
+                db.session.commit()
+                row["steps"].append({
+                    "step": "transcribe",
+                    "result": "already_done",
+                    "transcription_id": existing.id,
+                })
+            else:
+                try:
+                    tr = Transcription(
+                        media_file_id=media.id,
+                        whisper_model=get_default_transcription_model(),
+                        language="ja",
+                        status="pending",
+                    )
+                    db.session.add(tr)
                     db.session.commit()
+                    result = run_transcription(tr.id)
                     row["steps"].append({
                         "step": "transcribe",
-                        "result": "already_done",
-                        "transcription_id": existing.id,
+                        "result": result,
+                        "transcription_id": tr.id,
                     })
-                else:
-                    try:
-                        tr = Transcription(
-                            media_file_id=media.id,
-                            whisper_model=get_default_transcription_model(),
-                            language="ja",
-                            status="pending",
-                        )
-                        db.session.add(tr)
-                        db.session.commit()
-                        result = run_transcription(tr.id)
-                        row["steps"].append({
-                            "step": "transcribe",
-                            "result": result,
-                            "transcription_id": tr.id,
-                        })
-                    except Exception as exc:
-                        db.session.rollback()
-                        _step_error(row, "transcribe", exc)
-                        results.append(row)
-                        continue
+                except Exception as exc:
+                    db.session.rollback()
+                    _step_error(row, "transcribe", exc)
+                    results.append(row)
+                    continue
 
         interview = db.session.get(Interview, interview_id)
         if interview and interview.status == "transcribed":
@@ -151,18 +168,25 @@ def run_project_pipeline(job, update_progress) -> dict:
         results.append(row)
 
     failed_rows = [row for row in results if any(step.get("error") for step in row["steps"])]
-    skipped_no_media = sum(
+    missing_media_count = sum(
         1
         for row in results
         for step in row["steps"]
-        if step.get("result") == "skipped_no_media"
+        if step.get("code") == "missing_media"
+    )
+    error_status_count = sum(
+        1
+        for row in results
+        for step in row["steps"]
+        if step.get("code") == "interview_error_status"
     )
     payload = {
         "interviews": results,
         "interview_count": len(interviews),
         "failed_interview_count": len(failed_rows),
         "completed_interview_count": len(interviews) - len(failed_rows),
-        "skipped_no_media_count": skipped_no_media,
+        "missing_media_count": missing_media_count,
+        "error_status_count": error_status_count,
     }
 
     if failed_rows:
