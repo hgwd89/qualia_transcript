@@ -51,6 +51,7 @@ $doLocalProduction = $false
 $doProductionReadinessSmoke = $false
 $doProcessingJobs = $false
 $doJobAdmission = $false
+$doJobFencing = $false
 $doJobRecovery = $false
 $doProjectPipelineResilience = $false
 
@@ -65,6 +66,7 @@ if ($AllLocal) {
     $doProductionReadinessSmoke = $true
     $doProcessingJobs = $true
     $doJobAdmission = $true
+    $doJobFencing = $true
     $doJobRecovery = $true
     $doProjectPipelineResilience = $true
 }
@@ -110,6 +112,9 @@ if ($doProcessingJobs) {
 }
 if ($doJobAdmission) {
     Invoke-Check -Name "Atomic Job Admission Check" -ScriptPath (Join-Path $scriptDir "check_job_admission.ps1") -Paid:$false
+}
+if ($doJobFencing) {
+    Invoke-Check -Name "Processing Job Fencing Check" -ScriptPath (Join-Path $scriptDir "check_job_fencing.ps1") -Paid:$false
 }
 if ($doJobRecovery) {
     Invoke-Check -Name "Stale Processing Job Recovery Check" -ScriptPath (Join-Path $scriptDir "check_job_recovery.ps1") -Paid:$false
