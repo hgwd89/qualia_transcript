@@ -1,13 +1,15 @@
 $ErrorActionPreference = "Stop"
 
 $ProjectDir = $PSScriptRoot
+. (Join-Path $ProjectDir "scripts\runtime_config.ps1")
+
+$pythonExe = Get-QualiaPythonExecutable -ProjectDir $ProjectDir
+$runtime = Get-QualiaRuntimeConfig -ProjectDir $ProjectDir -PythonExe $pythonExe
+$Port = $runtime.Port
+$AppUrl = $runtime.Url
 $LogsDir = Join-Path $ProjectDir "logs"
 $OutLog = Join-Path $LogsDir "flask_out.log"
 $ErrLog = Join-Path $LogsDir "flask_err.log"
-$HostAddress = if ($env:APP_HOST) { $env:APP_HOST } else { "127.0.0.1" }
-$Port = if ($env:APP_PORT) { [int]$env:APP_PORT } else { 5000 }
-$BrowserHost = if ($HostAddress -eq "0.0.0.0") { "127.0.0.1" } else { $HostAddress }
-$AppUrl = "http://${BrowserHost}:${Port}/"
 $MaxWaitSeconds = 30
 
 function Get-PortProcessInfo {
@@ -56,24 +58,6 @@ function Wait-AppReady {
     return $false
 }
 
-function Get-PythonExecutable {
-    $venvCandidates = @(
-        (Join-Path $ProjectDir ".venv\Scripts\python.exe"),
-        (Join-Path $ProjectDir "venv\Scripts\python.exe")
-    )
-    foreach ($candidate in $venvCandidates) {
-        if (Test-Path $candidate) {
-            return (Resolve-Path $candidate).Path
-        }
-    }
-
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($cmd -and $cmd.Source) {
-        return $cmd.Source
-    }
-    throw "python 実行ファイルが見つかりません。Python またはプロジェクトの仮想環境を確認してください。"
-}
-
 Set-Location $ProjectDir
 New-Item -Path $LogsDir -ItemType Directory -Force | Out-Null
 
@@ -109,7 +93,6 @@ if ($httpAlreadyOk) {
 }
 
 Write-Host "Qualia Transcript を起動します..." -ForegroundColor Cyan
-$pythonExe = Get-PythonExecutable
 Write-Host "Project: $ProjectDir" -ForegroundColor DarkGray
 Write-Host "Python: $pythonExe" -ForegroundColor DarkGray
 Write-Host "URL: $AppUrl" -ForegroundColor DarkGray
