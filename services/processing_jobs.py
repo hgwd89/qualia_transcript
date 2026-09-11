@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import text
+
 import config
 from models import db
 from models.processing_job import ProcessingJob
@@ -78,11 +80,7 @@ def _owned_running_query(job_id: int, attempt_count: int):
 
 
 def assert_job_lease(job: ProcessingJob) -> ProcessingJob:
-    """Verify that this worker attempt still owns the durable job row.
-
-    Call only at clean stage boundaries. The attempt number captured by the worker
-    acts as a fencing token, so a recovered/retried job invalidates older workers.
-    """
+    """Verify that this worker attempt still owns the durable job row."""
     job_id = int(job.id)
     attempt_count = _attempt_number(job)
     db.session.expire_all()
@@ -94,6 +92,43 @@ def assert_job_lease(job: ProcessingJob) -> ProcessingJob:
     ):
         raise JobLeaseLost(
             f"processing job lease lost: job_id={job_id} attempt={attempt_count}"
+        )
+    return current
+
+
+def begin_job_result_write(job: ProcessingJob) -> ProcessingJob:
+    """Acquire a DB write reservation and validate the immutable attempt token.
+
+    This is called only after expensive external work has completed and before
+    canonical result rows are changed. On SQLite, BEGIN IMMEDIATE serializes this
+    lease check with stale recovery/retry updates and keeps the reservation until
+    the caller commits its result. Other databases use a row lock.
+    """
+    job_id = int(job.id)
+    attempt_count = _attempt_number(job)
+    if db.session.new or db.session.dirty or db.session.deleted:
+        raise RuntimeError("result write guard requires a clean database session")
+
+    db.session.rollback()
+    if db.engine.dialect.name == "sqlite":
+        db.session.execute(text("BEGIN IMMEDIATE"))
+        current = db.session.get(ProcessingJob, job_id)
+    else:
+        current = (
+            ProcessingJob.query
+            .filter(ProcessingJob.id == job_id)
+            .with_for_update()
+            .first()
+        )
+
+    if (
+        not current
+        or current.status != "running"
+        or int(current.attempt_count or 0) != attempt_count
+    ):
+        db.session.rollback()
+        raise JobLeaseLost(
+            f"processing job result lease lost: job_id={job_id} attempt={attempt_count}"
         )
     return current
 
@@ -124,13 +159,7 @@ def _refresh_job(job_id: int) -> ProcessingJob:
 
 
 def _reserve_worker_launch(job_id: int) -> tuple[ProcessingJob, bool]:
-    """Reserve the right to spawn a worker exactly once for a pending job.
-
-    worker_pid=0 is a short-lived durable sentinel meaning "launcher owns the
-    spawn slot but the OS PID has not been persisted yet". Existing recovery
-    treats 0 as no PID and therefore still gives the normal five-minute grace.
-    A running job is never eligible for a new spawn reservation.
-    """
+    """Reserve the right to spawn a worker exactly once for a pending job."""
     reserved = (
         ProcessingJob.query
         .filter(ProcessingJob.id == job_id)
@@ -168,11 +197,7 @@ def _release_worker_launch_reservation(job_id: int) -> None:
 
 
 def _record_worker_launch(job_id: int, pid: int) -> bool:
-    """Persist a spawned PID without resurrecting or overwriting a terminal job.
-
-    If the child has already atomically claimed the job, it writes its own PID.
-    The parent only fills the PID while the launch-reservation sentinel remains.
-    """
+    """Persist a spawned PID without resurrecting or overwriting a terminal job."""
     pid = int(pid)
     pending_updated = (
         ProcessingJob.query
@@ -219,8 +244,6 @@ def launch_job_worker(job_id: int) -> int:
 
     job, reserved = _reserve_worker_launch(job_id)
     if not reserved:
-        # Another launcher already owns the pending spawn slot, the worker has
-        # already claimed the job, or the job has completed. Never spawn again.
         if job.status in ACTIVE_STATUSES:
             return int(job.worker_pid or 0)
         raise ValueError(f"job cannot be launched from status={job.status}")
@@ -292,13 +315,7 @@ def retry_failed_job(job: ProcessingJob) -> ProcessingJob:
 
 
 def _claim_pending_job(job_id: int, worker_pid: int | None = None) -> tuple[ProcessingJob, bool]:
-    """Atomically transition pending -> running.
-
-    The conditional UPDATE is the execution lease: if multiple workers reach
-    this function, exactly one can change the row from pending to running. All
-    others observe rowcount=0 and return without executing the handler.
-    `attempt_count` is also the fencing token for all later worker writes.
-    """
+    """Atomically transition pending -> running and freeze its fencing token."""
     values = {
         ProcessingJob.status: "running",
         ProcessingJob.started_at: _utcnow(),
@@ -392,7 +409,6 @@ def _perform_transcription(job: ProcessingJob) -> dict:
             "segment_count": len(interview.segments),
         }
 
-    # Fence the attempt before deleting partial data or creating a new row.
     update_progress(job, "transcribing")
     cleanup = discard_incomplete_transcription_segments(media.id)
 
@@ -424,7 +440,10 @@ def _perform_mapping(job: ProcessingJob) -> dict:
     if not interview or interview.project_id != job.project_id:
         raise ValueError("interview not found in job project")
     update_progress(job, "mapping")
-    count = run_mapping(interview.id)
+    count = run_mapping(
+        interview.id,
+        result_write_guard=lambda: begin_job_result_write(job),
+    )
     return {"mapped_count": count}
 
 
@@ -443,7 +462,10 @@ def _perform_analysis(job: ProcessingJob) -> dict:
         return {"analysis_id": existing.id, "already_done": True}
 
     update_progress(job, "analyzing")
-    analysis = analyze_interview_summary(interview.id)
+    analysis = analyze_interview_summary(
+        interview.id,
+        result_write_guard=lambda: begin_job_result_write(job),
+    )
     return {"analysis_id": analysis.id}
 
 
