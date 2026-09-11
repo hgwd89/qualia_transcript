@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -14,6 +15,7 @@ from models.processing_job import ProcessingJob
 
 ACTIVE_STATUSES = {"pending", "running"}
 JOB_TYPES = {"transcribe", "map", "analyze", "project_pipeline"}
+_KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
 
 
 def _utcnow():
@@ -22,6 +24,10 @@ def _utcnow():
 
 def _json_dump(value) -> str:
     return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _safe_error(exc: Exception) -> str:
+    return _KEY_RE.sub("[REDACTED_KEY]", str(exc or ""))[:4000]
 
 
 def create_or_get_active_job(project_id: int, job_type: str, interview_id: int | None = None):
@@ -73,10 +79,14 @@ def launch_job_worker(job_id: int) -> int:
     logs_dir.mkdir(parents=True, exist_ok=True)
     log_path = logs_dir / f"processing_job_{job.id}.log"
 
+    child_env = os.environ.copy()
+    child_env["PYTHONUTF8"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
     kwargs = {
         "cwd": str(root),
         "stdin": subprocess.DEVNULL,
         "close_fds": True,
+        "env": child_env,
     }
     if os.name == "nt":
         kwargs["creationflags"] = (
@@ -127,9 +137,18 @@ def _perform_transcription(job: ProcessingJob) -> dict:
         raise ValueError("音声ファイルが登録されていません")
 
     media = interview.media_files[-1]
-    existing = Transcription.query.filter_by(media_file_id=media.id, status="done").order_by(Transcription.id.desc()).first()
+    existing = (
+        Transcription.query
+        .filter_by(media_file_id=media.id, status="done")
+        .order_by(Transcription.id.desc())
+        .first()
+    )
     if existing:
-        return {"transcription_id": existing.id, "already_done": True, "segment_count": len(interview.segments)}
+        return {
+            "transcription_id": existing.id,
+            "already_done": True,
+            "segment_count": len(interview.segments),
+        }
 
     tr = Transcription(
         media_file_id=media.id,
@@ -169,72 +188,9 @@ def _perform_analysis(job: ProcessingJob) -> dict:
 
 
 def _perform_project_pipeline(job: ProcessingJob) -> dict:
-    from models.interview import Interview, Transcription
-    from models.project import Project
-    from services.analyzer import analyze_interview_summary
-    from services.mapper import run_mapping
-    from services.transcription import auto_assign_speaker_roles, get_default_transcription_model, run_transcription
+    from services.project_pipeline import run_project_pipeline
 
-    project = db.session.get(Project, job.project_id)
-    if not project:
-        raise ValueError("project not found")
-
-    interviews = [iv for iv in project.interviews if iv.status != "error"]
-    first_flow = project.interview_flows[0] if project.interview_flows else None
-    results = []
-
-    for index, interview in enumerate(interviews, start=1):
-        row = {"interview_id": interview.id, "steps": []}
-        update_progress(
-            job,
-            "project_pipeline",
-            current=index,
-            total=len(interviews),
-            interview_id=interview.id,
-            interview_status=interview.status,
-        )
-
-        if not interview.flow_id and first_flow:
-            interview.flow_id = first_flow.id
-            db.session.commit()
-
-        if interview.status == "pending":
-            if not interview.media_files:
-                row["steps"].append({"step": "transcribe", "result": "skipped_no_media"})
-            else:
-                media = interview.media_files[-1]
-                existing = Transcription.query.filter_by(media_file_id=media.id, status="done").order_by(Transcription.id.desc()).first()
-                if existing:
-                    interview.status = "transcribed"
-                    db.session.commit()
-                    row["steps"].append({"step": "transcribe", "result": "already_done", "transcription_id": existing.id})
-                else:
-                    tr = Transcription(
-                        media_file_id=media.id,
-                        whisper_model=get_default_transcription_model(),
-                        language="ja",
-                        status="pending",
-                    )
-                    db.session.add(tr)
-                    db.session.commit()
-                    result = run_transcription(tr.id)
-                    row["steps"].append({"step": "transcribe", "result": result, "transcription_id": tr.id})
-
-        if interview.status == "transcribed":
-            auto_assign_speaker_roles(interview.id)
-            row["steps"].append({"step": "auto_roles", "result": "ok"})
-
-        if interview.status == "transcribed":
-            count = run_mapping(interview.id)
-            row["steps"].append({"step": "mapping", "result": count})
-
-        if interview.status == "mapped":
-            analysis = analyze_interview_summary(interview.id)
-            row["steps"].append({"step": "analyze", "result": analysis.id})
-
-        results.append(row)
-
-    return {"interviews": results, "interview_count": len(interviews)}
+    return run_project_pipeline(job, update_progress)
 
 
 def execute_job(job_id: int, handlers: dict[str, object] | None = None) -> ProcessingJob:
@@ -260,25 +216,37 @@ def execute_job(job_id: int, handlers: dict[str, object] | None = None) -> Proce
         "project_pipeline": _perform_project_pipeline,
     }
     selected = handlers or default_handlers
-    handler = selected.get(job.job_type)
-    if handler is None:
-        raise ValueError(f"no handler for job_type={job.job_type}")
 
     try:
+        handler = selected.get(job.job_type)
+        if handler is None:
+            raise ValueError(f"no handler for job_type={job.job_type}")
+
         result = handler(job)
         job.status = "succeeded"
         job.result_json = _json_dump(result or {})
         job.progress_json = _json_dump({"stage": "completed"})
         job.finished_at = _utcnow()
+        job.worker_pid = None
         db.session.add(job)
         db.session.commit()
     except Exception as exc:
         db.session.rollback()
         job = db.session.get(ProcessingJob, job_id)
         job.status = "failed"
-        job.error_message = str(exc)[:4000]
-        job.progress_json = _json_dump({"stage": "failed"})
+        partial_result = getattr(exc, "job_result", None)
+        if partial_result is not None:
+            job.result_json = _json_dump(partial_result)
+            job.progress_json = _json_dump({
+                "stage": "failed_partial",
+                "failed_interview_count": partial_result.get("failed_interview_count", 0),
+                "interview_count": partial_result.get("interview_count", 0),
+            })
+        else:
+            job.progress_json = _json_dump({"stage": "failed"})
+        job.error_message = _safe_error(exc)
         job.finished_at = _utcnow()
+        job.worker_pid = None
         db.session.add(job)
         db.session.commit()
     return job
