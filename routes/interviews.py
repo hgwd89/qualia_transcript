@@ -43,9 +43,9 @@ def _is_unclassified_segment(seg: Segment, mapping=None) -> bool:
 
 @bp.route("/projects/<int:project_id>/interviews/new", methods=["GET", "POST"])
 def new(project_id):
-    project      = Project.query.get_or_404(project_id)
+    project = Project.query.get_or_404(project_id)
     participants = Participant.query.filter_by(project_id=project_id).all()
-    flows        = InterviewFlow.query.filter_by(project_id=project_id).all()
+    flows = InterviewFlow.query.filter_by(project_id=project_id).all()
 
     if request.method == "POST":
         date_str = request.form.get("interview_date", "").strip()
@@ -61,22 +61,21 @@ def new(project_id):
         db.session.add(interview)
         db.session.flush()
 
-        # 音声ファイルのアップロード
         file = request.files.get("audio_file")
         if file and file.filename and _allowed(file.filename):
-            ext      = os.path.splitext(secure_filename(file.filename))[1].lower()
-            stored   = f"{uuid.uuid4().hex}{ext}"
+            ext = os.path.splitext(secure_filename(file.filename))[1].lower()
+            stored = f"{uuid.uuid4().hex}{ext}"
             save_dir = os.path.join(config.UPLOAD_DIR, str(interview.id))
             os.makedirs(save_dir, exist_ok=True)
             full_path = os.path.join(save_dir, stored)
             file.save(full_path)
-            rel_path  = os.path.join(str(interview.id), stored)
+            rel_path = os.path.join(str(interview.id), stored)
 
             media = MediaFile(
                 interview_id=interview.id,
                 original_filename=file.filename,
                 stored_path=rel_path,
-                file_type="audio" if ext in {".mp3",".m4a",".wav",".ogg",".flac"} else "video",
+                file_type="audio" if ext in {".mp3", ".m4a", ".wav", ".ogg", ".flac"} else "video",
                 mime_type=file.content_type,
             )
             db.session.add(media)
@@ -146,7 +145,6 @@ def integrated_analysis_preview(interview_id):
     max_quotes = max(1, min(max_quotes, 100))
     include_needs_review = request.args.get("include_needs_review") == "1"
 
-    # Lazy import keeps this read-only preview from importing AI clients unless needed elsewhere.
     from services.integrated_analysis import run_integrated_interview_analysis
 
     result = run_integrated_interview_analysis(
@@ -432,12 +430,37 @@ def delete_segment_flag(segment_id, flag_type):
 
 @bp.route("/interviews/<int:interview_id>/segments/<int:segment_id>/role", methods=["POST"])
 def update_segment_role(interview_id, segment_id):
+    interview = Interview.query.get_or_404(interview_id)
     seg = Segment.query.get_or_404(segment_id)
-    data = request.get_json(force=True)
-    seg.speaker_role    = data.get("speaker_role", seg.speaker_role)
-    seg.participant_id  = data.get("participant_id") or None
+    if seg.interview_id != interview.id:
+        return jsonify({"ok": False, "error": "segment does not belong to interview"}), 400
+
+    data = request.get_json(force=True, silent=True) or {}
+    speaker_role = str(data.get("speaker_role") or seg.speaker_role or "unknown").strip()
+    if speaker_role not in SPEAKER_ROLES:
+        return jsonify({"ok": False, "error": "invalid speaker_role"}), 400
+
+    participant_id = data.get("participant_id")
+    if participant_id in (None, ""):
+        participant_id = None
+    else:
+        try:
+            participant_id = int(participant_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid participant_id"}), 400
+        participant = Participant.query.get(participant_id)
+        if not participant or participant.project_id != interview.project_id:
+            return jsonify({"ok": False, "error": "participant does not belong to project"}), 400
+
+    seg.speaker_role = speaker_role
+    seg.participant_id = participant_id
     db.session.commit()
-    return jsonify({"ok": True})
+    return jsonify({
+        "ok": True,
+        "segment_id": seg.id,
+        "speaker_role": seg.speaker_role,
+        "participant_id": seg.participant_id,
+    })
 
 
 @bp.route("/api/interviews/<int:interview_id>/segments/<int:segment_id>/product-hint")
@@ -457,7 +480,6 @@ def segment_product_hint(interview_id, segment_id):
             "inline_hint": inline_hint,
         })
     except Exception:
-        # UI利用時の検索失敗は致命にしない
         return jsonify({
             "ok": False,
             "segment_id": seg.id,
