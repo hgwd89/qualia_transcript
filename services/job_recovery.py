@@ -8,7 +8,6 @@ from models.processing_job import ProcessingJob
 
 ACTIVE_STATUSES = ("pending", "running")
 ACTIVE_WITHOUT_WORKER_GRACE = timedelta(minutes=5)
-MAX_RUNNING_AGE = timedelta(hours=12)
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -20,21 +19,21 @@ def _utc(value: datetime | None) -> datetime | None:
 
 
 def stale_reason(job: ProcessingJob, now: datetime | None = None) -> str | None:
+    """Return an automatic-recovery reason only when recovery is unambiguous.
+
+    A PID-backed job is never failed merely because it is old: without a
+    trustworthy liveness/identity signal that could race a legitimately long
+    operation and permit duplicate writes. Such jobs require explicit operator
+    recovery after confirming the worker has stopped.
+    """
     if job.status not in ACTIVE_STATUSES:
         return None
     current = _utc(now) or datetime.now(timezone.utc)
     created = _utc(job.created_at)
-    started = _utc(job.started_at)
 
-    # A launcher/worker can fail between status transitions. Treat either
-    # pending or running as stale when no worker PID appears after the grace.
     if not job.worker_pid and created:
         if current - created > ACTIVE_WITHOUT_WORKER_GRACE:
             return "active job has no worker after launch grace period"
-
-    reference = started or created
-    if reference and current - reference > MAX_RUNNING_AGE:
-        return "active job exceeded maximum runtime"
     return None
 
 
