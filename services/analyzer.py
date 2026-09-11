@@ -72,9 +72,16 @@ INTEGRATED_SCHEMA = {
 
 # ── インタビュー単位の分析 ────────────────────────────────────
 
-def analyze_per_question(interview_id: int, question_id: int) -> AIAnalysis:
+def analyze_per_question(
+    interview_id: int,
+    question_id: int,
+    *,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> AIAnalysis:
     interview = Interview.query.get(interview_id)
-    question  = InterviewFlowQuestion.query.get(question_id)
+    question = InterviewFlowQuestion.query.get(question_id)
+    if not interview or not question:
+        raise ValueError("interview または question が見つかりません")
 
     mappings = (
         UtteranceMapping.query
@@ -124,6 +131,9 @@ def analyze_per_question(interview_id: int, question_id: int) -> AIAnalysis:
         "implications": result.get("implications", ""),
         "unresolved": result.get("unresolved", ""),
     }
+
+    if result_write_guard is not None:
+        result_write_guard()
 
     analysis = AIAnalysis(
         project_id=interview.project_id,
@@ -206,7 +216,12 @@ def analyze_interview_summary(
 
 # ── プロジェクト横断分析 ──────────────────────────────────────
 
-def analyze_cross_participants(project_id: int, question_id: int) -> AIAnalysis:
+def analyze_cross_participants(
+    project_id: int,
+    question_id: int,
+    *,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> AIAnalysis:
     """
     複数参加者の同一質問に対する横断分析。
     全インタビューの該当質問への回答を収集して比較する。
@@ -255,6 +270,9 @@ def analyze_cross_participants(project_id: int, question_id: int) -> AIAnalysis:
 
     result = call_structured(system, user, CROSS_SCHEMA, schema_name="cross_analysis_result")
 
+    if result_write_guard is not None:
+        result_write_guard()
+
     analysis = AIAnalysis(
         project_id=project_id,
         interview_id=None,
@@ -270,7 +288,11 @@ def analyze_cross_participants(project_id: int, question_id: int) -> AIAnalysis:
     return analysis
 
 
-def analyze_project_integrated(project_id: int) -> AIAnalysis:
+def analyze_project_integrated(
+    project_id: int,
+    *,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> AIAnalysis:
     """
     プロジェクト全体の統合分析（全参加者・全セクション横断）。
     """
@@ -333,6 +355,9 @@ def analyze_project_integrated(project_id: int) -> AIAnalysis:
     )
 
     result = call_structured(system, user, INTEGRATED_SCHEMA, schema_name="integrated_result")
+
+    if result_write_guard is not None:
+        result_write_guard()
 
     analysis = AIAnalysis(
         project_id=project_id,

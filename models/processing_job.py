@@ -10,7 +10,8 @@ class ProcessingJob(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     project_id = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False)
     interview_id = db.Column(db.Integer, db.ForeignKey("interviews.id"))
-    # transcribe / map / analyze / project_pipeline
+    question_id = db.Column(db.Integer, db.ForeignKey("interview_flow_questions.id"))
+    # transcribe / map / analyze / analyze_question / analyze_cross / analyze_integrated / project_pipeline
     job_type = db.Column(db.Text, nullable=False)
     # pending / running / succeeded / failed
     status = db.Column(db.Text, nullable=False, default="pending")
@@ -25,6 +26,7 @@ class ProcessingJob(db.Model):
 
     project = db.relationship("Project")
     interview = db.relationship("Interview")
+    question = db.relationship("InterviewFlowQuestion")
 
     def _json_value(self, raw):
         if not raw:
@@ -39,6 +41,7 @@ class ProcessingJob(db.Model):
             "id": self.id,
             "project_id": self.project_id,
             "interview_id": self.interview_id,
+            "question_id": self.question_id,
             "job_type": self.job_type,
             "status": self.status,
             "progress": self._json_value(self.progress_json),
