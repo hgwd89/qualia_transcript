@@ -154,7 +154,7 @@ def main() -> int:
 
                 invalid_name_raised = False
                 try:
-                    safe_output_filename("../")
+                    safe_output_filename("...")
                 except ValueError:
                     invalid_name_raised = True
                 failures += check(
