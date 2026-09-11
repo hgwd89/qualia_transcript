@@ -16,6 +16,7 @@ from models.segment_flag import SegmentFlag
 from models.speaker_assignment import SpeakerAssignment
 from models.analysis import AIAnalysis
 from services.product_hint import lookup_product_hints, render_inline_hint
+from services.upload_manager import save_and_register_media
 
 bp = Blueprint("interviews", __name__)
 
@@ -63,24 +64,14 @@ def new(project_id):
 
         file = request.files.get("audio_file")
         if file and file.filename and _allowed(file.filename):
-            ext = os.path.splitext(secure_filename(file.filename))[1].lower()
-            stored = f"{uuid.uuid4().hex}{ext}"
-            save_dir = os.path.join(config.UPLOAD_DIR, str(interview.id))
-            os.makedirs(save_dir, exist_ok=True)
-            full_path = os.path.join(save_dir, stored)
-            file.save(full_path)
-            rel_path = os.path.join(str(interview.id), stored)
-
-            media = MediaFile(
-                interview_id=interview.id,
+            save_and_register_media(
+                file,
+                interview,
                 original_filename=file.filename,
-                stored_path=rel_path,
-                file_type="audio" if ext in {".mp3", ".m4a", ".wav", ".ogg", ".flac"} else "video",
                 mime_type=file.content_type,
             )
-            db.session.add(media)
-
-        db.session.commit()
+        else:
+            db.session.commit()
         flash("インタビューを登録しました", "success")
         return redirect(url_for("interviews.detail", interview_id=interview.id))
 

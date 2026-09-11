@@ -23,6 +23,7 @@ from models import db
 from models.interview import Transcription
 from models.segment import Segment
 from models.setting import AppSetting
+from services.upload_manager import get_media_full_path
 
 _model_cache: dict = {}
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
@@ -673,7 +674,7 @@ def run_openai_transcription(
 
     try:
         media = tr.media_file
-        full_path = os.path.join(config.UPLOAD_DIR, media.stored_path)
+        full_path = get_media_full_path(media)
         model_name = tr.whisper_model or config.OPENAI_TRANSCRIBE_MODEL
         interview = media.interview
         seq = Segment.query.filter_by(interview_id=interview.id).count()
@@ -1019,7 +1020,7 @@ def run_local_whisper_transcription(
 
     try:
         media = tr.media_file
-        full_path = os.path.join(config.UPLOAD_DIR, media.stored_path)
+        full_path = get_media_full_path(media)
 
         model_name = tr.whisper_model or config.WHISPER_MODEL
         # OpenAI用モデル名が入っていた場合はローカルWhisperモデルにフォールバック
