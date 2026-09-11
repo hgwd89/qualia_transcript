@@ -33,3 +33,27 @@ jobs:
       - name: Run safe smoke check
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
+
+      - name: Run processing job regression smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_processing_jobs.ps1
+
+      - name: Run job fencing smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_job_fencing.ps1
+
+      - name: Run result idempotency smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_processing_result_idempotency.ps1
+
+      - name: Run result write fencing smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_result_write_fencing.ps1
+
+      - name: Run mapping retry idempotency smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_mapping_retry_idempotency.ps1
+
+      - name: Run project pipeline resilience smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_project_pipeline_resilience.ps1
