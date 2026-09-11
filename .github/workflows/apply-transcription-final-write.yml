@@ -1,0 +1,160 @@
+name: Apply Transcription Final Write Patch
+
+on:
+  push:
+    branches:
+      - fix/transcription-final-write
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/transcription-final-write
+          fetch-depth: 0
+
+      - name: Apply exact source patch
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text(encoding="utf-8")
+              if new in text:
+                  return
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one match, found {count}\n--- old ---\n{old}")
+              p.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+          path = "services/transcription.py"
+          replace_once(
+              path,
+              "from typing import Any\n",
+              "from typing import Any, Callable\n",
+          )
+          replace_once(
+              path,
+              "_OPENAI_CHUNK_OVERLAP_SEC = 0.0\n",
+              "_OPENAI_CHUNK_OVERLAP_SEC = 0.0\n\nLeaseCheck = Callable[[], object]\nResultWriteGuard = Callable[[], object]\n",
+          )
+          replace_once(
+              path,
+              '''def run_transcription(transcription_id: int) -> dict:\n    """\n    設定された provider に応じて文字起こしを実行するディスパッチャ。\n    """\n    provider = get_transcription_provider()\n\n    if provider == "openai":\n        try:\n            return run_openai_transcription(transcription_id)\n        except Exception:\n            if get_fallback_provider() == "local_whisper":\n                return run_local_whisper_transcription(transcription_id)\n            raise\n\n    return run_local_whisper_transcription(transcription_id)\n''',
+              '''def run_transcription(\n    transcription_id: int,\n    *,\n    lease_check: LeaseCheck | None = None,\n    result_write_guard: ResultWriteGuard | None = None,\n) -> dict:\n    """\n    設定された provider に応じて文字起こしを実行するディスパッチャ。\n    """\n    provider = get_transcription_provider()\n\n    if provider == "openai":\n        try:\n            return run_openai_transcription(\n                transcription_id,\n                lease_check=lease_check,\n                result_write_guard=result_write_guard,\n            )\n        except Exception:\n            if get_fallback_provider() == "local_whisper":\n                return run_local_whisper_transcription(\n                    transcription_id,\n                    result_write_guard=result_write_guard,\n                )\n            raise\n\n    return run_local_whisper_transcription(\n        transcription_id,\n        result_write_guard=result_write_guard,\n    )\n''',
+          )
+          replace_once(
+              path,
+              "def run_openai_transcription(transcription_id: int) -> dict:\n",
+              "def run_openai_transcription(\n    transcription_id: int,\n    *,\n    lease_check: LeaseCheck | None = None,\n    result_write_guard: ResultWriteGuard | None = None,\n) -> dict:\n",
+          )
+          replace_once(
+              path,
+              '''            diarized_segments: list[dict] = []\n            if _is_diarize_model(model_name):\n                diarized_segments = _parse_diarized_segments(resp)\n\n            if diarized_segments:\n''',
+              '''            diarized_segments: list[dict] = []\n            if _is_diarize_model(model_name):\n                diarized_segments = _parse_diarized_segments(resp)\n\n            # External API work is complete. Durable callers acquire the result\n            # write reservation before any canonical Segment/done state is written.\n            if result_write_guard is not None:\n                result_write_guard()\n\n            if diarized_segments:\n''',
+          )
+          replace_once(
+              path,
+              '''                    record["segment_count"] = chunk_seg_count\n                    record["status"] = "done"\n                    chunk_records.append(record)\n                    seg_count += chunk_seg_count\n                    word_count += int(record["word_count"])\n                    db.session.commit()\n''',
+              '''                    record["segment_count"] = chunk_seg_count\n                    record["status"] = "done"\n                    chunk_records.append(record)\n                    seg_count += chunk_seg_count\n                    word_count += int(record["word_count"])\n                    if lease_check is not None:\n                        lease_check()\n                    db.session.commit()\n''',
+          )
+          replace_once(
+              path,
+              '''        manifest_path = _write_chunk_manifest(\n            transcription_id=transcription_id,\n            interview_id=interview.id,\n            model_name=model_name,\n            language=language,\n            chunk_duration_sec=chunk_duration,\n            overlap_sec=overlap,\n            chunks=chunk_records,\n            status="done",\n        )\n\n        tr.status = "done"\n''',
+              '''        manifest_path = _write_chunk_manifest(\n            transcription_id=transcription_id,\n            interview_id=interview.id,\n            model_name=model_name,\n            language=language,\n            chunk_duration_sec=chunk_duration,\n            overlap_sec=overlap,\n            chunks=chunk_records,\n            status="done",\n        )\n\n        # Partial chunks are auditable/retry-cleanable, but the final canonical\n        # done transition must be fenced against a recovered newer attempt.\n        if result_write_guard is not None:\n            result_write_guard()\n\n        tr.status = "done"\n''',
+          )
+          replace_once(
+              path,
+              "def run_local_whisper_transcription(transcription_id: int) -> dict:\n",
+              "def run_local_whisper_transcription(\n    transcription_id: int,\n    *,\n    result_write_guard: ResultWriteGuard | None = None,\n) -> dict:\n",
+          )
+          replace_once(
+              path,
+              '''        speaker_labels: dict[str, str] = {}\n        for seg in segments_gen:\n''',
+              '''        # faster-whisper yields lazily. Materialize inference first so the\n        # durable SQLite write reservation is not held during CPU-heavy decoding.\n        local_segments = list(segments_gen)\n        if result_write_guard is not None:\n            result_write_guard()\n\n        speaker_labels: dict[str, str] = {}\n        for seg in local_segments:\n''',
+          )
+
+          path = "services/transcription_dispatch.py"
+          replace_once(
+              path,
+              "LeaseCheck = Callable[[], object]\n",
+              "LeaseCheck = Callable[[], object]\nResultWriteGuard = Callable[[], object]\n",
+          )
+          replace_once(
+              path,
+              '''def run_transcription(transcription_id: int, *, lease_check: LeaseCheck | None = None) -> dict:\n''',
+              '''def run_transcription(\n    transcription_id: int,\n    *,\n    lease_check: LeaseCheck | None = None,\n    result_write_guard: ResultWriteGuard | None = None,\n) -> dict:\n''',
+          )
+          replace_once(
+              path,
+              "            result = run_openai_transcription(transcription_id)\n",
+              "            result = run_openai_transcription(\n                transcription_id,\n                lease_check=lease_check,\n                result_write_guard=result_write_guard,\n            )\n",
+          )
+          replace_once(
+              path,
+              "            result = run_local_whisper_transcription(transcription_id)\n",
+              "            result = run_local_whisper_transcription(\n                transcription_id,\n                result_write_guard=result_write_guard,\n            )\n",
+          )
+          replace_once(
+              path,
+              "    result = run_local_whisper_transcription(transcription_id)\n",
+              "    result = run_local_whisper_transcription(\n        transcription_id,\n        result_write_guard=result_write_guard,\n    )\n",
+          )
+
+          path = "services/processing_jobs.py"
+          replace_once(
+              path,
+              '''    result = run_transcription(\n        tr.id,\n        lease_check=lambda: assert_job_lease(job),\n    )\n''',
+              '''    result = run_transcription(\n        tr.id,\n        lease_check=lambda: assert_job_lease(job),\n        result_write_guard=lambda: begin_job_result_write(job),\n    )\n''',
+          )
+
+          path = "services/project_pipeline.py"
+          replace_once(
+              path,
+              '''                    result = run_transcription(\n                        tr.id,\n                        lease_check=lambda: assert_job_lease(job),\n                    )\n''',
+              '''                    result = run_transcription(\n                        tr.id,\n                        lease_check=lambda: assert_job_lease(job),\n                        result_write_guard=lambda: begin_job_result_write(job),\n                    )\n''',
+          )
+
+          path = "tests/smoke_processing_result_idempotency.py"
+          replace_once(
+              path,
+              "                def fake_run_transcription(transcription_id, *, lease_check=None):\n",
+              "                def fake_run_transcription(transcription_id, *, lease_check=None, result_write_guard=None):\n",
+          )
+          replace_once(
+              path,
+              '''                    db.session.add(Segment(\n                        transcription_id=tr.id,\n''',
+              '''                    if result_write_guard is not None:\n                        result_write_guard()\n                    db.session.add(Segment(\n                        transcription_id=tr.id,\n''',
+          )
+          replace_once(path, "                def fake_openai(target_id):\n", "                def fake_openai(target_id, **_kwargs):\n")
+          replace_once(path, "                def fake_local(target_id):\n", "                def fake_local(target_id, **_kwargs):\n")
+          replace_once(path, "                def stale_openai(target_id):\n", "                def stale_openai(target_id, **_kwargs):\n")
+          replace_once(
+              path,
+              "                def fake_pipeline_transcription(target_id, *, lease_check=None):\n",
+              "                def fake_pipeline_transcription(target_id, *, lease_check=None, result_write_guard=None):\n",
+          )
+          replace_once(
+              path,
+              '''                    db.session.add(Segment(\n                        transcription_id=target.id,\n                        interview_id=target.media_file.interview_id,\n                        speaker_label="SPEAKER_00",\n                        speaker_role="respondent",\n                        text="pipeline canonical",\n''',
+              '''                    if result_write_guard is not None:\n                        result_write_guard()\n                    db.session.add(Segment(\n                        transcription_id=target.id,\n                        interview_id=target.media_file.interview_id,\n                        speaker_label="SPEAKER_00",\n                        speaker_role="respondent",\n                        text="pipeline canonical",\n''',
+          )
+
+      - name: Commit patched sources
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No source changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add services/transcription.py services/transcription_dispatch.py services/processing_jobs.py services/project_pipeline.py tests/smoke_processing_result_idempotency.py
+          git commit -m "fix: fence transcription canonical final writes"
+          git push origin HEAD:fix/transcription-final-write
