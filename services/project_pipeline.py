@@ -7,11 +7,13 @@ from models.interview import Interview, Transcription
 from models.project import Project
 from services.analyzer import analyze_interview_summary
 from services.mapper import run_mapping
+from services.processing_jobs import JobLeaseLost, assert_job_lease
+from services.processing_result_guard import discard_incomplete_transcription_segments
 from services.transcription import (
     auto_assign_speaker_roles,
     get_default_transcription_model,
-    run_transcription,
 )
+from services.transcription_dispatch import run_transcription
 
 
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
@@ -103,6 +105,7 @@ def run_project_pipeline(job, update_progress) -> dict:
                 continue
 
         if interview.status == "pending":
+            assert_job_lease(job)
             if not interview.media_files:
                 _step_error(
                     row,
@@ -130,6 +133,8 @@ def run_project_pipeline(job, update_progress) -> dict:
                 })
             else:
                 try:
+                    cleanup = discard_incomplete_transcription_segments(media.id)
+                    assert_job_lease(job)
                     tr = Transcription(
                         media_file_id=media.id,
                         whisper_model=get_default_transcription_model(),
@@ -138,14 +143,21 @@ def run_project_pipeline(job, update_progress) -> dict:
                     )
                     db.session.add(tr)
                     db.session.commit()
-                    result = run_transcription(tr.id)
+                    result = run_transcription(
+                        tr.id,
+                        lease_check=lambda: assert_job_lease(job),
+                    )
                     if _status(interview_id) != "transcribed":
                         raise RuntimeError("transcription did not advance interview status to transcribed")
                     row["steps"].append({
                         "step": "transcribe",
                         "result": result,
                         "transcription_id": tr.id,
+                        "discarded_partial_segment_count": cleanup["deleted_segment_count"],
                     })
+                except JobLeaseLost:
+                    db.session.rollback()
+                    raise
                 except Exception as exc:
                     db.session.rollback()
                     _step_error(row, "transcribe", exc, code="transcription_incomplete")
@@ -154,6 +166,7 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         interview = db.session.get(Interview, interview_id)
         if interview and interview.status == "transcribed":
+            assert_job_lease(job)
             try:
                 auto_assign_speaker_roles(interview.id)
                 row["steps"].append({"step": "auto_roles", "result": "ok"})
@@ -165,13 +178,18 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         interview = db.session.get(Interview, interview_id)
         if interview and interview.status == "transcribed":
+            assert_job_lease(job)
             try:
                 count = run_mapping(interview.id)
+                assert_job_lease(job)
                 if _status(interview_id) != "mapped":
                     raise RuntimeError(
                         "mapping did not advance interview status to mapped; verify flow, questions, and respondent segments"
                     )
                 row["steps"].append({"step": "mapping", "result": count})
+            except JobLeaseLost:
+                db.session.rollback()
+                raise
             except Exception as exc:
                 db.session.rollback()
                 _step_error(row, "mapping", exc, code="mapping_incomplete")
@@ -180,11 +198,16 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         interview = db.session.get(Interview, interview_id)
         if interview and interview.status == "mapped":
+            assert_job_lease(job)
             try:
                 analysis = analyze_interview_summary(interview.id)
+                assert_job_lease(job)
                 if _status(interview_id) != "analyzed":
                     raise RuntimeError("analysis did not advance interview status to analyzed")
                 row["steps"].append({"step": "analyze", "result": analysis.id})
+            except JobLeaseLost:
+                db.session.rollback()
+                raise
             except Exception as exc:
                 db.session.rollback()
                 _step_error(row, "analyze", exc, code="analysis_incomplete")
