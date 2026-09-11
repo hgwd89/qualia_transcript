@@ -55,4 +55,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] interview creation scope smoke checks passed."
 
+Write-Host "[INFO] Running SQLite foreign key smoke check..."
+python tests/smoke_sqlite_foreign_keys.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] SQLite foreign key smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] SQLite foreign key smoke checks passed."
+
 exit 0
