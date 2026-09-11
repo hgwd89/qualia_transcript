@@ -44,12 +44,13 @@ def main():
                 db.session.flush()
                 iv1 = Interview(project_id=project.id, status="transcribed")
                 iv2 = Interview(project_id=project.id, status="transcribed")
-                db.session.add_all([iv1, iv2])
+                iv3 = Interview(project_id=project.id, status="pending")
+                db.session.add_all([iv1, iv2, iv3])
                 db.session.flush()
                 job = ProcessingJob(project_id=project.id, job_type="project_pipeline", status="pending")
                 db.session.add(job)
                 db.session.commit()
-                project_id, iv1_id, iv2_id, job_id = project.id, iv1.id, iv2.id, job.id
+                project_id, iv1_id, iv2_id, iv3_id, job_id = project.id, iv1.id, iv2.id, iv3.id, job.id
 
             originals = (
                 pipeline_service.auto_assign_speaker_roles,
@@ -93,9 +94,10 @@ def main():
                     failures += check("partial pipeline is failed", failed_job.status == "failed")
                     failures += check(
                         "partial result is persisted",
-                        payload.get("interview_count") == 2
-                        and payload.get("failed_interview_count") == 1
-                        and len(rows) == 2,
+                        payload.get("interview_count") == 3
+                        and payload.get("failed_interview_count") == 2
+                        and payload.get("missing_media_count") == 1
+                        and len(rows) == 3,
                         str(payload),
                     )
                     failures += check(
@@ -103,7 +105,12 @@ def main():
                         any(step.get("error") for step in rows.get(iv1_id, {}).get("steps", [])),
                     )
                     failures += check(
-                        "later interview still completes",
+                        "missing media is not silently successful",
+                        any(step.get("code") == "missing_media" for step in rows.get(iv3_id, {}).get("steps", [])),
+                        str(rows.get(iv3_id)),
+                    )
+                    failures += check(
+                        "later processable interview still completes",
                         db.session.get(Interview, iv2_id).status == "analyzed"
                         and (iv2_id, "map") in processed
                         and (iv2_id, "analyze") in processed,
@@ -114,15 +121,20 @@ def main():
                         (failed_job.to_dict().get("progress") or {}).get("stage") == "failed_partial",
                     )
 
+                    # Simulate the operator resolving the missing-media interview
+                    # before retrying the same durable project job.
+                    db.session.get(Interview, iv3_id).status = "analyzed"
+                    db.session.commit()
                     retry_failed_job(failed_job)
                     fail_first["enabled"] = False
                     retried = execute_job(job_id)
                     retry_payload = json.loads(retried.result_json or "{}")
                     failures += check(
-                        "retry resumes remaining work and succeeds",
+                        "retry resumes remaining work and succeeds after blockers are fixed",
                         retried.status == "succeeded"
                         and db.session.get(Interview, iv1_id).status == "analyzed"
                         and db.session.get(Interview, iv2_id).status == "analyzed"
+                        and db.session.get(Interview, iv3_id).status == "analyzed"
                         and retry_payload.get("failed_interview_count") == 0,
                         str(retry_payload),
                     )
