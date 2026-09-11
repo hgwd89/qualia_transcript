@@ -6,9 +6,10 @@
 *.db
 *.sqlite3
 
-# アップロード・出力ファイル
+# アップロード・出力・バックアップファイル
 uploads/
 outputs/
+backups/
 
 # Python キャッシュ
 __pycache__/
