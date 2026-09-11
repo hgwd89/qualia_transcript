@@ -227,6 +227,7 @@ def execute_job(job_id: int, handlers: dict[str, object] | None = None) -> Proce
         job.result_json = _json_dump(result or {})
         job.progress_json = _json_dump({"stage": "completed"})
         job.finished_at = _utcnow()
+        job.worker_pid = None
         db.session.add(job)
         db.session.commit()
     except Exception as exc:
@@ -245,6 +246,7 @@ def execute_job(job_id: int, handlers: dict[str, object] | None = None) -> Proce
             job.progress_json = _json_dump({"stage": "failed"})
         job.error_message = _safe_error(exc)
         job.finished_at = _utcnow()
+        job.worker_pid = None
         db.session.add(job)
         db.session.commit()
     return job
