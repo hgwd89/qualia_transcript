@@ -30,6 +30,7 @@ def is_disallowed_tracked_path(path: str) -> bool:
     return (
         p.startswith("uploads/")
         or p.startswith("outputs/")
+        or p.startswith("instance/")
         or p.startswith("raw_transcripts/")
         or p.endswith(".db")
         or p.endswith(".db-journal")
@@ -75,14 +76,14 @@ def main() -> int:
         tracked_artifacts = [f for f in tracked_files if is_disallowed_tracked_path(f)]
         failures = add_failure(
             failures,
-            "uploads/ outputs/ raw_transcripts/ *.db logs/*.log not tracked",
+            "uploads/ outputs/ instance/ raw_transcripts/ *.db logs/*.log not tracked",
             len(tracked_artifacts) == 0,
             "" if not tracked_artifacts else ", ".join(tracked_artifacts[:10]),
         )
     else:
         failures = add_failure(
             failures,
-            "uploads/ outputs/ raw_transcripts/ *.db logs/*.log not tracked",
+            "uploads/ outputs/ instance/ raw_transcripts/ *.db logs/*.log not tracked",
             False,
             (ls_proc.stderr or ls_proc.stdout or "failed to read git ls-files").strip(),
         )
@@ -195,8 +196,16 @@ def main() -> int:
 
             db_path = tmp_dir / "safe_smoke.db"
             failures = add_failure(failures, "temporary database used", db_path.exists())
-            failures = add_failure(failures, "temporary upload dir configured", Path(config.UPLOAD_DIR).is_relative_to(tmp_dir))
-            failures = add_failure(failures, "temporary output dir configured", Path(config.OUTPUT_DIR).is_relative_to(tmp_dir))
+            failures = add_failure(
+                failures,
+                "temporary upload dir configured",
+                Path(config.UPLOAD_DIR).is_relative_to(tmp_dir),
+            )
+            failures = add_failure(
+                failures,
+                "temporary output dir configured",
+                Path(config.OUTPUT_DIR).is_relative_to(tmp_dir),
+            )
     except Exception as e:
         failures = add_failure(failures, "safe smoke temporary app", False, f"{type(e).__name__}: {e}")
     finally:
