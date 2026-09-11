@@ -8,20 +8,26 @@
   <span class="text-gray-700">出力管理</span>
 </nav>
 
-<div class="flex items-center justify-between mb-6">
+<div class="flex items-center justify-between mb-6 gap-4">
   <div>
     <h1 class="text-2xl font-bold text-brand-900">出力管理</h1>
-    <p class="text-sm text-gray-500 mt-1">発言録・整形シート・分析用フラットデータを生成します。</p>
+    <p class="text-sm text-gray-500 mt-1">発言録・整形シート・分析用データ・承認済AI分析を生成します。</p>
   </div>
-  <a href="{{ url_for('analysis_view.index', project_id=project.id) }}"
-     class="text-sm text-gray-500 border border-gray-300 rounded px-3 py-1.5 hover:border-gray-400 transition">
-    分析画面 →
-  </a>
+  <div class="flex gap-2">
+    <a href="{{ url_for('analysis_view.review_index', project_id=project.id) }}"
+       class="text-sm text-green-700 border border-green-300 rounded px-3 py-1.5 hover:bg-green-50 transition whitespace-nowrap">
+      AI分析承認 →
+    </a>
+    <a href="{{ url_for('analysis_view.index', project_id=project.id) }}"
+       class="text-sm text-gray-500 border border-gray-300 rounded px-3 py-1.5 hover:border-gray-400 transition whitespace-nowrap">
+      分析画面 →
+    </a>
+  </div>
 </div>
 
 <div id="status-msg" class="hidden mb-5 p-3 rounded text-sm"></div>
 
-<div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
+<div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-8">
   <section class="bg-white rounded-lg border border-gray-200 p-5">
     <h2 class="font-semibold text-brand-900 mb-2">Word 発言録</h2>
     <p class="text-xs text-gray-500 mb-4">インタビューを1件選び、逐語発言録を生成します。</p>
@@ -55,7 +61,7 @@
 
   <section class="bg-white rounded-lg border border-gray-200 p-5">
     <h2 class="font-semibold text-brand-900 mb-2">分析用フラットデータ</h2>
-    <p class="text-xs text-gray-500 mb-4">発言・質問マッピング・属性を行単位で出力します。現時点ではAI考察の正式納品シートではありません。</p>
+    <p class="text-xs text-gray-500 mb-4">発言・質問マッピング・属性を行単位で出力します。AI考察の正式納品シートとは別です。</p>
     <div class="grid grid-cols-2 gap-2">
       <button id="btn-analysis-xlsx" onclick="generateAnalysis('xlsx')"
               class="border border-brand-500 text-brand-700 text-sm px-3 py-2 rounded hover:bg-brand-50 transition">
@@ -66,6 +72,21 @@
         CSV
       </button>
     </div>
+  </section>
+
+  <section class="bg-white rounded-lg border border-green-300 p-5">
+    <div class="flex items-center justify-between mb-2">
+      <h2 class="font-semibold text-green-900">承認済AI分析</h2>
+      <span class="text-xs rounded-full bg-green-100 text-green-700 px-2 py-0.5">正式出力</span>
+    </div>
+    <p class="text-xs text-gray-500 mb-2">人が承認し、根拠発言の source_segment_ids が確定したAI分析だけをExcel化します。</p>
+    <p class="text-xs text-gray-500 mb-4">承認済み {{ approved_count }} / 全AI分析 {{ analysis_count }} 件</p>
+    <button id="btn-approved-analysis" onclick="generateApprovedAnalysis()"
+            {% if approved_count == 0 %}disabled{% endif %}
+            class="w-full text-sm px-4 py-2 rounded transition
+              {% if approved_count > 0 %}bg-green-600 text-white hover:bg-green-700{% else %}bg-gray-200 text-gray-400 cursor-not-allowed{% endif %}">
+      承認済AI分析を生成
+    </button>
   </section>
 </div>
 
@@ -88,7 +109,7 @@
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-100">
-        {% set type_labels = {'verbatim':'発言録', 'formatted_sheet':'整形シート', 'analysis':'分析データ', 'report':'レポート', 'integrated':'統合分析'} %}
+        {% set type_labels = {'verbatim':'発言録', 'formatted_sheet':'整形シート', 'analysis':'分析データ', 'approved_analysis':'承認済AI分析', 'report':'レポート', 'integrated':'統合分析'} %}
         {% for f in files %}
         <tr class="hover:bg-gray-50">
           <td class="px-4 py-3 text-gray-500 whitespace-nowrap">
@@ -157,6 +178,10 @@ function generateFormatted() {
 
 function generateAnalysis(format) {
   postJson(`/api/projects/${projectId}/generate/analysis`, {format}, ['btn-analysis-xlsx', 'btn-analysis-csv']);
+}
+
+function generateApprovedAnalysis() {
+  postJson(`/api/projects/${projectId}/generate/approved-analysis`, {}, ['btn-approved-analysis']);
 }
 </script>
 {% endblock %}
