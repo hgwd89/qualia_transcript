@@ -1,8 +1,8 @@
 """Hardened professional-readiness audit entry point.
 
 Extends the base read-only audit with structural validation of registered Office
-artifacts, immutable raw transcript snapshots, the newest local backup, and
-processing-job quiescence.
+artifacts, immutable raw transcript snapshots, the newest local backup,
+processing-job quiescence, and database-level foreign-key consistency.
 """
 from __future__ import annotations
 
@@ -61,6 +61,31 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             row[0]
             for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
+
+        # Enabling PRAGMA foreign_keys for future writes does not retroactively
+        # repair rows created while enforcement was disabled. Treat any existing
+        # FK orphan as a professional-use blocker and expose enough detail for
+        # targeted repair without modifying the database.
+        fk_rows = con.execute("PRAGMA foreign_key_check").fetchall()
+        info["foreign_key_violation_count"] = len(fk_rows)
+        if fk_rows:
+            violations = []
+            for row in fk_rows[:200]:
+                values = list(row)
+                violations.append({
+                    "table": values[0] if len(values) > 0 else None,
+                    "rowid": values[1] if len(values) > 1 else None,
+                    "parent": values[2] if len(values) > 2 else None,
+                    "fk_index": values[3] if len(values) > 3 else None,
+                })
+            _issue(
+                blockers,
+                "sqlite_foreign_key_violations",
+                "Existing SQLite rows violate declared foreign-key relationships",
+                violations=violations,
+                count=len(fk_rows),
+            )
+
         if "processing_jobs" not in tables:
             _issue(
                 blockers,

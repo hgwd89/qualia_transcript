@@ -63,4 +63,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] SQLite foreign key smoke checks passed."
 
+Write-Host "[INFO] Running readiness FK orphan smoke check..."
+python tests/smoke_readiness_foreign_keys.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] readiness FK orphan smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] readiness FK orphan smoke checks passed."
+
 exit 0
