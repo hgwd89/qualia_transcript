@@ -47,4 +47,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] project scope/delete guard smoke checks passed."
 
+Write-Host "[INFO] Running interview creation scope smoke check..."
+python tests/smoke_interview_create_scope.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] interview creation scope smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] interview creation scope smoke checks passed."
+
 exit 0
