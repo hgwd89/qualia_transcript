@@ -6,6 +6,7 @@ from models import db
 from models.interview import Interview
 from models.processing_job import ProcessingJob
 from services.analyzer import analyze_per_question
+from services.job_conflicts import find_conflicting_active_job
 from services.processing_jobs import create_or_get_active_job, launch_job_worker
 
 bp = Blueprint("analyze", __name__)
@@ -16,6 +17,14 @@ def analyze_interview(interview_id):
     interview = Interview.query.get_or_404(interview_id)
     if interview.status not in {"mapped", "analyzed", "done"}:
         return jsonify({"error": "先にマッピングを完了してください"}), 409
+
+    conflict = find_conflicting_active_job(interview.project_id, "analyze", interview.id)
+    if conflict:
+        return jsonify({
+            "ok": False,
+            "error": "別の処理ジョブが実行中です。完了または失敗後に再実行してください。",
+            "conflicting_job": conflict.to_dict(),
+        }), 409
 
     job, created = create_or_get_active_job(
         project_id=interview.project_id,
