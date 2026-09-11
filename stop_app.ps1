@@ -1,8 +1,13 @@
 $ErrorActionPreference = "Stop"
 
-$Port = 5000
-$RootUrl = "http://127.0.0.1:5000/"
-$SettingsUrl = "http://127.0.0.1:5000/settings"
+$ProjectDir = $PSScriptRoot
+. (Join-Path $ProjectDir "scripts\runtime_config.ps1")
+
+$pythonExe = Get-QualiaPythonExecutable -ProjectDir $ProjectDir
+$runtime = Get-QualiaRuntimeConfig -ProjectDir $ProjectDir -PythonExe $pythonExe
+$Port = $runtime.Port
+$RootUrl = $runtime.Url
+$SettingsUrl = "${RootUrl}settings"
 
 function Get-PortProcessInfo {
     param([int]$LocalPort)
@@ -78,7 +83,6 @@ for ($i = 1; $i -le 10; $i++) {
         exit 0
     }
 
-    # Flask のリローダー等で残る場合のみ、同一条件のポート5000プロセスを追加停止
     if (Is-QualiaFlaskProcess -ProcessInfo $after) {
         Stop-Process -Id $after.Pid -Force -ErrorAction SilentlyContinue
     }

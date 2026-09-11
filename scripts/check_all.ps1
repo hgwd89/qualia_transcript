@@ -47,6 +47,7 @@ $doIntegrated = $false
 $doIntegratedPreview = $IntegratedPreview
 $doAnalysisReview = $false
 $doProfessionalIntegrity = $false
+$doLocalProduction = $false
 
 if ($AllLocal) {
     $doSafe = $true
@@ -55,6 +56,7 @@ if ($AllLocal) {
     $doIntegratedPreview = $true
     $doAnalysisReview = $true
     $doProfessionalIntegrity = $true
+    $doLocalProduction = $true
 }
 
 $hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
@@ -86,6 +88,9 @@ if ($doAnalysisReview) {
 }
 if ($doProfessionalIntegrity) {
     Invoke-Check -Name "Professional Output/Data Integrity Check" -ScriptPath (Join-Path $scriptDir "check_professional_integrity.ps1") -Paid:$false
+}
+if ($doLocalProduction) {
+    Invoke-Check -Name "Local Production/Backup Restore Check" -ScriptPath (Join-Path $scriptDir "check_local_production.ps1") -Paid:$false
 }
 if ($Mapping) {
     Invoke-Check -Name "Mapping Smoke Check" -ScriptPath (Join-Path $scriptDir "check_mapping.ps1") -Paid:$true
