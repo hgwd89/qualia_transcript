@@ -59,10 +59,14 @@ def run_transcription(
 
             discarded = discard_transcription_segments(transcription_id)
             _check_or_invalidate(transcription_id, lease_check)
-            result = run_local_whisper_transcription(
-                transcription_id,
-                result_write_guard=result_write_guard,
-            )
+            try:
+                result = run_local_whisper_transcription(
+                    transcription_id,
+                    result_write_guard=result_write_guard,
+                )
+            except Exception:
+                _check_or_invalidate(transcription_id, lease_check)
+                raise
             _check_or_invalidate(transcription_id, lease_check)
             return {
                 **(result or {}),
@@ -73,9 +77,13 @@ def run_transcription(
         _check_or_invalidate(transcription_id, lease_check)
         return result
 
-    result = run_local_whisper_transcription(
-        transcription_id,
-        result_write_guard=result_write_guard,
-    )
+    try:
+        result = run_local_whisper_transcription(
+            transcription_id,
+            result_write_guard=result_write_guard,
+        )
+    except Exception:
+        _check_or_invalidate(transcription_id, lease_check)
+        raise
     _check_or_invalidate(transcription_id, lease_check)
     return result
