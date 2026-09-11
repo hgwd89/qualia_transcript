@@ -161,6 +161,14 @@ def main() -> int:
                     "empty-after-sanitize filename is rejected",
                     invalid_name_raised,
                 )
+                failures += check(
+                    "Windows reserved filename is neutralized",
+                    safe_output_filename("CON.txt") == "_CON.txt",
+                )
+
+                # Windows keeps SQLite files locked while pooled connections are open.
+                db.session.remove()
+                db.engine.dispose()
 
             wired = {
                 "services/report_verbatim.py": "file_type=\"verbatim\"",
