@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 
 from models import db
 from models.analysis import AIAnalysis
-from models.interview import Transcription
-from models.segment import Segment
+from models.interview import Interview, Transcription
+from models.segment import Segment, UtteranceMapping
 from models.processing_job import ProcessingJob
 
 
@@ -22,8 +22,6 @@ def _delete_segments_for_transcription_ids(transcription_ids: list[int]) -> int:
         .all()
     )
     for segment in segments:
-        # ORM delete preserves relationship cascades (mappings/flags) instead of
-        # leaving child rows behind through a bulk delete.
         db.session.delete(segment)
     return len(segments)
 
@@ -36,12 +34,7 @@ def discard_transcription_segments(transcription_id: int) -> int:
 
 
 def invalidate_transcription_attempt(transcription_id: int) -> dict:
-    """Invalidate result rows written by a worker that lost its durable job lease.
-
-    The transcription row remains as audit history, while segments from that stale
-    attempt are removed. Interview status is only rewound when no other completed
-    transcription exists for the same media, avoiding clobbering a newer attempt.
-    """
+    """Invalidate result rows written by a worker that lost its durable job lease."""
     tr = db.session.get(Transcription, int(transcription_id))
     if not tr:
         return {"transcription_id": int(transcription_id), "deleted_segment_count": 0}
@@ -66,13 +59,7 @@ def invalidate_transcription_attempt(transcription_id: int) -> dict:
 
 
 def discard_incomplete_transcription_segments(media_file_id: int) -> dict:
-    """Remove non-canonical segments left by incomplete transcription attempts.
-
-    Long-audio transcription commits completed chunks incrementally. If a later
-    chunk fails or the worker dies, those committed segments must not survive
-    into a fresh retry or they will be duplicated when the audio is processed
-    again. Completed (`done`) transcriptions are never touched.
-    """
+    """Remove non-canonical segments left by incomplete transcription attempts."""
     incomplete = (
         Transcription.query
         .filter_by(media_file_id=int(media_file_id))
@@ -101,14 +88,37 @@ def discard_incomplete_transcription_segments(media_file_id: int) -> dict:
     }
 
 
-def find_completed_analysis_for_job(job: ProcessingJob) -> AIAnalysis | None:
-    """Find a participant analysis already committed after this job was created.
+def find_completed_mapping_count_for_job(job: ProcessingJob) -> int | None:
+    """Return mapping count when this durable map job already committed its result.
 
-    This closes the crash window where `analyze_interview_summary()` commits the
-    AIAnalysis and interview status, but the worker dies before the durable job
-    can persist its terminal success. An earlier analysis created before this job
-    remains eligible for intentional regeneration and is not reused.
+    Mapping replacement and interview status are committed atomically. A mapping
+    row created after the durable job itself, combined with mapped-or-later
+    interview status, identifies the crash window where result commit succeeded
+    but the worker died before marking the job succeeded. Older mappings are not
+    reused, so an intentional later Map action still regenerates them.
     """
+    if job.job_type != "map" or job.interview_id is None or job.created_at is None:
+        return None
+
+    interview = db.session.get(Interview, int(job.interview_id))
+    if not interview or interview.status not in {"mapped", "analyzed", "done"}:
+        return None
+
+    count = (
+        UtteranceMapping.query
+        .join(Segment, UtteranceMapping.segment_id == Segment.id)
+        .filter(
+            Segment.interview_id == int(job.interview_id),
+            Segment.speaker_role == "respondent",
+            UtteranceMapping.created_at >= job.created_at,
+        )
+        .count()
+    )
+    return int(count) if count > 0 else None
+
+
+def find_completed_analysis_for_job(job: ProcessingJob) -> AIAnalysis | None:
+    """Find a participant analysis already committed after this job was created."""
     if job.job_type != "analyze" or job.interview_id is None or job.created_at is None:
         return None
 

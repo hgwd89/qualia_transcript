@@ -160,8 +160,6 @@ def main() -> int:
                     and len(db.session.get(Transcription, running_tr_id).segments) == 0,
                 )
 
-                # OpenAI partial chunks must be removed before local fallback writes
-                # the canonical result into the same Transcription row.
                 fallback_interview = Interview(project_id=project.id, status="pending")
                 db.session.add(fallback_interview)
                 db.session.flush()
@@ -244,8 +242,6 @@ def main() -> int:
                     f"result={fallback_result} segments={[s.text for s in fallback_segments]}",
                 )
 
-                # A stale attempt may finish external work after its job was
-                # recovered. Post-run lease fencing must invalidate that result.
                 stale_interview = Interview(project_id=project.id, status="pending")
                 db.session.add(stale_interview)
                 db.session.flush()
@@ -319,8 +315,6 @@ def main() -> int:
                     f"tr={stale_after.status} segments={len(stale_segments)} interview={stale_iv_after.status}",
                 )
 
-                # Project pipeline used to bypass the individual transcription
-                # retry cleanup path. Verify it now removes prior partial chunks.
                 pipeline_project = Project(name="Pipeline transcription retry")
                 db.session.add(pipeline_project)
                 db.session.flush()
@@ -401,8 +395,6 @@ def main() -> int:
                     f"job={pipeline_result_job.status} segments={[s.text for s in pipeline_segments]}",
                 )
 
-                # Crash window: analysis was committed, but durable job never
-                # recorded success and later became failed/retryable.
                 analysis_interview = Interview(project_id=project.id, status="mapped")
                 db.session.add(analysis_interview)
                 db.session.flush()
@@ -437,7 +429,7 @@ def main() -> int:
                 analyzer_calls = {"count": 0}
                 original_analyze = analyzer_service.analyze_interview_summary
 
-                def should_not_reanalyze(_interview_id):
+                def should_not_reanalyze(_interview_id, **_kwargs):
                     analyzer_calls["count"] += 1
                     raise AssertionError("analysis should have been reused")
 
@@ -457,8 +449,6 @@ def main() -> int:
                     f"job={retried_analysis_job.to_dict()} calls={analyzer_calls['count']}",
                 )
 
-                # Intentional new analyze job must not reuse an analysis that
-                # existed before the job itself was created.
                 regen_interview = Interview(project_id=project.id, status="analyzed")
                 db.session.add(regen_interview)
                 db.session.flush()
@@ -487,8 +477,10 @@ def main() -> int:
                 regen_job_id = regen_job.id
                 regen_calls = {"count": 0}
 
-                def fake_new_analysis(target_interview_id):
+                def fake_new_analysis(target_interview_id, *, result_write_guard=None):
                     regen_calls["count"] += 1
+                    if result_write_guard is not None:
+                        result_write_guard()
                     analysis = AIAnalysis(
                         project_id=project.id,
                         interview_id=target_interview_id,

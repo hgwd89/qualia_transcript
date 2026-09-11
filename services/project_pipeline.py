@@ -7,7 +7,7 @@ from models.interview import Interview, Transcription
 from models.project import Project
 from services.analyzer import analyze_interview_summary
 from services.mapper import run_mapping
-from services.processing_jobs import JobLeaseLost, assert_job_lease
+from services.processing_jobs import JobLeaseLost, assert_job_lease, begin_job_result_write
 from services.processing_result_guard import discard_incomplete_transcription_segments
 from services.transcription import (
     auto_assign_speaker_roles,
@@ -54,8 +54,6 @@ def run_project_pipeline(job, update_progress) -> dict:
     if not project:
         raise ValueError("project not found")
 
-    # Do not silently drop interviews already marked error. They remain part of
-    # the project and must make an all-project operation visibly incomplete.
     interviews = list(project.interviews)
     first_flow_id = project.interview_flows[0].id if project.interview_flows else None
     results = []
@@ -180,7 +178,10 @@ def run_project_pipeline(job, update_progress) -> dict:
         if interview and interview.status == "transcribed":
             assert_job_lease(job)
             try:
-                count = run_mapping(interview.id)
+                count = run_mapping(
+                    interview.id,
+                    result_write_guard=lambda: begin_job_result_write(job),
+                )
                 assert_job_lease(job)
                 if _status(interview_id) != "mapped":
                     raise RuntimeError(
@@ -200,7 +201,10 @@ def run_project_pipeline(job, update_progress) -> dict:
         if interview and interview.status == "mapped":
             assert_job_lease(job)
             try:
-                analysis = analyze_interview_summary(interview.id)
+                analysis = analyze_interview_summary(
+                    interview.id,
+                    result_write_guard=lambda: begin_job_result_write(job),
+                )
                 assert_job_lease(job)
                 if _status(interview_id) != "analyzed":
                     raise RuntimeError("analysis did not advance interview status to analyzed")

@@ -1,6 +1,7 @@
 """
 発言セグメント → 質問項目への AI 自動マッピング。
 """
+from collections.abc import Callable
 import json
 from models import db
 from models.interview import Interview
@@ -9,6 +10,7 @@ from models.segment import Segment, UtteranceMapping
 from services.ai_client import call_structured
 
 MIN_CONFIDENCE_CLASSIFIED = 0.65
+ResultWriteGuard = Callable[[], object]
 
 SCHEMA = {
     "type": "object",
@@ -33,10 +35,18 @@ SCHEMA = {
 }
 
 
-def run_mapping(interview_id: int) -> int:
+def run_mapping(
+    interview_id: int,
+    *,
+    result_write_guard: ResultWriteGuard | None = None,
+) -> int:
     """
     interview に紐づく全発言を質問項目にマッピングして DB 保存。
     戻り値: マッピング件数
+
+    Durable worker callers can pass result_write_guard. It is invoked after the
+    external AI response is fully normalized but before any existing mapping is
+    deleted or new mapping is written.
     """
     interview = Interview.query.get(interview_id)
     if not interview or not interview.flow_id:
@@ -53,7 +63,7 @@ def run_mapping(interview_id: int) -> int:
         return 0
 
     # フロー全質問を取得
-    flow     = interview.flow
+    flow = interview.flow
     questions = []
     for section in flow.sections:
         for q in section.questions:
@@ -89,12 +99,6 @@ def run_mapping(interview_id: int) -> int:
     result = call_structured(system, user, SCHEMA, schema_name="utterance_mapping_result")
     mappings = result.get("mappings", [])
 
-    # 既存マッピングを削除して再挿入
-    seg_ids = [s.id for s in segments]
-    UtteranceMapping.query.filter(UtteranceMapping.segment_id.in_(seg_ids)).delete(
-        synchronize_session=False
-    )
-
     normalized_mappings = []
     for m in mappings:
         segment_id = m["segment_id"]
@@ -116,6 +120,18 @@ def run_mapping(interview_id: int) -> int:
             "confidence": confidence,
             "is_unclassified": is_unclassified,
         })
+
+    # External work is complete. Durable callers now acquire/verify their result
+    # write lease before any canonical data is mutated.
+    if result_write_guard is not None:
+        result_write_guard()
+
+    # 既存マッピングを削除して再挿入。既にロード済みの mapping がある場合も
+    # identity map を同期し、SQLite の ROWID 再利用で stale ORM state を残さない。
+    seg_ids = [s.id for s in segments]
+    UtteranceMapping.query.filter(UtteranceMapping.segment_id.in_(seg_ids)).delete(
+        synchronize_session="fetch"
+    )
 
     for m in normalized_mappings:
         db.session.add(UtteranceMapping(
