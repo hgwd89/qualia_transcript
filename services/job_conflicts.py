@@ -1,4 +1,5 @@
 from models.processing_job import ProcessingJob
+from services.job_recovery import recover_stale_jobs
 from services.processing_jobs import ACTIVE_STATUSES
 
 
@@ -8,6 +9,10 @@ def find_conflicting_active_job(
     interview_id: int | None,
 ) -> ProcessingJob | None:
     """Return a different active job that would make concurrent work unsafe."""
+    # Clear only jobs that satisfy the conservative stale policy before deciding
+    # whether a new operation must be blocked.
+    recover_stale_jobs(project_id=project_id)
+
     active = (
         ProcessingJob.query
         .filter_by(project_id=project_id)
