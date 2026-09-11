@@ -26,4 +26,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] role normalization smoke checks passed."
 
+Write-Host "[INFO] Running durable interview job UI smoke check..."
+python tests/smoke_interview_job_ui.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] durable interview job UI smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] durable interview job UI smoke checks passed."
+
 exit 0
