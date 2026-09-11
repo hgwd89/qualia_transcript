@@ -4,7 +4,8 @@ param(
     [switch]$Analysis,
     [switch]$Transcription,
     [switch]$Outputs,
-    [switch]$AllPaid
+    [switch]$AllPaid,
+    [switch]$AllLocal
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,18 +41,46 @@ if ($AllPaid) {
     $Outputs = $true
 }
 
-$hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid
+$doSafe = $false
+$doFlags = $false
+$doIntegrated = $false
+$doIntegratedPreview = $IntegratedPreview
+
+if ($AllLocal) {
+    $doSafe = $true
+    $doFlags = $true
+    $doIntegrated = $true
+    $doIntegratedPreview = $true
+}
+
+$hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
 
 if (-not $hasAnyFlag) {
+    $doSafe = $true
+}
+
+if ($doSafe) {
     Invoke-Check -Name "Safe Smoke Check" -ScriptPath (Join-Path $scriptDir "check_safe.ps1") -Paid:$false
+}
+
+if (-not $hasAnyFlag) {
     Write-Host "[PASS] check_all completed (safe only)."
     exit 0
 }
 
+if ($doFlags) {
+    Invoke-Check -Name "Segment Flag Smoke Check" -ScriptPath (Join-Path $scriptDir "check_flags.ps1") -Paid:$false
+    Invoke-Check -Name "Speaker Assignment Smoke Check" -ScriptPath (Join-Path $scriptDir "check_speaker_assignments.ps1") -Paid:$false
+    Invoke-Check -Name "Output Flag Smoke Check" -ScriptPath (Join-Path $scriptDir "check_outputs_flags.ps1") -Paid:$false
+}
+if ($doIntegrated) {
+    Invoke-Check -Name "Integrated Analysis No-AI Check" -ScriptPath (Join-Path $scriptDir "check_integrated_analysis.ps1") -Paid:$false
+    Invoke-Check -Name "Integrated Analysis CLI Guard Check" -ScriptPath (Join-Path $scriptDir "check_integrated_analysis_cli_guards.ps1") -Paid:$false
+}
 if ($Mapping) {
     Invoke-Check -Name "Mapping Smoke Check" -ScriptPath (Join-Path $scriptDir "check_mapping.ps1") -Paid:$true
 }
-if ($IntegratedPreview) {
+if ($doIntegratedPreview) {
     Invoke-Check -Name "Integrated Analysis Preview UI Check" -ScriptPath (Join-Path $scriptDir "check_integrated_analysis_preview_ui.ps1") -Paid:$false
 }
 if ($Analysis) {
