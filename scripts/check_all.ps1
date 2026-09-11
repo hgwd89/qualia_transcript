@@ -46,6 +46,7 @@ $doFlags = $false
 $doIntegrated = $false
 $doIntegratedPreview = $IntegratedPreview
 $doAnalysisReview = $false
+$doProfessionalIntegrity = $false
 
 if ($AllLocal) {
     $doSafe = $true
@@ -53,6 +54,7 @@ if ($AllLocal) {
     $doIntegrated = $true
     $doIntegratedPreview = $true
     $doAnalysisReview = $true
+    $doProfessionalIntegrity = $true
 }
 
 $hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
@@ -81,6 +83,9 @@ if ($doIntegrated) {
 }
 if ($doAnalysisReview) {
     Invoke-Check -Name "AI Analysis Review/Export Check" -ScriptPath (Join-Path $scriptDir "check_analysis_review.ps1") -Paid:$false
+}
+if ($doProfessionalIntegrity) {
+    Invoke-Check -Name "Professional Output/Data Integrity Check" -ScriptPath (Join-Path $scriptDir "check_professional_integrity.ps1") -Paid:$false
 }
 if ($Mapping) {
     Invoke-Check -Name "Mapping Smoke Check" -ScriptPath (Join-Path $scriptDir "check_mapping.ps1") -Paid:$true
