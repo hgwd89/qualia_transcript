@@ -40,9 +40,10 @@ def main() -> int:
             from models.processing_job import ProcessingJob
             from models.project import Project
             from models.segment import Segment
-            from services.processing_jobs import execute_job, retry_failed_job
+            from services.processing_jobs import JobLeaseLost, execute_job, retry_failed_job
             import services.analyzer as analyzer_service
-            import services.transcription as transcription_service
+            import services.project_pipeline as project_pipeline_service
+            import services.transcription_dispatch as transcription_dispatch_service
 
             app = create_app()
             app.config["TESTING"] = True
@@ -108,13 +109,14 @@ def main() -> int:
                 db.session.commit()
                 transcription_job_id = transcription_job.id
                 interview_id = transcription_interview.id
-                media_id = media.id
                 failed_tr_id = failed_tr.id
                 running_tr_id = running_tr.id
 
-                original_run_transcription = transcription_service.run_transcription
+                original_dispatch_run = transcription_dispatch_service.run_transcription
 
-                def fake_run_transcription(transcription_id):
+                def fake_run_transcription(transcription_id, *, lease_check=None):
+                    if lease_check:
+                        lease_check()
                     tr = db.session.get(Transcription, transcription_id)
                     iv = tr.media_file.interview
                     db.session.add(Segment(
@@ -130,13 +132,15 @@ def main() -> int:
                     tr.completed_at = datetime.now(timezone.utc)
                     iv.status = "transcribed"
                     db.session.commit()
+                    if lease_check:
+                        lease_check()
                     return {"segment_count": 1, "word_count": 3}
 
-                transcription_service.run_transcription = fake_run_transcription
+                transcription_dispatch_service.run_transcription = fake_run_transcription
                 try:
                     completed = execute_job(transcription_job_id, worker_pid=7001)
                 finally:
-                    transcription_service.run_transcription = original_run_transcription
+                    transcription_dispatch_service.run_transcription = original_dispatch_run
 
                 result = completed.to_dict().get("result") or {}
                 remaining_segments = Segment.query.filter_by(interview_id=interview_id).all()
@@ -154,6 +158,247 @@ def main() -> int:
                     and db.session.get(Transcription, running_tr_id).status == "error"
                     and len(db.session.get(Transcription, failed_tr_id).segments) == 0
                     and len(db.session.get(Transcription, running_tr_id).segments) == 0,
+                )
+
+                # OpenAI partial chunks must be removed before local fallback writes
+                # the canonical result into the same Transcription row.
+                fallback_interview = Interview(project_id=project.id, status="pending")
+                db.session.add(fallback_interview)
+                db.session.flush()
+                fallback_media = MediaFile(
+                    interview_id=fallback_interview.id,
+                    original_filename="fallback.wav",
+                    stored_path="fallback.wav",
+                    file_type="audio",
+                    mime_type="audio/wav",
+                )
+                db.session.add(fallback_media)
+                db.session.flush()
+                fallback_tr = Transcription(
+                    media_file_id=fallback_media.id,
+                    whisper_model="fake",
+                    language="ja",
+                    status="pending",
+                )
+                db.session.add(fallback_tr)
+                db.session.commit()
+                fallback_tr_id = fallback_tr.id
+                fallback_interview_id = fallback_interview.id
+
+                saved_provider = transcription_dispatch_service.get_transcription_provider
+                saved_fallback = transcription_dispatch_service.get_fallback_provider
+                saved_openai = transcription_dispatch_service.run_openai_transcription
+                saved_local = transcription_dispatch_service.run_local_whisper_transcription
+                fallback_observation = {"segments_before_local": None}
+
+                def fake_openai(target_id):
+                    target = db.session.get(Transcription, target_id)
+                    db.session.add(Segment(
+                        transcription_id=target.id,
+                        interview_id=target.media_file.interview_id,
+                        speaker_label="SPEAKER_00",
+                        speaker_role="respondent",
+                        text="openai partial",
+                        seq=0,
+                    ))
+                    target.status = "error"
+                    db.session.commit()
+                    raise RuntimeError("openai chunk failure")
+
+                def fake_local(target_id):
+                    target = db.session.get(Transcription, target_id)
+                    existing_segments = Segment.query.filter_by(transcription_id=target_id).all()
+                    fallback_observation["segments_before_local"] = len(existing_segments)
+                    db.session.add(Segment(
+                        transcription_id=target.id,
+                        interview_id=target.media_file.interview_id,
+                        speaker_label="SPEAKER_00",
+                        speaker_role="respondent",
+                        text="local canonical",
+                        seq=0,
+                    ))
+                    target.status = "done"
+                    target.media_file.interview.status = "transcribed"
+                    db.session.commit()
+                    return {"segment_count": 1, "word_count": 2}
+
+                transcription_dispatch_service.get_transcription_provider = lambda: "openai"
+                transcription_dispatch_service.get_fallback_provider = lambda: "local_whisper"
+                transcription_dispatch_service.run_openai_transcription = fake_openai
+                transcription_dispatch_service.run_local_whisper_transcription = fake_local
+                try:
+                    fallback_result = transcription_dispatch_service.run_transcription(fallback_tr_id)
+                finally:
+                    transcription_dispatch_service.get_transcription_provider = saved_provider
+                    transcription_dispatch_service.get_fallback_provider = saved_fallback
+                    transcription_dispatch_service.run_openai_transcription = saved_openai
+                    transcription_dispatch_service.run_local_whisper_transcription = saved_local
+
+                fallback_segments = Segment.query.filter_by(interview_id=fallback_interview_id).all()
+                failures += check(
+                    "fallback discards OpenAI partial segments before local Whisper",
+                    fallback_observation["segments_before_local"] == 0
+                    and fallback_result.get("fallback_discarded_partial_segment_count") == 1
+                    and len(fallback_segments) == 1
+                    and fallback_segments[0].text == "local canonical",
+                    f"result={fallback_result} segments={[s.text for s in fallback_segments]}",
+                )
+
+                # A stale attempt may finish external work after its job was
+                # recovered. Post-run lease fencing must invalidate that result.
+                stale_interview = Interview(project_id=project.id, status="pending")
+                db.session.add(stale_interview)
+                db.session.flush()
+                stale_media = MediaFile(
+                    interview_id=stale_interview.id,
+                    original_filename="stale.wav",
+                    stored_path="stale.wav",
+                    file_type="audio",
+                    mime_type="audio/wav",
+                )
+                db.session.add(stale_media)
+                db.session.flush()
+                stale_tr = Transcription(
+                    media_file_id=stale_media.id,
+                    whisper_model="fake",
+                    language="ja",
+                    status="pending",
+                )
+                db.session.add(stale_tr)
+                db.session.commit()
+                stale_tr_id = stale_tr.id
+                stale_interview_id = stale_interview.id
+
+                saved_provider = transcription_dispatch_service.get_transcription_provider
+                saved_openai = transcription_dispatch_service.run_openai_transcription
+                lease_calls = {"count": 0}
+
+                def stale_openai(target_id):
+                    target = db.session.get(Transcription, target_id)
+                    db.session.add(Segment(
+                        transcription_id=target.id,
+                        interview_id=target.media_file.interview_id,
+                        speaker_label="SPEAKER_00",
+                        speaker_role="respondent",
+                        text="stale result",
+                        seq=0,
+                    ))
+                    target.status = "done"
+                    target.media_file.interview.status = "transcribed"
+                    db.session.commit()
+                    return {"segment_count": 1}
+
+                def lease_check():
+                    lease_calls["count"] += 1
+                    if lease_calls["count"] >= 2:
+                        raise JobLeaseLost("simulated lease loss")
+
+                transcription_dispatch_service.get_transcription_provider = lambda: "openai"
+                transcription_dispatch_service.run_openai_transcription = stale_openai
+                stale_raised = False
+                try:
+                    transcription_dispatch_service.run_transcription(
+                        stale_tr_id,
+                        lease_check=lease_check,
+                    )
+                except JobLeaseLost:
+                    stale_raised = True
+                finally:
+                    transcription_dispatch_service.get_transcription_provider = saved_provider
+                    transcription_dispatch_service.run_openai_transcription = saved_openai
+
+                stale_after = db.session.get(Transcription, stale_tr_id)
+                stale_segments = Segment.query.filter_by(transcription_id=stale_tr_id).all()
+                stale_iv_after = db.session.get(Interview, stale_interview_id)
+                failures += check(
+                    "lease-lost transcription result is invalidated",
+                    stale_raised
+                    and stale_after.status == "error"
+                    and len(stale_segments) == 0
+                    and stale_iv_after.status == "pending",
+                    f"tr={stale_after.status} segments={len(stale_segments)} interview={stale_iv_after.status}",
+                )
+
+                # Project pipeline used to bypass the individual transcription
+                # retry cleanup path. Verify it now removes prior partial chunks.
+                pipeline_project = Project(name="Pipeline transcription retry")
+                db.session.add(pipeline_project)
+                db.session.flush()
+                pipeline_interview = Interview(project_id=pipeline_project.id, status="pending")
+                db.session.add(pipeline_interview)
+                db.session.flush()
+                pipeline_media = MediaFile(
+                    interview_id=pipeline_interview.id,
+                    original_filename="pipeline.wav",
+                    stored_path="pipeline.wav",
+                    file_type="audio",
+                    mime_type="audio/wav",
+                )
+                db.session.add(pipeline_media)
+                db.session.flush()
+                pipeline_old_tr = Transcription(
+                    media_file_id=pipeline_media.id,
+                    whisper_model="fake",
+                    language="ja",
+                    status="error",
+                    error_message="old partial",
+                )
+                db.session.add(pipeline_old_tr)
+                db.session.flush()
+                db.session.add(Segment(
+                    transcription_id=pipeline_old_tr.id,
+                    interview_id=pipeline_interview.id,
+                    speaker_label="SPEAKER_00",
+                    speaker_role="respondent",
+                    text="pipeline partial",
+                    seq=0,
+                ))
+                pipeline_job = ProcessingJob(
+                    project_id=pipeline_project.id,
+                    job_type="project_pipeline",
+                    status="pending",
+                )
+                db.session.add(pipeline_job)
+                db.session.commit()
+                pipeline_job_id = pipeline_job.id
+                pipeline_interview_id = pipeline_interview.id
+
+                saved_pipeline_run = project_pipeline_service.run_transcription
+
+                def fake_pipeline_transcription(target_id, *, lease_check=None):
+                    if lease_check:
+                        lease_check()
+                    target = db.session.get(Transcription, target_id)
+                    existing_segments = Segment.query.filter_by(interview_id=target.media_file.interview_id).all()
+                    if any(seg.text == "pipeline partial" for seg in existing_segments):
+                        raise AssertionError("pipeline partial segment survived retry cleanup")
+                    db.session.add(Segment(
+                        transcription_id=target.id,
+                        interview_id=target.media_file.interview_id,
+                        speaker_label="SPEAKER_00",
+                        speaker_role="respondent",
+                        text="pipeline canonical",
+                        seq=0,
+                    ))
+                    target.status = "done"
+                    target.media_file.interview.status = "transcribed"
+                    db.session.commit()
+                    if lease_check:
+                        lease_check()
+                    return {"segment_count": 1}
+
+                project_pipeline_service.run_transcription = fake_pipeline_transcription
+                try:
+                    pipeline_result_job = execute_job(pipeline_job_id, worker_pid=7004)
+                finally:
+                    project_pipeline_service.run_transcription = saved_pipeline_run
+
+                pipeline_segments = Segment.query.filter_by(interview_id=pipeline_interview_id).all()
+                failures += check(
+                    "project pipeline retry removes old partial transcription segments",
+                    all(seg.text != "pipeline partial" for seg in pipeline_segments)
+                    and any(seg.text == "pipeline canonical" for seg in pipeline_segments),
+                    f"job={pipeline_result_job.status} segments={[s.text for s in pipeline_segments]}",
                 )
 
                 # Crash window: analysis was committed, but durable job never
