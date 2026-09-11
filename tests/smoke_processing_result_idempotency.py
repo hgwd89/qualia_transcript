@@ -114,11 +114,13 @@ def main() -> int:
 
                 original_dispatch_run = transcription_dispatch_service.run_transcription
 
-                def fake_run_transcription(transcription_id, *, lease_check=None):
+                def fake_run_transcription(transcription_id, *, lease_check=None, result_write_guard=None):
                     if lease_check:
                         lease_check()
                     tr = db.session.get(Transcription, transcription_id)
                     iv = tr.media_file.interview
+                    if result_write_guard is not None:
+                        result_write_guard()
                     db.session.add(Segment(
                         transcription_id=tr.id,
                         interview_id=iv.id,
@@ -189,7 +191,7 @@ def main() -> int:
                 saved_local = transcription_dispatch_service.run_local_whisper_transcription
                 fallback_observation = {"segments_before_local": None}
 
-                def fake_openai(target_id):
+                def fake_openai(target_id, **_kwargs):
                     target = db.session.get(Transcription, target_id)
                     db.session.add(Segment(
                         transcription_id=target.id,
@@ -203,7 +205,7 @@ def main() -> int:
                     db.session.commit()
                     raise RuntimeError("openai chunk failure")
 
-                def fake_local(target_id):
+                def fake_local(target_id, **_kwargs):
                     target = db.session.get(Transcription, target_id)
                     existing_segments = Segment.query.filter_by(transcription_id=target_id).all()
                     fallback_observation["segments_before_local"] = len(existing_segments)
@@ -269,7 +271,7 @@ def main() -> int:
                 saved_openai = transcription_dispatch_service.run_openai_transcription
                 lease_calls = {"count": 0}
 
-                def stale_openai(target_id):
+                def stale_openai(target_id, **_kwargs):
                     target = db.session.get(Transcription, target_id)
                     db.session.add(Segment(
                         transcription_id=target.id,
@@ -359,13 +361,15 @@ def main() -> int:
 
                 saved_pipeline_run = project_pipeline_service.run_transcription
 
-                def fake_pipeline_transcription(target_id, *, lease_check=None):
+                def fake_pipeline_transcription(target_id, *, lease_check=None, result_write_guard=None):
                     if lease_check:
                         lease_check()
                     target = db.session.get(Transcription, target_id)
                     existing_segments = Segment.query.filter_by(interview_id=target.media_file.interview_id).all()
                     if any(seg.text == "pipeline partial" for seg in existing_segments):
                         raise AssertionError("pipeline partial segment survived retry cleanup")
+                    if result_write_guard is not None:
+                        result_write_guard()
                     db.session.add(Segment(
                         transcription_id=target.id,
                         interview_id=target.media_file.interview_id,

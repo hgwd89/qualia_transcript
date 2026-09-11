@@ -156,6 +156,7 @@ def run_project_pipeline(job, update_progress) -> dict:
                     result = run_transcription(
                         tr.id,
                         lease_check=lambda: assert_job_lease(job),
+                        result_write_guard=lambda: begin_job_result_write(job),
                     )
                     if _status(interview_id) != "transcribed":
                         raise RuntimeError("transcription did not advance interview status to transcribed")
