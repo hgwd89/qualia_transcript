@@ -10,6 +10,59 @@ from models.processing_job import ProcessingJob
 
 
 _SUPERSEDED_MESSAGE = "superseded by a later transcription attempt"
+_STALE_ATTEMPT_MESSAGE = "stale processing attempt lost durable job lease"
+
+
+def _delete_segments_for_transcription_ids(transcription_ids: list[int]) -> int:
+    if not transcription_ids:
+        return 0
+    segments = (
+        Segment.query
+        .filter(Segment.transcription_id.in_([int(value) for value in transcription_ids]))
+        .all()
+    )
+    for segment in segments:
+        # ORM delete preserves relationship cascades (mappings/flags) instead of
+        # leaving child rows behind through a bulk delete.
+        db.session.delete(segment)
+    return len(segments)
+
+
+def discard_transcription_segments(transcription_id: int) -> int:
+    """Delete partial segments for one transcription before an in-place fallback."""
+    deleted = _delete_segments_for_transcription_ids([int(transcription_id)])
+    db.session.commit()
+    return deleted
+
+
+def invalidate_transcription_attempt(transcription_id: int) -> dict:
+    """Invalidate result rows written by a worker that lost its durable job lease.
+
+    The transcription row remains as audit history, while segments from that stale
+    attempt are removed. Interview status is only rewound when no other completed
+    transcription exists for the same media, avoiding clobbering a newer attempt.
+    """
+    tr = db.session.get(Transcription, int(transcription_id))
+    if not tr:
+        return {"transcription_id": int(transcription_id), "deleted_segment_count": 0}
+
+    deleted = _delete_segments_for_transcription_ids([int(tr.id)])
+    tr.status = "error"
+    tr.error_message = _STALE_ATTEMPT_MESSAGE
+    tr.completed_at = datetime.now(timezone.utc)
+
+    other_done = (
+        Transcription.query
+        .filter_by(media_file_id=int(tr.media_file_id), status="done")
+        .filter(Transcription.id != int(tr.id))
+        .first()
+    )
+    interview = tr.media_file.interview if tr.media_file else None
+    if interview and not other_done and interview.status == "transcribed":
+        interview.status = "pending"
+
+    db.session.commit()
+    return {"transcription_id": int(tr.id), "deleted_segment_count": deleted}
 
 
 def discard_incomplete_transcription_segments(media_file_id: int) -> dict:
@@ -31,15 +84,7 @@ def discard_incomplete_transcription_segments(media_file_id: int) -> dict:
     if not transcription_ids:
         return {"transcription_ids": [], "deleted_segment_count": 0}
 
-    segments = (
-        Segment.query
-        .filter(Segment.transcription_id.in_(transcription_ids))
-        .all()
-    )
-    for segment in segments:
-        # ORM delete preserves relationship cascades (mappings/flags) instead of
-        # leaving child rows behind through a bulk delete.
-        db.session.delete(segment)
+    deleted_segment_count = _delete_segments_for_transcription_ids(transcription_ids)
 
     now = datetime.now(timezone.utc)
     for tr in incomplete:
@@ -52,7 +97,7 @@ def discard_incomplete_transcription_segments(media_file_id: int) -> dict:
     db.session.commit()
     return {
         "transcription_ids": transcription_ids,
-        "deleted_segment_count": len(segments),
+        "deleted_segment_count": deleted_segment_count,
     }
 
 
