@@ -1,6 +1,7 @@
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 def check(name: str, ok: bool, detail: str = "") -> int:
@@ -33,6 +34,8 @@ def main() -> int:
         config.UPLOAD_DIR = str(root / "uploads")
 
         try:
+            from sqlalchemy import event
+
             from app import create_app
             from models import db
             from models.generated_file import GeneratedFile
@@ -177,6 +180,61 @@ def main() -> int:
                     and db.session.get(ProcessingJob, active_job_id) is not None
                     and marker.is_file(),
                     f"blocked_ids={blocked_ids}",
+                )
+
+                commit_fail_project = Project(name="Deletion commit failure")
+                db.session.add(commit_fail_project)
+                db.session.commit()
+                commit_fail_id = int(commit_fail_project.id)
+                commit_fail_dir = Path(config.OUTPUT_DIR) / str(commit_fail_id)
+                commit_fail_dir.mkdir(parents=True, exist_ok=True)
+                commit_fail_marker = commit_fail_dir / "must-survive.txt"
+                commit_fail_marker.write_text("keep", encoding="utf-8")
+
+                session = db.session()
+
+                def fail_before_commit(_session):
+                    raise RuntimeError("simulated project deletion DB commit failure")
+
+                event.listen(session, "before_commit", fail_before_commit, once=True)
+                commit_failed = False
+                try:
+                    delete_project(commit_fail_project)
+                except RuntimeError as exc:
+                    commit_failed = "simulated project deletion DB commit failure" in str(exc)
+                finally:
+                    if event.contains(session, "before_commit", fail_before_commit):
+                        event.remove(session, "before_commit", fail_before_commit)
+
+                failures += check(
+                    "DB deletion failure preserves project and managed files",
+                    commit_failed
+                    and db.session.get(Project, commit_fail_id) is not None
+                    and commit_fail_marker.is_file(),
+                    f"commit_failed={commit_failed}",
+                )
+
+                cleanup_warning_project = Project(name="Cleanup warning")
+                db.session.add(cleanup_warning_project)
+                db.session.commit()
+                cleanup_warning_id = int(cleanup_warning_project.id)
+                warning_dir = Path(config.OUTPUT_DIR) / str(cleanup_warning_id)
+                warning_dir.mkdir(parents=True, exist_ok=True)
+                warning_marker = warning_dir / "orphan-after-warning.txt"
+                warning_marker.write_text("left for audit", encoding="utf-8")
+
+                with patch(
+                    "services.project_deletion._safe_id_dir",
+                    side_effect=ValueError("simulated managed-path rejection"),
+                ):
+                    warning_result = delete_project(cleanup_warning_project)
+
+                failures += check(
+                    "post-commit cleanup rejection is reported without undoing DB deletion",
+                    db.session.get(Project, cleanup_warning_id) is None
+                    and warning_marker.is_file()
+                    and any("cleanup path rejected" in item for item in warning_result.cleanup_errors),
+                    f"errors={warning_result.cleanup_errors}",
                 )
 
                 db.session.remove()
