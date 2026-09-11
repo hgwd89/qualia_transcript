@@ -323,54 +323,106 @@ function showMsg(text, type='info'){
   el.scrollIntoView({behavior:'smooth', block:'nearest'});
 }
 
-async function runCross(questionId, btn){
-  btn.disabled = true;
-  btn.textContent = '実行中…';
-  showMsg('横断分析を実行中です（数分かかる場合があります）…', 'info');
-  try {
-    const r = await fetch(`/api/projects/${projectId}/analyze/cross/${questionId}`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:'{}',
-    }).then(r => r.json());
-    if(r.ok){
-      showMsg('横断分析が完了しました', 'success');
-      setTimeout(() => location.reload(), 1500);
-    } else {
-      showMsg('エラー: ' + (r.error || '不明'), 'error');
-      btn.disabled = false;
-      btn.textContent = btn.getAttribute('data-original') || '横断分析';
+function rememberButtonText(btn){
+  if(btn && !btn.dataset.originalText){
+    btn.dataset.originalText = btn.textContent.trim();
+  }
+}
+
+function setAnalysisButtonBusy(btn, busy){
+  if(!btn) return;
+  rememberButtonText(btn);
+  btn.disabled = busy;
+  btn.textContent = busy ? '実行中…' : (btn.dataset.originalText || '分析を実行');
+}
+
+async function enqueueAnalysis(url){
+  const response = await fetch(url, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:'{}',
+  });
+  const data = await response.json().catch(() => ({}));
+  if(!response.ok || !data.ok){
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
+  if(!data.queued || !data.job_id){
+    throw new Error('analysis job_id が返されませんでした');
+  }
+  return data;
+}
+
+async function pollAnalysisJob(jobId, btn, runningLabel){
+  setAnalysisButtonBusy(btn, true);
+  for(;;){
+    const response = await fetch(`/api/processing-jobs/${jobId}`, {cache:'no-store'});
+    const data = await response.json().catch(() => ({}));
+    if(!response.ok || !data.ok || !data.job){
+      throw new Error(data.error || `HTTP ${response.status}`);
     }
+    const job = data.job;
+    if(job.status === 'succeeded') return job;
+    if(job.status === 'failed') throw new Error(job.error_message || '分析ジョブが失敗しました');
+    showMsg(`${runningLabel} ジョブ #${jobId}`, 'info');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+}
+
+async function runCross(questionId, btn){
+  setAnalysisButtonBusy(btn, true);
+  showMsg('横断分析ジョブを登録中です…', 'info');
+  try {
+    const queued = await enqueueAnalysis(`/api/projects/${projectId}/analyze/cross/${questionId}`);
+    await pollAnalysisJob(queued.job_id, btn, '横断分析中…');
+    showMsg('横断分析が完了しました', 'success');
+    setTimeout(() => location.reload(), 800);
   } catch(e){
-    showMsg('通信エラー: ' + e.message, 'error');
-    btn.disabled = false;
+    showMsg('エラー: ' + e.message, 'error');
+    setAnalysisButtonBusy(btn, false);
   }
 }
 
 async function runIntegrated(){
   const btn = document.getElementById('btn-integrated');
-  btn.disabled = true;
-  btn.textContent = '実行中…';
-  showMsg('統合分析を実行中です（数分かかる場合があります）…', 'info');
+  setAnalysisButtonBusy(btn, true);
+  showMsg('統合分析ジョブを登録中です…', 'info');
   try {
-    const r = await fetch(`/api/projects/${projectId}/analyze/integrated`, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:'{}',
-    }).then(r => r.json());
-    if(r.ok){
-      showMsg('統合分析が完了しました', 'success');
-      setTimeout(() => location.reload(), 1500);
-    } else {
-      showMsg('エラー: ' + (r.error || '不明'), 'error');
-      btn.disabled = false;
-      btn.textContent = '統合分析を実行';
-    }
+    const queued = await enqueueAnalysis(`/api/projects/${projectId}/analyze/integrated`);
+    await pollAnalysisJob(queued.job_id, btn, '統合分析中…');
+    showMsg('統合分析が完了しました', 'success');
+    setTimeout(() => location.reload(), 800);
   } catch(e){
-    showMsg('通信エラー: ' + e.message, 'error');
-    btn.disabled = false;
-    btn.textContent = '統合分析を実行';
+    showMsg('エラー: ' + e.message, 'error');
+    setAnalysisButtonBusy(btn, false);
   }
 }
+
+async function resumeActiveAnalysisJob(){
+  try {
+    const response = await fetch(`/api/projects/${projectId}/analysis-processing-status`, {cache:'no-store'});
+    const data = await response.json().catch(() => ({}));
+    if(!response.ok || !data.ok || !data.latest_job) return;
+    const job = data.latest_job;
+    if(job.status !== 'pending' && job.status !== 'running') return;
+    let btn = null;
+    let label = '分析中…';
+    if(job.job_type === 'analyze_cross' && job.question_id){
+      btn = document.querySelector(`[data-qid="${job.question_id}"]`);
+      label = '横断分析中…';
+    } else if(job.job_type === 'analyze_integrated'){
+      btn = document.getElementById('btn-integrated');
+      label = '統合分析中…';
+    } else {
+      return;
+    }
+    await pollAnalysisJob(job.id, btn, label);
+    showMsg('分析が完了しました', 'success');
+    setTimeout(() => location.reload(), 800);
+  } catch(e){
+    showMsg('分析ジョブ状態の取得に失敗しました: ' + e.message, 'error');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', resumeActiveAnalysisJob);
 </script>
 {% endblock %}

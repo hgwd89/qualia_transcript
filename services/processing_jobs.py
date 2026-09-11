@@ -16,7 +16,7 @@ from models.processing_job import ProcessingJob
 
 
 ACTIVE_STATUSES = {"pending", "running"}
-JOB_TYPES = {"transcribe", "map", "analyze", "project_pipeline"}
+JOB_TYPES = {"transcribe", "map", "analyze", "analyze_question", "analyze_cross", "analyze_integrated", "project_pipeline"}
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
 _LAUNCH_RESERVED_PID = 0
 
@@ -37,13 +37,20 @@ def _safe_error(exc: Exception) -> str:
     return _KEY_RE.sub("[REDACTED_KEY]", str(exc or ""))[:4000]
 
 
-def create_or_get_active_job(project_id: int, job_type: str, interview_id: int | None = None):
+def create_or_get_active_job(
+    project_id: int,
+    job_type: str,
+    interview_id: int | None = None,
+    *,
+    question_id: int | None = None,
+):
     if job_type not in JOB_TYPES:
         raise ValueError(f"unsupported job_type: {job_type}")
 
     query = ProcessingJob.query.filter_by(
         project_id=project_id,
         interview_id=interview_id,
+        question_id=question_id,
         job_type=job_type,
     ).filter(ProcessingJob.status.in_(ACTIVE_STATUSES))
     existing = query.order_by(ProcessingJob.id.desc()).first()
@@ -53,6 +60,7 @@ def create_or_get_active_job(project_id: int, job_type: str, interview_id: int |
     job = ProcessingJob(
         project_id=project_id,
         interview_id=interview_id,
+        question_id=question_id,
         job_type=job_type,
         status="pending",
         progress_json=_json_dump({"stage": "queued"}),
@@ -469,6 +477,84 @@ def _perform_analysis(job: ProcessingJob) -> dict:
     return {"analysis_id": analysis.id}
 
 
+def _perform_question_analysis(job: ProcessingJob) -> dict:
+    from models.interview import Interview
+    from models.interview_flow import InterviewFlowQuestion
+    from services.analyzer import analyze_per_question
+    from services.processing_result_guard import find_completed_analysis_for_scope
+
+    if job.interview_id is None or job.question_id is None:
+        raise ValueError("question analysis job requires interview_id and question_id")
+    interview = db.session.get(Interview, int(job.interview_id))
+    question = db.session.get(InterviewFlowQuestion, int(job.question_id))
+    if not interview or interview.project_id != job.project_id:
+        raise ValueError("interview not found in job project")
+    if not question or not interview.flow_id or question.section.flow_id != interview.flow_id:
+        raise ValueError("question not found in interview flow")
+
+    existing = find_completed_analysis_for_scope(job, "per_question")
+    if existing:
+        update_progress(job, "analyzing_question", analysis_id=existing.id, already_done=True)
+        return {"analysis_id": existing.id, "already_done": True}
+
+    update_progress(job, "analyzing_question", question_id=int(job.question_id))
+    analysis = analyze_per_question(
+        int(job.interview_id),
+        int(job.question_id),
+        result_write_guard=lambda: begin_job_result_write(job),
+    )
+    return {"analysis_id": analysis.id, "question_id": int(job.question_id)}
+
+
+def _perform_cross_analysis(job: ProcessingJob) -> dict:
+    from models.interview_flow import InterviewFlowQuestion
+    from services.analyzer import analyze_cross_participants
+    from services.processing_result_guard import find_completed_analysis_for_scope
+
+    if job.question_id is None:
+        raise ValueError("cross analysis job requires question_id")
+    question = db.session.get(InterviewFlowQuestion, int(job.question_id))
+    if not question or not question.section or not question.section.flow:
+        raise ValueError("question not found")
+    if question.section.flow.project_id != job.project_id:
+        raise ValueError("question not found in job project")
+
+    existing = find_completed_analysis_for_scope(job, "cross_participant")
+    if existing:
+        update_progress(job, "analyzing_cross", analysis_id=existing.id, already_done=True)
+        return {"analysis_id": existing.id, "already_done": True}
+
+    update_progress(job, "analyzing_cross", question_id=int(job.question_id))
+    analysis = analyze_cross_participants(
+        int(job.project_id),
+        int(job.question_id),
+        result_write_guard=lambda: begin_job_result_write(job),
+    )
+    return {"analysis_id": analysis.id, "question_id": int(job.question_id)}
+
+
+def _perform_integrated_analysis(job: ProcessingJob) -> dict:
+    from models.project import Project
+    from services.analyzer import analyze_project_integrated
+    from services.processing_result_guard import find_completed_analysis_for_scope
+
+    project = db.session.get(Project, int(job.project_id))
+    if not project:
+        raise ValueError("project not found")
+
+    existing = find_completed_analysis_for_scope(job, "integrated")
+    if existing:
+        update_progress(job, "analyzing_integrated", analysis_id=existing.id, already_done=True)
+        return {"analysis_id": existing.id, "already_done": True}
+
+    update_progress(job, "analyzing_integrated")
+    analysis = analyze_project_integrated(
+        int(job.project_id),
+        result_write_guard=lambda: begin_job_result_write(job),
+    )
+    return {"analysis_id": analysis.id}
+
+
 def _perform_project_pipeline(job: ProcessingJob) -> dict:
     from services.project_pipeline import run_project_pipeline
 
@@ -490,6 +576,9 @@ def execute_job(
         "transcribe": _perform_transcription,
         "map": _perform_mapping,
         "analyze": _perform_analysis,
+        "analyze_question": _perform_question_analysis,
+        "analyze_cross": _perform_cross_analysis,
+        "analyze_integrated": _perform_integrated_analysis,
         "project_pipeline": _perform_project_pipeline,
     }
     selected = handlers or default_handlers
