@@ -93,9 +93,13 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         if not interview.flow_id and first_flow_id:
             try:
+                begin_job_result_write(job)
                 interview.flow_id = first_flow_id
                 db.session.commit()
                 row["steps"].append({"step": "assign_flow", "result": first_flow_id})
+            except JobLeaseLost:
+                db.session.rollback()
+                raise
             except Exception as exc:
                 db.session.rollback()
                 _step_error(row, "assign_flow", exc)
@@ -122,6 +126,7 @@ def run_project_pipeline(job, update_progress) -> dict:
                 .first()
             )
             if existing:
+                begin_job_result_write(job)
                 interview.status = "transcribed"
                 db.session.commit()
                 row["steps"].append({
@@ -131,8 +136,15 @@ def run_project_pipeline(job, update_progress) -> dict:
                 })
             else:
                 try:
+                    # Cleanup mutates transcription/segment rows and commits. Fence
+                    # that write separately so an old pipeline attempt cannot delete
+                    # partial rows belonging to a newer retry.
+                    begin_job_result_write(job)
                     cleanup = discard_incomplete_transcription_segments(media.id)
-                    assert_job_lease(job)
+
+                    # Creating the next canonical attempt is another commit boundary.
+                    # Revalidate the immutable attempt token after cleanup completed.
+                    begin_job_result_write(job)
                     tr = Transcription(
                         media_file_id=media.id,
                         whisper_model=get_default_transcription_model(),
@@ -164,10 +176,17 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         interview = db.session.get(Interview, interview_id)
         if interview and interview.status == "transcribed":
-            assert_job_lease(job)
             try:
+                # auto_assign_speaker_roles() can commit internally. Acquire the
+                # result-write reservation first; an extra commit also releases the
+                # reservation when the helper returns early without changing rows.
+                begin_job_result_write(job)
                 auto_assign_speaker_roles(interview.id)
+                db.session.commit()
                 row["steps"].append({"step": "auto_roles", "result": "ok"})
+            except JobLeaseLost:
+                db.session.rollback()
+                raise
             except Exception as exc:
                 db.session.rollback()
                 _step_error(row, "auto_roles", exc)
