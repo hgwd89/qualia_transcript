@@ -51,6 +51,7 @@ $doLocalProduction = $false
 $doProductionReadinessSmoke = $false
 $doProcessingJobs = $false
 $doJobRecovery = $false
+$doProjectPipelineResilience = $false
 
 if ($AllLocal) {
     $doSafe = $true
@@ -63,6 +64,7 @@ if ($AllLocal) {
     $doProductionReadinessSmoke = $true
     $doProcessingJobs = $true
     $doJobRecovery = $true
+    $doProjectPipelineResilience = $true
 }
 
 $hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
@@ -106,6 +108,9 @@ if ($doProcessingJobs) {
 }
 if ($doJobRecovery) {
     Invoke-Check -Name "Stale Processing Job Recovery Check" -ScriptPath (Join-Path $scriptDir "check_job_recovery.ps1") -Paid:$false
+}
+if ($doProjectPipelineResilience) {
+    Invoke-Check -Name "Project Pipeline Resilience Check" -ScriptPath (Join-Path $scriptDir "check_project_pipeline_resilience.ps1") -Paid:$false
 }
 if ($Mapping) {
     Invoke-Check -Name "Mapping Smoke Check" -ScriptPath (Join-Path $scriptDir "check_mapping.ps1") -Paid:$true

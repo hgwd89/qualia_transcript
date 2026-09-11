@@ -33,3 +33,7 @@ jobs:
       - name: Run safe smoke check
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
+
+      - name: Run project pipeline resilience smoke check
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts/check_project_pipeline_resilience.ps1
