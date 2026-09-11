@@ -95,26 +95,29 @@ Derived data may reference raw data by IDs and source quotes, but must not overw
 
 Smoke tests live in `tests/smoke_*.py`. PowerShell wrappers live in `scripts/check_*.ps1`.
 
-The default aggregate runner on current `master` is `scripts/check_all.ps1`. With no flags, it runs the safe smoke check only. Paid/API and output checks are opt-in.
+The default aggregate runner is `scripts/check_all.ps1`. With no flags, it runs the CI-safe smoke check only. `scripts/check_all.ps1 -AllLocal` runs the broader non-paid local suite using temporary fixtures/directories where applicable. Paid/API checks remain opt-in and are not part of the safe or `-AllLocal` path.
 
-Some local checks on current `master` still use reversible writes or fixed local fixtures. Treat their behavior according to `docs/testing.md` and the current script implementation before running them.
+Existing research data is protected by a separate manual `local-data-integrity` check. That check opens the SQLite database read-only, verifies key table relationships, reports source-segment fingerprints and analysis counts, and can compare minimum counts and raw-transcript file hashes against an optional baseline. It is deliberately not a CI-required check because CI does not have the local research dataset.
 
 ## Generated Files and Non-Git Data
 
 The following data must remain untracked:
 
 - `.env`
+- `instance/`
 - `uploads/`
 - `outputs/`
 - `outputs/raw_transcripts/`
 - `*.db`
+- `*.db-journal`
+- `*.sqlite3-journal`
 - `logs/*.log`
 - generated Word, Excel, CSV, and transcript files
 - virtual environments and caches
 
 ## External API Boundaries
 
-OpenAI API usage appears in transcription, mapping, analyzer, and semantic-analysis paths. These must not be run as part of default safe checks.
+OpenAI API usage appears in transcription, mapping, analyzer, and semantic-analysis paths. These must not be run as part of default safe checks or `-AllLocal`.
 
 Whisper usage appears in transcription paths. It must not be run unless transcription has been explicitly requested.
 
@@ -124,5 +127,4 @@ No-ai integrated analysis and preview checks are intended to validate local data
 
 - The exact production database lifecycle is not documented here beyond the local Flask/SQLAlchemy behavior observed in `app.py`.
 - The behavior of every semantic-analysis mode with respect to OpenAI embeddings must be checked before running it outside `--dry-run --no-ai`.
-- The current `master` check suite differs from active feature branches and PRs that may add self-contained `-AllLocal` behavior.
 - Large media performance, long-running transcription behavior, and bulk output-generation limits are not validated by the safe checks.
