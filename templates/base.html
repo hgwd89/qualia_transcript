@@ -59,5 +59,6 @@
   <footer class="text-center text-xs text-gray-400 py-4 border-t border-gray-200">
     {{ SERVICE_NAME }} &copy; {{ now.year if now else 2025 }}
   </footer>
+  <script src="{{ url_for('static', filename='js/processing_jobs.js') }}"></script>
 </body>
 </html>
