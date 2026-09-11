@@ -1,5 +1,6 @@
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -98,9 +99,35 @@ def main() -> int:
                 )
 
                 with app.app_context():
+                    interview = db.session.get(Interview, interview_id)
+                    interview.status = "transcribed"
+                    db.session.add(Segment(
+                        interview_id=interview_id,
+                        speaker_label="P01",
+                        speaker_role="respondent",
+                        text="smoke",
+                        seq=1,
+                    ))
+                    db.session.commit()
+
+                conflicting_map = client.post(f"/api/interviews/{interview_id}/map", json={})
+                conflict_data = conflicting_map.get_json() or {}
+                failures += check(
+                    "different active job on same interview is rejected",
+                    conflicting_map.status_code == 409
+                    and conflict_data.get("conflicting_job", {}).get("id") == first_job_id,
+                    str(conflict_data),
+                )
+
+                with app.app_context():
+                    transcribe_job = db.session.get(ProcessingJob, first_job_id)
+                    transcribe_job.status = "succeeded"
+                    transcribe_job.finished_at = datetime.now(timezone.utc)
+                    db.session.commit()
+
                     job, created = create_or_get_active_job(project_id, "map", interview_id)
                     map_job_id = job.id
-                    failures += check("map job created", created is True)
+                    failures += check("map job created after prior job completes", created is True)
 
                     def success_handler(job):
                         return {"mapped_count": 7, "job_id": job.id}
@@ -153,25 +180,18 @@ def main() -> int:
                         and retried.attempt_count == 1,
                         str(retried.to_dict()),
                     )
-
                     interview = db.session.get(Interview, interview_id)
                     interview.status = "mapped"
-                    db.session.add(Segment(
-                        interview_id=interview_id,
-                        speaker_label="P01",
-                        speaker_role="respondent",
-                        text="smoke",
-                        seq=1,
-                    ))
                     db.session.commit()
 
                 analyze_response = client.post(f"/api/interviews/{interview_id}/analyze", json={})
                 analyze_data = analyze_response.get_json() or {}
                 failures += check(
-                    "analysis request is queued",
+                    "analysis request reuses active retried job",
                     analyze_response.status_code == 202
                     and analyze_data.get("queued") is True
-                    and bool(analyze_data.get("job_id")),
+                    and analyze_data.get("job_id") == failed_job_id
+                    and analyze_data.get("created") is False,
                     str(analyze_data),
                 )
 
