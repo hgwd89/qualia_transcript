@@ -50,6 +50,7 @@ $doProfessionalIntegrity = $false
 $doLocalProduction = $false
 $doProductionReadinessSmoke = $false
 $doProcessingJobs = $false
+$doJobAdmission = $false
 $doJobRecovery = $false
 $doProjectPipelineResilience = $false
 
@@ -63,6 +64,7 @@ if ($AllLocal) {
     $doLocalProduction = $true
     $doProductionReadinessSmoke = $true
     $doProcessingJobs = $true
+    $doJobAdmission = $true
     $doJobRecovery = $true
     $doProjectPipelineResilience = $true
 }
@@ -105,6 +107,9 @@ if ($doProductionReadinessSmoke) {
 }
 if ($doProcessingJobs) {
     Invoke-Check -Name "Durable Processing Job Check" -ScriptPath (Join-Path $scriptDir "check_processing_jobs.ps1") -Paid:$false
+}
+if ($doJobAdmission) {
+    Invoke-Check -Name "Atomic Job Admission Check" -ScriptPath (Join-Path $scriptDir "check_job_admission.ps1") -Paid:$false
 }
 if ($doJobRecovery) {
     Invoke-Check -Name "Stale Processing Job Recovery Check" -ScriptPath (Join-Path $scriptDir "check_job_recovery.ps1") -Paid:$false
