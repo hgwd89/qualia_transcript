@@ -1,7 +1,8 @@
 """Hardened professional-readiness audit entry point.
 
 Extends the base read-only audit with structural validation of registered Office
-artifacts, immutable raw transcript snapshots, and the newest local backup.
+artifacts, immutable raw transcript snapshots, the newest local backup, and
+processing-job quiescence.
 """
 from __future__ import annotations
 
@@ -44,7 +45,6 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
     warnings = report["warnings"]
     info = report["info"]
 
-    # Remove base checks that are deliberately superseded by stronger validation.
     warnings[:] = [
         item for item in warnings
         if item.get("code") not in {"done_transcription_without_raw_snapshot", "no_backup_archive"}
@@ -57,13 +57,41 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
     con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
+        tables = {
+            row[0]
+            for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if "processing_jobs" not in tables:
+            _issue(
+                blockers,
+                "processing_jobs_table_missing",
+                "Durable processing_jobs table is missing; start the upgraded app once before professional use",
+            )
+        else:
+            active_jobs = con.execute(
+                """
+                SELECT id, project_id, interview_id, job_type, status, progress_json, created_at, started_at
+                FROM processing_jobs
+                WHERE status IN ('pending','running')
+                ORDER BY id
+                """
+            ).fetchall()
+            info["active_processing_job_count"] = len(active_jobs)
+            if active_jobs:
+                _issue(
+                    warnings,
+                    "active_processing_jobs",
+                    "Processing jobs are still pending/running; wait for a quiescent dataset before final delivery",
+                    jobs=[dict(row) for row in active_jobs[:100]],
+                    count=len(active_jobs),
+                )
+
         generated = con.execute(
             "SELECT id, file_format, stored_path FROM generated_files ORDER BY id"
         ).fetchall()
         for row in generated:
             path = _safe_output_path(output_dir.resolve(), str(row["stored_path"] or ""))
             if path is None or not path.is_file() or path.stat().st_size <= 0:
-                # Base audit already reports unsafe/missing/empty artifacts.
                 continue
             reason = validate_generated_artifact(path, str(row["file_format"] or ""))
             if reason:
@@ -118,7 +146,6 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             error=backup_error,
         )
 
-    # De-duplicate identical codes/context caused by base + hardened validation.
     def dedupe(items: list[dict]) -> list[dict]:
         seen = set()
         result = []

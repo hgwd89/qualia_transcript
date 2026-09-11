@@ -14,6 +14,7 @@ from models.speaker_assignment import SpeakerAssignment
 from models.analysis       import AIAnalysis
 from models.generated_file import GeneratedFile
 from models.setting        import AppSetting
+from models.processing_job import ProcessingJob
 
 from routes.projects      import bp as projects_bp
 from routes.participants  import bp as participants_bp

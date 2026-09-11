@@ -89,6 +89,22 @@ def create_fixture(db_path: Path, output_dir: Path) -> None:
                 file_format TEXT,
                 stored_path TEXT
             );
+            CREATE TABLE processing_jobs (
+                id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                interview_id INTEGER,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                progress_json TEXT,
+                result_json TEXT,
+                error_message TEXT,
+                attempt_count INTEGER DEFAULT 0,
+                worker_pid INTEGER,
+                created_at DATETIME,
+                started_at DATETIME,
+                finished_at DATETIME,
+                updated_at DATETIME
+            );
             """
         )
         con.execute("INSERT INTO projects VALUES (1, 'Smoke Project')")
@@ -190,6 +206,28 @@ def main() -> int:
         failures += check("healthy fixture has no blockers", report["blockers"] == [], str(report["blockers"]))
         failures += check("healthy fixture has no warnings", report["warnings"] == [], str(report["warnings"]))
         failures += check("audit is read-only", before_hash == after_hash)
+
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute(
+                "INSERT INTO processing_jobs(id, project_id, interview_id, job_type, status, progress_json) VALUES (1, 1, 1, 'analyze', 'running', '{\"stage\":\"analyzing\"}')"
+            )
+            con.commit()
+        finally:
+            con.close()
+        active_report = audit_mod.audit(db_path, output_dir, backup_dir)
+        active_warning_codes = {item["code"] for item in active_report["warnings"]}
+        failures += check(
+            "active processing job is a readiness warning",
+            "active_processing_jobs" in active_warning_codes,
+            str(active_warning_codes),
+        )
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute("DELETE FROM processing_jobs")
+            con.commit()
+        finally:
+            con.close()
 
         artifact = output_dir / "1" / "deliverable.xlsx"
         artifact.unlink()
