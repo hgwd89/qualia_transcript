@@ -224,7 +224,7 @@ def main() -> int:
                     long_iv_id, long_tr_id = make_transcription("openai_long_stale", 610.0)
                     long_state = {"lost": False, "guard_calls": 0, "lease_calls": 0}
                     transcription_service._export_audio_chunk_wav = (
-                        lambda _src, _out, _start, duration_sec: float(duration_sec)
+                        lambda src_path, out_path, start_sec, duration_sec: float(duration_sec)
                     )
                     dispatch_service.get_transcription_provider = lambda: "openai"
 
