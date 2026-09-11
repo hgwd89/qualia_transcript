@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from sqlalchemy import text
+
 from models import db
 from models.analysis import AIAnalysis
 from models.interview import Interview, Transcription
@@ -26,6 +28,52 @@ def _delete_segments_for_transcription_ids(transcription_ids: list[int]) -> int:
     return len(segments)
 
 
+def _begin_transcription_invalidation_write(
+    interview_id: int | None,
+    transcription_id: int,
+) -> None:
+    """Serialize stale-attempt invalidation with competing completion commits.
+
+    SQLite gets a database write reservation. On row-locking databases the
+    shared Interview row is the serialization point because every successful
+    transcription completion also updates interview.status in the same commit.
+    """
+    if db.session.new or db.session.dirty or db.session.deleted:
+        raise RuntimeError("transcription invalidation requires a clean database session")
+
+    db.session.rollback()
+    if db.engine.dialect.name == "sqlite":
+        db.session.execute(text("BEGIN IMMEDIATE"))
+        return
+
+    if interview_id is not None:
+        (
+            Interview.query
+            .filter(Interview.id == int(interview_id))
+            .with_for_update()
+            .first()
+        )
+    else:
+        (
+            Transcription.query
+            .filter(Transcription.id == int(transcription_id))
+            .with_for_update()
+            .first()
+        )
+
+
+def _find_other_done_transcription(
+    media_file_id: int,
+    transcription_id: int,
+) -> Transcription | None:
+    return (
+        Transcription.query
+        .filter_by(media_file_id=int(media_file_id), status="done")
+        .filter(Transcription.id != int(transcription_id))
+        .first()
+    )
+
+
 def discard_transcription_segments(transcription_id: int) -> int:
     """Delete partial segments for one transcription before an in-place fallback."""
     deleted = _delete_segments_for_transcription_ids([int(transcription_id)])
@@ -34,28 +82,41 @@ def discard_transcription_segments(transcription_id: int) -> int:
 
 
 def invalidate_transcription_attempt(transcription_id: int) -> dict:
-    """Invalidate result rows written by a worker that lost its durable job lease."""
-    tr = db.session.get(Transcription, int(transcription_id))
-    if not tr:
-        return {"transcription_id": int(transcription_id), "deleted_segment_count": 0}
+    """Invalidate rows from a worker that lost its durable job lease safely.
 
-    deleted = _delete_segments_for_transcription_ids([int(tr.id)])
+    The stale attempt and any interview-status rewind are committed while holding
+    a write reservation shared with competing transcription completion. If a new
+    attempt completed first we observe it and never rewind the interview. If the
+    invalidation wins first, the new attempt's later completion restores the
+    canonical transcribed status.
+    """
+    transcription_id = int(transcription_id)
+    tr = db.session.get(Transcription, transcription_id)
+    if not tr:
+        return {"transcription_id": transcription_id, "deleted_segment_count": 0}
+
+    media = tr.media_file
+    media_file_id = int(tr.media_file_id)
+    interview_id = int(media.interview_id) if media and media.interview_id is not None else None
+
+    _begin_transcription_invalidation_write(interview_id, transcription_id)
+    tr = db.session.get(Transcription, transcription_id)
+    if not tr:
+        db.session.rollback()
+        return {"transcription_id": transcription_id, "deleted_segment_count": 0}
+
+    deleted = _delete_segments_for_transcription_ids([transcription_id])
     tr.status = "error"
     tr.error_message = _STALE_ATTEMPT_MESSAGE
     tr.completed_at = datetime.now(timezone.utc)
 
-    other_done = (
-        Transcription.query
-        .filter_by(media_file_id=int(tr.media_file_id), status="done")
-        .filter(Transcription.id != int(tr.id))
-        .first()
-    )
-    interview = tr.media_file.interview if tr.media_file else None
+    other_done = _find_other_done_transcription(media_file_id, transcription_id)
+    interview = db.session.get(Interview, interview_id) if interview_id is not None else None
     if interview and not other_done and interview.status == "transcribed":
         interview.status = "pending"
 
     db.session.commit()
-    return {"transcription_id": int(tr.id), "deleted_segment_count": deleted}
+    return {"transcription_id": transcription_id, "deleted_segment_count": deleted}
 
 
 def discard_incomplete_transcription_segments(media_file_id: int) -> dict:
