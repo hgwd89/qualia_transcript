@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document separates safe local checks from paid/API checks, output-generation checks, and manual local research-data integrity checks. It is intended for Codex, Claude Code, and human reviewers.
+This document separates safe local checks from paid/API checks, output-generation checks, AI-analysis review/export checks, and manual local research-data integrity checks. It is intended for Codex, Claude Code, and human reviewers.
 
 `AGENTS.md` remains the top-level rule. If there is a conflict, follow `AGENTS.md`.
 
@@ -13,6 +13,8 @@ Safe checks must not call OpenAI, run Whisper, depend on existing research-data 
 Paid/API checks call external providers or intentionally validate paid paths. Run them only when explicitly requested.
 
 Output-generation checks may create Word, Excel, CSV, or `GeneratedFile` records. Self-contained smoke checks must direct these outputs to temporary directories rather than the repository's real `outputs/` directory.
+
+AI-analysis review/export checks validate the human approval gate and approved-only formal analysis workbook. They use temporary fixtures and temporary output paths and must not call OpenAI or Whisper.
 
 Manual local-data-integrity checks inspect an existing local database and raw transcript snapshots in read-only mode. They are intentionally separate from CI because their result depends on local research data.
 
@@ -32,7 +34,7 @@ Run the self-contained non-paid local suite with:
 powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllLocal
 ```
 
-`-AllLocal` runs the safe smoke check, segment-flag smoke, speaker-assignment smoke, output-flag smoke, integrated analysis no-AI check, integrated-analysis CLI guards, and integrated-analysis preview UI check. These checks use temporary fixtures/directories where applicable and must not depend on existing local research-data IDs.
+`-AllLocal` runs the safe smoke check, segment-flag smoke, speaker-assignment smoke, output-flag smoke, integrated analysis no-AI check, integrated-analysis CLI guards, AI-analysis review/export smoke, and integrated-analysis preview UI check. These checks use temporary fixtures/directories where applicable and must not depend on existing local research-data IDs.
 
 Other opt-in flags include:
 
@@ -121,6 +123,28 @@ Expected contract:
 - no `Segment.text` change
 - no raw transcript change
 
+## AI Analysis Review and Approved Export Check
+
+Run this when changing `AIAnalysis` review state, evidence traceability, the review UI/API, or the approved-only analysis workbook:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_analysis_review.ps1
+```
+
+Expected contract:
+
+- temporary SQLite database and temporary output directory only
+- no OpenAI or Whisper call
+- an AI finding can be approved only when its `evidence_quote` resolves to respondent `Segment` rows inside the analysis scope
+- approval persists `source_segment_ids` into the finding payload
+- an unresolved evidence quote is rejected by the approval endpoint and remains unapproved
+- formal AI-analysis XLSX contains only `review_status=approved` analyses
+- the evidence sheet preserves `evidence_quote` and `source_segment_ids`
+- `Segment.text` remains unchanged
+- generated workbook stays under the temporary output directory
+
+This check is included in `scripts/check_all.ps1 -AllLocal`. It is not part of the minimal required `safe-smoke` workflow.
+
 ## Segment Flag Checks
 
 Run segment flag checks when changing flag routes, models, or output reflection:
@@ -170,6 +194,7 @@ Expected contract:
 - output generation must not modify `Segment.text`
 - generated files must stay out of Git
 - self-contained output-flag smoke writes only to a temporary output directory
+- approved AI-analysis output must never include draft or rejected `AIAnalysis` rows
 - inspect `git status --short` before committing after any non-temporary manual output generation
 
 ## Paid/API Checks
@@ -252,8 +277,7 @@ Confirm these are not staged:
 
 ## Future Test Candidates
 
-- A text-analysis contract smoke that verifies evidence fields are preserved and analysis data remains derived.
-- A speaker-role evidence guard smoke that verifies unknown and interviewer-like speakers are excluded from respondent evidence.
-- An analysis-output contract smoke that verifies approved AIAnalysis/evidence fields and required output columns without changing raw transcript data.
+- A broader text-analysis contract smoke that verifies evidence fields remain derived and source-safe across every analysis type.
+- A speaker-role evidence guard smoke that verifies unknown and interviewer-like speakers are excluded from respondent evidence in all analysis paths.
 
 Prefer extending existing smoke tests when they already cover the same behavior. Avoid duplicate tests that add maintenance cost without increasing coverage.
