@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from models import db
 from models.analysis import AIAnalysis
+from models.interview import Interview
 from models.segment import Segment
 
 
@@ -31,10 +32,10 @@ def _segment_question_codes(segment: Segment) -> set[str]:
 def _candidate_segments(analysis: AIAnalysis, finding: dict) -> list[Segment]:
     query = (
         Segment.query
-        .join(Segment.interview)
+        .join(Interview, Segment.interview_id == Interview.id)
         .filter(
+            Interview.project_id == analysis.project_id,
             Segment.speaker_role == "respondent",
-            Segment.interview.has(project_id=analysis.project_id),
         )
         .order_by(Segment.id.asc())
     )
