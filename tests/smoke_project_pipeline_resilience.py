@@ -38,6 +38,7 @@ def main():
             import services.project_pipeline as pipeline_service
 
             app = create_app()
+            client = app.test_client()
             with app.app_context():
                 project = Project(name="Pipeline resilience smoke")
                 db.session.add(project)
@@ -168,6 +169,27 @@ def main():
                         and "no handler" in (missing.error_message or "")
                         and missing.worker_pid is None,
                     )
+
+                status_response = client.get(f"/api/projects/{project_id}/processing-status")
+                status_data = status_response.get_json() or {}
+                failures += check(
+                    "project status API exposes latest pipeline job",
+                    status_response.status_code == 200
+                    and status_data.get("ok") is True
+                    and status_data.get("latest_job", {}).get("id") == job_id
+                    and status_data.get("latest_job", {}).get("status") == "succeeded",
+                    str(status_data),
+                )
+
+                page_response = client.get(f"/projects/{project_id}")
+                failures += check(
+                    "project page contains durable pipeline polling UI",
+                    page_response.status_code == 200
+                    and b"pollProjectJob" in page_response.data
+                    and b"processing-status" in page_response.data
+                    and b"job_id" in page_response.data,
+                    f"status={page_response.status_code}",
+                )
             finally:
                 (
                     pipeline_service.auto_assign_speaker_roles,
