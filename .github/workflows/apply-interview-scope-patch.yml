@@ -1,0 +1,30 @@
+name: Apply Interview Scope Patch
+
+on:
+  push:
+    branches:
+      - fix/project-scope-delete-guards
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/project-scope-delete-guards
+          fetch-depth: 0
+      - name: Apply interview scope patch
+        run: python scripts/apply_interview_scope_patch.py
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add routes/interviews.py
+          git commit -m "fix: enforce interview participant and flow project scope"
+          git push origin HEAD:fix/project-scope-delete-guards
