@@ -22,7 +22,7 @@ import config
 from models import db
 from models.interview import Transcription
 from models.segment import Segment
-from models.setting import AppSetting
+from services.secret_store import get_secret_setting
 from services.upload_manager import get_media_full_path
 
 _model_cache: dict = {}
@@ -86,7 +86,7 @@ def get_default_transcription_model(provider: str | None = None) -> str:
 
 
 def _openai_client() -> OpenAI:
-    api_key = AppSetting.get("openai_api_key") or config.OPENAI_API_KEY
+    api_key = get_secret_setting("openai_api_key", config.OPENAI_API_KEY)
     return OpenAI(api_key=api_key)
 
 
