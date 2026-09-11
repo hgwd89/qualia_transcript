@@ -344,6 +344,7 @@ def _finish_job_failure(job_id: int, attempt_count: int, exc: Exception) -> tupl
 
 def _perform_transcription(job: ProcessingJob) -> dict:
     from models.interview import Interview, Transcription
+    from services.processing_result_guard import discard_incomplete_transcription_segments
     from services.transcription import get_default_transcription_model, run_transcription
 
     interview = db.session.get(Interview, job.interview_id)
@@ -366,9 +367,10 @@ def _perform_transcription(job: ProcessingJob) -> dict:
             "segment_count": len(interview.segments),
         }
 
-    # Fence the attempt before creating a new transcription row. A worker that
-    # was explicitly recovered/retried must not start another expensive stage.
+    # Fence the attempt before deleting partial data or creating a new row.
     update_progress(job, "transcribing")
+    cleanup = discard_incomplete_transcription_segments(media.id)
+
     tr = Transcription(
         media_file_id=media.id,
         whisper_model=get_default_transcription_model(),
@@ -379,7 +381,11 @@ def _perform_transcription(job: ProcessingJob) -> dict:
     db.session.commit()
     update_progress(job, "transcribing", transcription_id=tr.id)
     result = run_transcription(tr.id)
-    return {"transcription_id": tr.id, **result}
+    return {
+        "transcription_id": tr.id,
+        "discarded_partial_segment_count": cleanup["deleted_segment_count"],
+        **result,
+    }
 
 
 def _perform_mapping(job: ProcessingJob) -> dict:
@@ -397,10 +403,17 @@ def _perform_mapping(job: ProcessingJob) -> dict:
 def _perform_analysis(job: ProcessingJob) -> dict:
     from models.interview import Interview
     from services.analyzer import analyze_interview_summary
+    from services.processing_result_guard import find_completed_analysis_for_job
 
     interview = db.session.get(Interview, job.interview_id)
     if not interview or interview.project_id != job.project_id:
         raise ValueError("interview not found in job project")
+
+    existing = find_completed_analysis_for_job(job)
+    if existing:
+        update_progress(job, "analyzing", analysis_id=existing.id, already_done=True)
+        return {"analysis_id": existing.id, "already_done": True}
+
     update_progress(job, "analyzing")
     analysis = analyze_interview_summary(interview.id)
     return {"analysis_id": analysis.id}
