@@ -18,7 +18,7 @@ jobs:
           ref: fix/analysis-job-queue
           fetch-depth: 0
       - name: Patch durable job UI polling
-        shell: python
+        shell: python {0}
         run: |
           from pathlib import Path
           p = Path('templates/interviews/detail.html')
