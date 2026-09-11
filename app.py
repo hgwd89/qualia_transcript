@@ -110,11 +110,11 @@ def _run_migrations(app):
 
 def create_app():
     app = Flask(__name__)
-    app.config["SECRET_KEY"]                    = config.SECRET_KEY
-    app.config["SQLALCHEMY_DATABASE_URI"]       = config.DATABASE_URI
+    app.config["SECRET_KEY"]                     = config.SECRET_KEY
+    app.config["SQLALCHEMY_DATABASE_URI"]        = config.DATABASE_URI
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-    app.config["MAX_CONTENT_LENGTH"]            = config.MAX_UPLOAD_BYTES
-    app.config["MAX_UPLOAD_BYTES"]              = config.MAX_UPLOAD_BYTES
+    app.config["MAX_CONTENT_LENGTH"]             = config.MAX_UPLOAD_BYTES
+    app.config["MAX_UPLOAD_BYTES"]               = config.MAX_UPLOAD_BYTES
 
     db.init_app(app)
 
@@ -144,4 +144,9 @@ def create_app():
 
 if __name__ == "__main__":
     app = create_app()
-    app.run(debug=True, port=5000)
+    app.run(
+        host=config.APP_HOST,
+        port=config.APP_PORT,
+        debug=config.APP_DEBUG,
+        use_reloader=False,
+    )
