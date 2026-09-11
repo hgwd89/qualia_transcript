@@ -5,7 +5,7 @@ $projectRoot = Resolve-Path (Join-Path $scriptDir "..")
 Set-Location $projectRoot
 
 Write-Host "[INFO] Running read-only production readiness audit..."
-python scripts/audit_production_readiness.py @args
+python scripts/audit_production_readiness_v2.py @args
 $exitCode = $LASTEXITCODE
 
 if ($exitCode -eq 0) {
