@@ -85,7 +85,7 @@
     <p class="text-xs text-blue-600 mt-1">文字起こし → 話者ロール自動割り当て → マッピング → 考察生成 を一括実行します</p>
   </div>
   <button onclick="processAll()"
-          class="bg-blue-600 text-white text-sm px-4 py-2 rounded hover:bg-blue-700 transition whitespace-nowrap ml-4"
+          class="bg-blue-600 text-white text-sm px-4 py-2 rounded hover:bg-blue-700 transition whitespace-nowrap ml-4 disabled:opacity-50 disabled:cursor-not-allowed"
           id="btn-process-all">
     一括処理を実行
   </button>
@@ -149,32 +149,112 @@ const projectId = {{ project.id }};
 
 function showMsg(text, type='info'){
   const el = document.getElementById('status-msg');
+  if(!el) return;
   el.className = `mb-4 p-3 rounded text-sm flash-${type}`;
   el.textContent = text;
   el.classList.remove('hidden');
 }
 
-async function processAll(){
+function setProcessButtonDisabled(disabled){
   const btn = document.getElementById('btn-process-all');
-  if(btn) btn.disabled = true;
-  showMsg('一括処理中…完了まで数分かかる場合があります', 'info');
+  if(btn) btn.disabled = disabled;
+}
+
+function projectJobLabel(job){
+  const progress = job.progress || {};
+  const stage = progress.stage || job.status;
+  if(stage === 'queued' || stage === 'retry_queued') return '一括処理ジョブは待機中です';
+  if(stage === 'worker_started') return '一括処理workerを起動しました';
+  if(stage === 'project_pipeline'){
+    const current = progress.current || 0;
+    const total = progress.total || 0;
+    if(current && total) return `一括処理中… ${current}/${total} 件目`;
+    return '一括処理中です';
+  }
+  return '一括処理中です';
+}
+
+async function pollProjectJob(jobId){
+  setProcessButtonDisabled(true);
+  for(;;){
+    let response;
+    let data;
+    try {
+      response = await fetch(`/api/processing-jobs/${jobId}`, {cache: 'no-store'});
+      data = await response.json();
+      if(!response.ok || !data.ok || !data.job){
+        throw new Error(data.error || `HTTP ${response.status}`);
+      }
+    } catch(e){
+      showMsg('ジョブ状態の取得に失敗しました: ' + e.message, 'error');
+      setProcessButtonDisabled(false);
+      return;
+    }
+
+    const job = data.job;
+    if(job.status === 'succeeded'){
+      showMsg('一括処理が完了しました。画面を更新します。', 'success');
+      setTimeout(() => location.reload(), 800);
+      return;
+    }
+    if(job.status === 'failed'){
+      const result = job.result || {};
+      const failedCount = result.failed_interview_count || 0;
+      const suffix = failedCount ? `（未完了/失敗 ${failedCount} 件）` : '';
+      showMsg(`一括処理は完了していません${suffix}: ${job.error_message || '詳細不明'}。原因を修正して再実行してください。`, 'error');
+      setProcessButtonDisabled(false);
+      return;
+    }
+
+    showMsg(projectJobLabel(job), 'info');
+    await new Promise(resolve => setTimeout(resolve, 1500));
+  }
+}
+
+async function processAll(){
+  setProcessButtonDisabled(true);
+  showMsg('一括処理ジョブを登録中です…', 'info');
   try {
-    const r = await fetch(`/api/projects/${projectId}/process/all`, {
+    const response = await fetch(`/api/projects/${projectId}/process/all`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: '{}',
-    }).then(r => r.json());
-    if(r.ok){
-      showMsg('一括処理が完了しました', 'success');
-      setTimeout(() => location.reload(), 2000);
-    } else {
-      showMsg('エラー: ' + (r.error || '不明'), 'error');
-      if(btn) btn.disabled = false;
+    });
+    const data = await response.json().catch(() => ({}));
+    if(!response.ok || !data.ok){
+      throw new Error(data.error || `HTTP ${response.status}`);
     }
+    if(!data.job_id){
+      throw new Error('job_id が返されませんでした');
+    }
+    showMsg(`一括処理ジョブ #${data.job_id} を受け付けました。`, 'info');
+    await pollProjectJob(data.job_id);
   } catch(e){
-    showMsg('通信エラー: ' + e.message, 'error');
-    if(btn) btn.disabled = false;
+    showMsg('エラー: ' + e.message, 'error');
+    setProcessButtonDisabled(false);
   }
 }
+
+document.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const response = await fetch(`/api/projects/${projectId}/processing-status`, {cache: 'no-store'});
+    const data = await response.json();
+    if(!response.ok || !data.ok) return;
+    const job = data.latest_job;
+    if(!job) return;
+    if(job.status === 'pending' || job.status === 'running'){
+      await pollProjectJob(job.id);
+      return;
+    }
+    if(job.status === 'failed'){
+      const result = job.result || {};
+      const failedCount = result.failed_interview_count || 0;
+      const suffix = failedCount ? `（未完了/失敗 ${failedCount} 件）` : '';
+      showMsg(`前回の一括処理は完了していません${suffix}: ${job.error_message || '詳細不明'}。`, 'error');
+    }
+  } catch(_){
+    // 状態復元に失敗しても手動の一括処理操作は残す。
+  }
+});
 </script>
 {% endblock %}
