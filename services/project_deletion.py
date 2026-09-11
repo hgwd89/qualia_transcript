@@ -85,6 +85,15 @@ def _remove_file(path: Path, errors: list[str]) -> int:
         return 0
 
 
+def _remove_safe_id_dir(root: Path, value: int, label: str, errors: list[str]) -> int:
+    try:
+        path = _safe_id_dir(root, value)
+    except (OSError, ValueError) as exc:
+        errors.append(f"{label} cleanup path rejected: id={int(value)}: {exc}")
+        return 0
+    return _remove_dir(path, errors)
+
+
 def cleanup_project_storage(plan: ProjectStoragePlan) -> ProjectDeletionResult:
     """Best-effort cleanup after the database deletion has committed.
 
@@ -100,28 +109,34 @@ def cleanup_project_storage(plan: ProjectStoragePlan) -> ProjectDeletionResult:
     upload_root = Path(config.UPLOAD_DIR).resolve()
     base_root = Path(config.BASE_DIR).resolve()
 
-    removed += _remove_dir(_safe_id_dir(output_root, plan.project_id), errors)
+    removed += _remove_safe_id_dir(
+        output_root, plan.project_id, "project output", errors
+    )
     for interview_id in plan.interview_ids:
-        removed += _remove_dir(_safe_id_dir(upload_root, interview_id), errors)
+        removed += _remove_safe_id_dir(
+            upload_root, interview_id, "interview upload", errors
+        )
 
     raw_root = (output_root / "raw_transcripts").resolve()
     try:
         raw_root.relative_to(output_root)
-    except ValueError as exc:
-        raise ValueError("raw transcript root escapes OUTPUT_DIR") from exc
-    if raw_root.is_dir():
-        for transcription_id in plan.transcription_ids:
-            for path in raw_root.glob(f"transcription_{int(transcription_id)}_*.json"):
-                if path.is_file():
-                    removed += _remove_file(path, errors)
+    except ValueError:
+        errors.append("raw transcript cleanup path rejected: escapes OUTPUT_DIR")
+    else:
+        if raw_root.is_dir():
+            for transcription_id in plan.transcription_ids:
+                for path in raw_root.glob(f"transcription_{int(transcription_id)}_*.json"):
+                    if path.is_file() or path.is_symlink():
+                        removed += _remove_file(path, errors)
 
     logs_root = (base_root / "logs").resolve()
     try:
         logs_root.relative_to(base_root)
-    except ValueError as exc:
-        raise ValueError("processing log root escapes BASE_DIR") from exc
-    for job_id in plan.processing_job_ids:
-        removed += _remove_file(logs_root / f"processing_job_{int(job_id)}.log", errors)
+    except ValueError:
+        errors.append("processing log cleanup path rejected: escapes BASE_DIR")
+    else:
+        for job_id in plan.processing_job_ids:
+            removed += _remove_file(logs_root / f"processing_job_{int(job_id)}.log", errors)
 
     return ProjectDeletionResult(
         project_id=plan.project_id,
