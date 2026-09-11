@@ -50,10 +50,27 @@ def new(project_id):
 
     if request.method == "POST":
         date_str = request.form.get("interview_date", "").strip()
+        participant_id = request.form.get("participant_id") or None
+        flow_id = request.form.get("flow_id") or None
+        if participant_id is not None:
+            participant = (
+                Participant.query
+                .filter_by(id=participant_id, project_id=project_id)
+                .first_or_404()
+            )
+            participant_id = participant.id
+        if flow_id is not None:
+            flow = (
+                InterviewFlow.query
+                .filter_by(id=flow_id, project_id=project_id)
+                .first_or_404()
+            )
+            flow_id = flow.id
+
         interview = Interview(
             project_id=project_id,
-            participant_id=request.form.get("participant_id") or None,
-            flow_id=request.form.get("flow_id") or None,
+            participant_id=participant_id,
+            flow_id=flow_id,
             interview_date=datetime.strptime(date_str, "%Y-%m-%d").date() if date_str else None,
             interviewer_name=request.form.get("interviewer_name", "").strip() or None,
             location=request.form.get("location", "").strip() or None,
