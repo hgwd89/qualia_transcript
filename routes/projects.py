@@ -1,7 +1,8 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash, abort
+from flask import Blueprint, render_template, request, redirect, url_for, flash, abort, current_app
 from datetime import datetime, timezone
 from models import db
 from models.project import Project
+from services.project_deletion import ProjectDeletionBlocked, delete_project
 
 bp = Blueprint("projects", __name__)
 
@@ -147,7 +148,25 @@ def edit(project_id):
 def delete(project_id):
     project = Project.query.get_or_404(project_id)
     name = project.name
-    db.session.delete(project)
-    db.session.commit()
-    flash(f"プロジェクト「{name}」を削除しました", "info")
+    try:
+        result = delete_project(project)
+    except ProjectDeletionBlocked as exc:
+        ids = ", ".join(str(value) for value in exc.active_job_ids)
+        flash(f"処理中のジョブ（#{ids}）があるため、プロジェクトを削除できません", "error")
+        return redirect(url_for("projects.detail", project_id=project_id))
+    except Exception:
+        db.session.rollback()
+        current_app.logger.exception("project deletion failed: project_id=%s", project_id)
+        flash("プロジェクトの削除に失敗しました", "error")
+        return redirect(url_for("projects.detail", project_id=project_id))
+
+    if result.cleanup_errors:
+        for message in result.cleanup_errors:
+            current_app.logger.warning("project storage cleanup warning: %s", message)
+        flash(
+            f"プロジェクト「{name}」を削除しましたが、保存ファイルの一部を削除できませんでした",
+            "warning",
+        )
+    else:
+        flash(f"プロジェクト「{name}」を削除しました", "info")
     return redirect(url_for("projects.index"))
