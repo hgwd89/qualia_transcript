@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
+from services.job_recovery import worker_pid_liveness
 
 
 def _db_path() -> Path:
@@ -64,6 +65,15 @@ def _parse_dt(value) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _pid_liveness_from_row(row: dict) -> bool | None:
+    if row.get("status") not in {"pending", "running"}:
+        return None
+    pid = row.get("worker_pid")
+    if not pid:
+        return None
+    return worker_pid_liveness(pid)
+
+
 def _stale_reason_from_row(row: dict) -> str | None:
     if row.get("status") not in {"pending", "running"}:
         return None
@@ -71,6 +81,10 @@ def _stale_reason_from_row(row: dict) -> str | None:
     if not row.get("worker_pid") and created:
         if (datetime.now(timezone.utc) - created).total_seconds() > 300:
             return "active job has no worker after launch grace period"
+        return None
+
+    if row.get("worker_pid") and _pid_liveness_from_row(row) is False:
+        return "worker process is no longer running"
     return None
 
 
@@ -84,13 +98,27 @@ def _display_payload(row: dict) -> dict:
             except (TypeError, json.JSONDecodeError):
                 payload[field[:-5]] = None
         payload.pop(field, None)
+
+    pid_liveness = _pid_liveness_from_row(row)
+    payload["worker_pid_alive"] = pid_liveness
     payload["automatic_recovery_reason"] = _stale_reason_from_row(row)
-    payload["operator_note"] = (
-        "PID-backed active jobs are never auto-failed solely because of age; "
-        "confirm the worker stopped before using --apply --yes."
-        if row.get("status") in {"pending", "running"} and row.get("worker_pid")
-        else None
-    )
+
+    if row.get("status") in {"pending", "running"} and row.get("worker_pid"):
+        if pid_liveness is True:
+            payload["operator_note"] = (
+                "Worker PID is currently alive. Do not force-recover unless you have independently "
+                "confirmed that this PID is not the Qualia worker for this job."
+            )
+        elif pid_liveness is False:
+            payload["operator_note"] = (
+                "Worker PID is no longer alive. Normal status polling/conflict checks should auto-recover this job."
+            )
+        else:
+            payload["operator_note"] = (
+                "Worker PID liveness is inconclusive. Confirm the worker stopped before using --apply --yes."
+            )
+    else:
+        payload["operator_note"] = None
     return payload
 
 
