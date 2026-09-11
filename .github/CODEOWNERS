@@ -1,0 +1,29 @@
+# Default reviewer for all repository changes.
+* @hgwd89
+
+# Agent and operations rules.
+AGENTS.md @hgwd89
+CLAUDE.md @hgwd89
+docs/testing.md @hgwd89
+docs/github-operations.md @hgwd89
+
+# High-risk app and configuration files.
+app.py @hgwd89
+config.py @hgwd89
+
+# Raw text, flags, speakers, and analysis models.
+models/segment.py @hgwd89
+models/segment_flag.py @hgwd89
+models/speaker_assignment.py @hgwd89
+models/analysis.py @hgwd89
+
+# Semantic analysis and analysis/output routes.
+services/semantic_analysis.py @hgwd89
+scripts/run_semantic_analysis.py @hgwd89
+routes/analyze.py @hgwd89
+routes/analysis_view.py @hgwd89
+routes/outputs.py @hgwd89
+
+# Test and check infrastructure.
+tests/** @hgwd89
+scripts/** @hgwd89

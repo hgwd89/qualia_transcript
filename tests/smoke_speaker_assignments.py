@@ -1,10 +1,15 @@
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
-TARGET_INTERVIEW_ID = 10
-TARGET_SPEAKER_LABEL = "C01_C"
+SEGMENT_TEXTS = {
+    "RESP_A": "回答者の発話Aです。",
+    "RESP_B": "回答者の発話Bです。",
+    "MOD_A": "司会者の発話です。",
+    "OBS_A": "観察者の発話です。",
+}
 
 
 def print_result(name: str, ok: bool, detail: str = "") -> bool:
@@ -28,148 +33,227 @@ def run_git(repo_root: Path, *args: str) -> subprocess.CompletedProcess:
     )
 
 
+def repo_state(repo_root: Path) -> dict[str, bool]:
+    return {
+        "instance": (repo_root / "instance").exists(),
+        "uploads": (repo_root / "uploads").exists(),
+        "outputs": (repo_root / "outputs").exists(),
+    }
+
+
+def create_fixture(db, Project, Participant, Interview, Segment) -> dict[str, int]:
+    project = Project(name="Speaker Assignment Smoke Project", client="Smoke Client")
+    db.session.add(project)
+    db.session.flush()
+
+    participant = Participant(
+        project_id=project.id,
+        participant_code="P01",
+        display_name="Smoke Participant",
+    )
+    db.session.add(participant)
+    db.session.flush()
+
+    interview = Interview(
+        project_id=project.id,
+        participant_id=participant.id,
+        status="mapped",
+    )
+    db.session.add(interview)
+    db.session.flush()
+
+    for index, (label, text) in enumerate(SEGMENT_TEXTS.items(), start=1):
+        db.session.add(
+            Segment(
+                interview_id=interview.id,
+                participant_id=participant.id if label.startswith("RESP") else None,
+                speaker_label=label,
+                speaker_role="unknown",
+                start_sec=float(index),
+                end_sec=float(index + 1),
+                text=text,
+                seq=index,
+            )
+        )
+    db.session.commit()
+    return {"project_id": project.id, "participant_id": participant.id, "interview_id": interview.id}
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
     failures = 0
-    baseline_text = None
+    before_repo_state = repo_state(repo_root)
 
     try:
-        from app import create_app
-        from models import db
-        from models.interview import Interview
-        from models.participant import Participant
-        from models.segment import Segment
-        from models.speaker_assignment import SpeakerAssignment
+        import config
+
+        original_config = {
+            "DATABASE_URI": config.DATABASE_URI,
+            "UPLOAD_DIR": config.UPLOAD_DIR,
+            "OUTPUT_DIR": config.OUTPUT_DIR,
+        }
     except Exception as e:
-        print_result("import app/models", False, f"{type(e).__name__}: {e}")
+        print_result("config import", False, f"{type(e).__name__}: {e}")
         return 1
 
-    app = create_app()
-    client = app.test_client()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        try:
+            config.DATABASE_URI = f"sqlite:///{(tmp_dir / 'speaker_assignments_smoke.db').as_posix()}"
+            config.UPLOAD_DIR = str(tmp_dir / "uploads")
+            config.OUTPUT_DIR = str(tmp_dir / "outputs")
 
-    with app.app_context():
-        interview = Interview.query.get(TARGET_INTERVIEW_ID)
-        if not interview:
-            print_result("target interview exists", False, f"interview_id={TARGET_INTERVIEW_ID} not found")
-            return 1
+            from app import create_app
+            from models import db
+            from models.interview import Interview
+            from models.participant import Participant
+            from models.project import Project
+            from models.segment import Segment
+            from models.speaker_assignment import SpeakerAssignment
 
-        # label決定: 既定ラベルを優先、なければ先頭distinct
-        target_label = TARGET_SPEAKER_LABEL
-        seg = Segment.query.filter_by(interview_id=interview.id, speaker_label=target_label).order_by(Segment.id.asc()).first()
-        if not seg:
-            d = (
-                Segment.query
-                .with_entities(Segment.speaker_label)
-                .filter(Segment.interview_id == interview.id, Segment.speaker_label.isnot(None))
-                .distinct()
-                .first()
+            app = create_app()
+            client = app.test_client()
+
+            failures += 0 if print_result(
+                "temporary database configured",
+                app.config.get("SQLALCHEMY_DATABASE_URI") == config.DATABASE_URI,
+                app.config.get("SQLALCHEMY_DATABASE_URI", ""),
+            ) else 1
+            failures += 0 if print_result(
+                "temporary upload/output dirs configured",
+                str(tmp_dir) in config.UPLOAD_DIR and str(tmp_dir) in config.OUTPUT_DIR,
+            ) else 1
+
+            with app.app_context():
+                ids = create_fixture(db, Project, Participant, Interview, Segment)
+                interview_id = ids["interview_id"]
+                participant_id = ids["participant_id"]
+                baseline_texts = {
+                    s.speaker_label: s.text
+                    for s in Segment.query.filter_by(interview_id=interview_id).all()
+                }
+                failures += 0 if print_result(
+                    "self-contained interview fixture created",
+                    len(baseline_texts) == len(SEGMENT_TEXTS),
+                    f"interview_id={interview_id}",
+                ) else 1
+
+            r_page = client.get(f"/interviews/{interview_id}/speakers")
+            failures += 0 if print_result(
+                "GET /interviews/<id>/speakers",
+                r_page.status_code == 200,
+                f"status={r_page.status_code}",
+            ) else 1
+
+            r1 = client.post(
+                f"/api/interviews/{interview_id}/speakers/RESP_A",
+                json={
+                    "speaker_role": "respondent",
+                    "participant_id": participant_id,
+                    "note": "__smoke_respondent__",
+                },
             )
-            if not d or not d[0]:
-                print_result("speaker_label exists", False, "no speaker_label in interview")
-                return 1
-            target_label = d[0]
-            seg = Segment.query.filter_by(interview_id=interview.id, speaker_label=target_label).order_by(Segment.id.asc()).first()
-
-        baseline_text = seg.text
-        baseline_assignment = SpeakerAssignment.query.filter_by(
-            interview_id=interview.id, speaker_label=target_label
-        ).first()
-        baseline = None if not baseline_assignment else {
-            "speaker_role": baseline_assignment.speaker_role,
-            "participant_id": baseline_assignment.participant_id,
-            "note": baseline_assignment.note,
-        }
-
-        p01 = Participant.query.filter_by(project_id=interview.project_id, participant_code="P01").first()
-        fallback = Participant.query.filter_by(project_id=interview.project_id).order_by(Participant.id.asc()).first()
-        participant = p01 or fallback
-        if not participant:
-            print_result("participant exists", False, f"project_id={interview.project_id} has no participants")
-            return 1
-
-    # page check
-    r_page = client.get(f"/interviews/{TARGET_INTERVIEW_ID}/speakers")
-    failures += 0 if print_result(
-        "GET /interviews/<id>/speakers",
-        r_page.status_code == 200,
-        f"status={r_page.status_code}",
-    ) else 1
-
-    # upsert 1
-    r1 = client.post(
-        f"/api/interviews/{TARGET_INTERVIEW_ID}/speakers/{target_label}",
-        json={
-            "speaker_role": "respondent",
-            "participant_id": participant.id,
-            "note": "__smoke_speaker_assign_1__",
-        },
-    )
-    j1 = r1.get_json(silent=True) or {}
-    failures += 0 if print_result(
-        "upsert assignment #1",
-        r1.status_code == 200 and j1.get("ok") is True,
-        f"status={r1.status_code}, created={j1.get('created')}",
-    ) else 1
-
-    # upsert 2 (duplicate prevention)
-    r2 = client.post(
-        f"/api/interviews/{TARGET_INTERVIEW_ID}/speakers/{target_label}",
-        json={
-            "speaker_role": "respondent",
-            "participant_id": participant.id,
-            "note": "__smoke_speaker_assign_2__",
-        },
-    )
-    j2 = r2.get_json(silent=True) or {}
-    with app.app_context():
-        cnt = SpeakerAssignment.query.filter_by(
-            interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label
-        ).count()
-    failures += 0 if print_result(
-        "upsert duplicate prevented",
-        r2.status_code == 200 and j2.get("ok") is True and cnt == 1,
-        f"status={r2.status_code}, created={j2.get('created')}, count={cnt}",
-    ) else 1
-
-    # cleanup restore baseline
-    with app.app_context():
-        cur = SpeakerAssignment.query.filter_by(
-            interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label
-        ).first()
-        cleanup_ok = False
-        if baseline is None:
-            if cur:
-                db.session.delete(cur)
-                db.session.commit()
-            cleanup_ok = (
-                SpeakerAssignment.query.filter_by(
-                    interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label
-                ).count() == 0
+            j1 = r1.get_json(silent=True) or {}
+            respondent_ok = (
+                r1.status_code == 200
+                and j1.get("ok") is True
+                and (j1.get("assignment") or {}).get("speaker_role") == "respondent"
+                and (j1.get("assignment") or {}).get("participant_id") == participant_id
             )
-        else:
-            if cur is None:
-                cur = SpeakerAssignment(interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label)
-                db.session.add(cur)
-            cur.speaker_role = baseline["speaker_role"]
-            cur.participant_id = baseline["participant_id"]
-            cur.note = baseline["note"]
-            db.session.commit()
-            restored = SpeakerAssignment.query.filter_by(
-                interview_id=TARGET_INTERVIEW_ID, speaker_label=target_label
-            ).first()
-            cleanup_ok = bool(
-                restored
-                and restored.speaker_role == baseline["speaker_role"]
-                and restored.participant_id == baseline["participant_id"]
-                and restored.note == baseline["note"]
-            )
-        final_text = Segment.query.get(seg.id).text
+            failures += 0 if print_result(
+                "upsert respondent assignment",
+                respondent_ok,
+                f"status={r1.status_code}, created={j1.get('created')}",
+            ) else 1
 
-    failures += 0 if print_result("cleanup restored baseline", cleanup_ok) else 1
-    failures += 0 if print_result("segment text unchanged", final_text == baseline_text) else 1
+            r2 = client.post(
+                f"/api/interviews/{interview_id}/speakers/RESP_A",
+                json={
+                    "speaker_role": "respondent",
+                    "participant_id": participant_id,
+                    "note": "__smoke_respondent_updated__",
+                },
+            )
+            j2 = r2.get_json(silent=True) or {}
+            with app.app_context():
+                respondent_count = SpeakerAssignment.query.filter_by(
+                    interview_id=interview_id,
+                    speaker_label="RESP_A",
+                ).count()
+            failures += 0 if print_result(
+                "upsert duplicate prevented",
+                r2.status_code == 200 and j2.get("ok") is True and respondent_count == 1,
+                f"status={r2.status_code}, created={j2.get('created')}, count={respondent_count}",
+            ) else 1
+
+            r_mod = client.post(
+                f"/api/interviews/{interview_id}/speakers/MOD_A",
+                json={"speaker_role": "moderator", "participant_id": None, "note": "__smoke_moderator__"},
+            )
+            j_mod = r_mod.get_json(silent=True) or {}
+            moderator_ok = (
+                r_mod.status_code == 200
+                and j_mod.get("ok") is True
+                and (j_mod.get("assignment") or {}).get("speaker_role") == "moderator"
+                and (j_mod.get("assignment") or {}).get("participant_id") is None
+            )
+            failures += 0 if print_result(
+                "upsert moderator assignment without participant",
+                moderator_ok,
+                f"status={r_mod.status_code}",
+            ) else 1
+
+            r_obs = client.post(
+                f"/api/interviews/{interview_id}/speakers/OBS_A",
+                json={"speaker_role": "observer", "participant_id": None, "note": "__smoke_observer__"},
+            )
+            j_obs = r_obs.get_json(silent=True) or {}
+            observer_ok = (
+                r_obs.status_code == 200
+                and j_obs.get("ok") is True
+                and (j_obs.get("assignment") or {}).get("speaker_role") == "observer"
+                and (j_obs.get("assignment") or {}).get("participant_id") is None
+            )
+            failures += 0 if print_result(
+                "upsert observer assignment without participant",
+                observer_ok,
+                f"status={r_obs.status_code}",
+            ) else 1
+
+            with app.app_context():
+                assignment_count = SpeakerAssignment.query.filter_by(interview_id=interview_id).count()
+                final_texts = {
+                    s.speaker_label: s.text
+                    for s in Segment.query.filter_by(interview_id=interview_id).all()
+                }
+                db.session.remove()
+                db.engine.dispose()
+
+            failures += 0 if print_result(
+                "speaker assignments created/updated",
+                assignment_count == 3,
+                f"count={assignment_count}",
+            ) else 1
+            failures += 0 if print_result(
+                "segment text unchanged",
+                final_texts == baseline_texts,
+            ) else 1
+        except Exception as e:
+            failures += 0 if print_result("speaker assignment smoke", False, f"{type(e).__name__}: {e}") else 1
+        finally:
+            config.DATABASE_URI = original_config["DATABASE_URI"]
+            config.UPLOAD_DIR = original_config["UPLOAD_DIR"]
+            config.OUTPUT_DIR = original_config["OUTPUT_DIR"]
+
+    after_repo_state = repo_state(repo_root)
+    failures += 0 if print_result(
+        "repo instance/uploads/outputs state unchanged",
+        before_repo_state == after_repo_state,
+        f"before={before_repo_state}, after={after_repo_state}",
+    ) else 1
 
     status_proc = run_git(repo_root, "status", "--short")
     if status_proc.returncode == 0:
