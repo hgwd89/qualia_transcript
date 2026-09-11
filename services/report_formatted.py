@@ -1,27 +1,28 @@
 """
-整形シート .xlsx 生成
-行：質問項目、列：参加者、セル：該当発言テキスト
+整形シート .xlsx 生成。
+
+行：質問項目、列：インタビュー、セル：該当発言テキスト。
+同一参加者の複数回インタビューを潰さず、複数フローと未マッピング発言も保持する。
 """
 import os
 from datetime import datetime
+
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
 import config
-from models.project import Project
-from models.participant import Participant
-from models.interview_flow import InterviewFlowQuestion
-from models.interview import Interview
-from models.segment import Segment, UtteranceMapping
-from models.generated_file import GeneratedFile
 from models import db
+from models.generated_file import GeneratedFile
+from models.interview import Interview
+from models.project import Project
+from models.segment import Segment, UtteranceMapping
 
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F3864")
-_KEY_FILL    = PatternFill("solid", fgColor="FCE4D6")
-_THIN        = Side(style="thin", color="AAAAAA")
-_BORDER      = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
-
+_KEY_FILL = PatternFill("solid", fgColor="FCE4D6")
+_THIN = Side(style="thin", color="AAAAAA")
+_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
 _FLAG_ORDER = ("favorite", "quote", "exclude", "needs_review")
 
@@ -39,142 +40,187 @@ def _segment_flag_value_line(seg) -> str:
     )
 
 
+def _interview_label(iv: Interview) -> str:
+    p = iv.participant
+    code = p.participant_code if p and p.participant_code else "participant未設定"
+    name = p.display_name if p and p.display_name else ""
+    date = iv.interview_date.isoformat() if iv.interview_date else "日付未設定"
+    name_line = f" / {name}" if name else ""
+    return f"{code}{name_line}\n{date}\nInterview ID={iv.id}"
+
+
+def _is_unclassified(seg: Segment) -> bool:
+    mappings = list(seg.utterance_mappings or [])
+    if not mappings:
+        return True
+    return all(um.is_unclassified or um.question_id is None for um in mappings)
+
+
 def generate_formatted_sheet(project_id: int) -> GeneratedFile:
-    project      = Project.query.get(project_id)
-    participants = Participant.query.filter_by(project_id=project_id).all()
-    interviews   = Interview.query.filter_by(project_id=project_id).all()
+    project = Project.query.get(project_id)
+    if not project:
+        raise ValueError("project が見つかりません")
 
-    # 参加者→インタビュー の対応マップ
-    p_to_interview = {iv.participant_id: iv for iv in interviews if iv.participant_id}
+    interviews = (
+        Interview.query
+        .filter_by(project_id=project_id)
+        .order_by(Interview.interview_date.asc(), Interview.id.asc())
+        .all()
+    )
 
-    # フロー（最初のフローを使用）
-    flows = project.interview_flows
+    flows = sorted(project.interview_flows, key=lambda f: f.id or 0)
     if not flows:
         raise ValueError("インタビューフローが設定されていません")
-    flow = flows[0]
+    multiple_flows = len(flows) > 1
 
     wb = Workbook()
-
-    # ─── シート1：整形シート ───
     ws = wb.active
     ws.title = "整形シート"
 
-    # ヘッダー行
-    ws.cell(1, 1, "セクション").font       = Font(bold=True, color="FFFFFF")
-    ws.cell(1, 1).fill                     = _HEADER_FILL
-    ws.cell(1, 2, "質問コード").font       = Font(bold=True, color="FFFFFF")
-    ws.cell(1, 2).fill                     = _HEADER_FILL
-    ws.cell(1, 3, "質問テキスト").font     = Font(bold=True, color="FFFFFF")
-    ws.cell(1, 3).fill                     = _HEADER_FILL
+    base_headers = ("セクション", "質問コード", "質問テキスト")
+    for idx, label in enumerate(base_headers, start=1):
+        cell = ws.cell(1, idx, label)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = _HEADER_FILL
+        cell.alignment = Alignment(wrap_text=True, horizontal="center")
 
     col_offset = 4
-    for i, p in enumerate(participants):
+    for i, iv in enumerate(interviews):
         text_col = col_offset + (i * 2)
         flag_col = text_col + 1
+        label = _interview_label(iv)
 
-        c_text = ws.cell(1, text_col,
-                         f"{p.participant_code}\n{p.display_name or ''}\n発話")
-        c_text.font      = Font(bold=True, color="FFFFFF")
-        c_text.fill      = _HEADER_FILL
+        c_text = ws.cell(1, text_col, f"{label}\n発話")
+        c_text.font = Font(bold=True, color="FFFFFF")
+        c_text.fill = _HEADER_FILL
         c_text.alignment = Alignment(wrap_text=True, horizontal="center")
 
         c_flag = ws.cell(
             1,
             flag_col,
-            (
-                f"{p.participant_code}\n{p.display_name or ''}\n"
-                "favorite,quote,exclude,needs_review"
-            ),
+            f"{label}\nfavorite,quote,exclude,needs_review",
         )
-        c_flag.font      = Font(bold=True, color="FFFFFF")
-        c_flag.fill      = _HEADER_FILL
+        c_flag.font = Font(bold=True, color="FFFFFF")
+        c_flag.fill = _HEADER_FILL
         c_flag.alignment = Alignment(wrap_text=True, horizontal="center")
 
-    # 質問行
+    max_col = 3 + (len(interviews) * 2)
     row = 2
-    for section in flow.sections:
-        for q in section.questions:
-            ws.cell(row, 1, section.title)
-            ws.cell(row, 2, q.question_code)
-            ws.cell(row, 3, q.question_text).alignment = Alignment(wrap_text=True)
+    for flow in flows:
+        for section in flow.sections:
+            section_label = (
+                f"{flow.title} / {section.title}"
+                if multiple_flows
+                else section.title
+            )
+            for q in section.questions:
+                ws.cell(row, 1, section_label)
+                ws.cell(row, 2, q.question_code)
+                ws.cell(row, 3, q.question_text).alignment = Alignment(wrap_text=True)
 
-            if q.is_key_question:
-                for col in range(1, col_offset + len(participants)):
-                    ws.cell(row, col).fill = _KEY_FILL
+                if q.is_key_question:
+                    for col in range(1, max_col + 1):
+                        ws.cell(row, col).fill = _KEY_FILL
 
-            for i, p in enumerate(participants):
-                iv = p_to_interview.get(p.id)
-                if not iv:
-                    continue
-                # この質問 × このインタビューの発言
-                mappings = (
-                    UtteranceMapping.query
-                    .filter_by(question_id=q.id)
-                    .join(Segment, UtteranceMapping.segment_id == Segment.id)
-                    .filter(Segment.interview_id == iv.id,
-                            Segment.speaker_role == "respondent")
-                    .all()
-                )
-                text_col = col_offset + (i * 2)
-                flag_col = text_col + 1
+                for i, iv in enumerate(interviews):
+                    mappings = (
+                        UtteranceMapping.query
+                        .filter_by(question_id=q.id)
+                        .join(Segment, UtteranceMapping.segment_id == Segment.id)
+                        .filter(
+                            Segment.interview_id == iv.id,
+                            Segment.speaker_role == "respondent",
+                        )
+                        .order_by(Segment.seq.asc(), UtteranceMapping.id.asc())
+                        .all()
+                    )
+                    text_col = col_offset + (i * 2)
+                    flag_col = text_col + 1
 
-                texts = "\n".join(f"・{m.segment.text}" for m in mappings)
-                flags = "\n".join(
-                    f"・{_segment_flag_value_line(m.segment)}"
-                    for m in mappings
-                )
+                    texts = "\n".join(f"・{m.segment.text}" for m in mappings)
+                    flags = "\n".join(
+                        f"・{_segment_flag_value_line(m.segment)}"
+                        for m in mappings
+                    )
 
-                c_text = ws.cell(row, text_col, texts)
-                c_text.alignment = Alignment(wrap_text=True, vertical="top")
+                    ws.cell(row, text_col, texts).alignment = Alignment(
+                        wrap_text=True, vertical="top"
+                    )
+                    ws.cell(row, flag_col, flags).alignment = Alignment(
+                        wrap_text=True, vertical="top"
+                    )
 
-                c_flag = ws.cell(row, flag_col, flags)
-                c_flag.alignment = Alignment(wrap_text=True, vertical="top")
+                for col in range(1, max_col + 1):
+                    ws.cell(row, col).border = _BORDER
+                row += 1
 
-            for col in range(1, col_offset + (len(participants) * 2)):
-                ws.cell(row, col).border = _BORDER
-
-            row += 1
-
-    # 列幅
-    ws.column_dimensions["A"].width = 18
-    ws.column_dimensions["B"].width = 10
+    ws.column_dimensions["A"].width = 26 if multiple_flows else 18
+    ws.column_dimensions["B"].width = 12
     ws.column_dimensions["C"].width = 40
-    for i in range(len(participants)):
+    for i in range(len(interviews)):
         text_col = col_offset + (i * 2)
         flag_col = text_col + 1
-        ws.column_dimensions[get_column_letter(text_col)].width = 35
-        ws.column_dimensions[get_column_letter(flag_col)].width = 22
-
+        ws.column_dimensions[get_column_letter(text_col)].width = 40
+        ws.column_dimensions[get_column_letter(flag_col)].width = 24
     ws.freeze_panes = "D2"
 
-    # ─── シート2：未分類発言 ───
     ws2 = wb.create_sheet("未分類発言")
     ws2.append([
-        "参加者", "発言テキスト", "開始時刻",
-        "favorite", "quote", "exclude", "needs_review",
+        "interview_id",
+        "参加者",
+        "実施日",
+        "segment_id",
+        "発言テキスト",
+        "開始時刻",
+        "speaker_label",
+        "favorite",
+        "quote",
+        "exclude",
+        "needs_review",
+        "mapping_state",
     ])
+    for cell in ws2[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = _HEADER_FILL
+
     for iv in interviews:
         p = iv.participant
-        code = p.participant_code if p else "?"
-        for seg in iv.segments:
-            if seg.speaker_role != "respondent":
+        code = p.participant_code if p and p.participant_code else "?"
+        date = iv.interview_date.isoformat() if iv.interview_date else ""
+        for seg in sorted(iv.segments, key=lambda s: (s.seq, s.id or 0)):
+            if seg.speaker_role != "respondent" or not _is_unclassified(seg):
                 continue
-            if not seg.utterance_mappings:
-                continue
-            if all(um.is_unclassified for um in seg.utterance_mappings):
-                flag_map = _segment_flag_map(seg)
-                ws2.append([code, seg.text,
-                             _fmt_time(seg.start_sec) if seg.start_sec else "",
-                             "true" if flag_map["favorite"] else "false",
-                             "true" if flag_map["quote"] else "false",
-                             "true" if flag_map["exclude"] else "false",
-                             "true" if flag_map["needs_review"] else "false",
-                             ])
+            flag_map = _segment_flag_map(seg)
+            mapping_state = "no_mapping" if not seg.utterance_mappings else "unclassified"
+            ws2.append([
+                iv.id,
+                code,
+                date,
+                seg.id,
+                seg.text,
+                _fmt_time(seg.start_sec) if seg.start_sec is not None else "",
+                seg.speaker_label or "",
+                "true" if flag_map["favorite"] else "false",
+                "true" if flag_map["quote"] else "false",
+                "true" if flag_map["exclude"] else "false",
+                "true" if flag_map["needs_review"] else "false",
+                mapping_state,
+            ])
 
-    # 保存
-    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ws2.freeze_panes = "A2"
+    ws2.auto_filter.ref = ws2.dimensions
+    for col, width in {
+        "A": 12, "B": 14, "C": 12, "D": 12, "E": 60, "F": 12,
+        "G": 18, "H": 11, "I": 9, "J": 9, "K": 14, "L": 16,
+    }.items():
+        ws2.column_dimensions[col].width = width
+    for row_cells in ws2.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"整形シート_{project.name}_{ts}.xlsx"
-    out_dir  = os.path.join(config.OUTPUT_DIR, str(project_id))
+    out_dir = os.path.join(config.OUTPUT_DIR, str(project_id))
     os.makedirs(out_dir, exist_ok=True)
     full_path = os.path.join(out_dir, filename)
     wb.save(full_path)
