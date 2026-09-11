@@ -45,12 +45,14 @@ $doSafe = $false
 $doFlags = $false
 $doIntegrated = $false
 $doIntegratedPreview = $IntegratedPreview
+$doAnalysisReview = $false
 
 if ($AllLocal) {
     $doSafe = $true
     $doFlags = $true
     $doIntegrated = $true
     $doIntegratedPreview = $true
+    $doAnalysisReview = $true
 }
 
 $hasAnyFlag = $IntegratedPreview -or $Mapping -or $Analysis -or $Transcription -or $Outputs -or $AllPaid -or $AllLocal
@@ -76,6 +78,9 @@ if ($doFlags) {
 if ($doIntegrated) {
     Invoke-Check -Name "Integrated Analysis No-AI Check" -ScriptPath (Join-Path $scriptDir "check_integrated_analysis.ps1") -Paid:$false
     Invoke-Check -Name "Integrated Analysis CLI Guard Check" -ScriptPath (Join-Path $scriptDir "check_integrated_analysis_cli_guards.ps1") -Paid:$false
+}
+if ($doAnalysisReview) {
+    Invoke-Check -Name "AI Analysis Review/Export Check" -ScriptPath (Join-Path $scriptDir "check_analysis_review.ps1") -Paid:$false
 }
 if ($Mapping) {
     Invoke-Check -Name "Mapping Smoke Check" -ScriptPath (Join-Path $scriptDir "check_mapping.ps1") -Paid:$true
