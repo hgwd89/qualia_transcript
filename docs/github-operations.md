@@ -33,6 +33,7 @@ Do not make these required by default unless the PR explicitly targets them:
 - Bulk Word or Excel output generation checks.
 - Checks that require private local fixture data.
 - Manual local-data-integrity checks that inspect an existing local database.
+- The broader `-AllLocal` suite; it is a useful manual preflight but is intentionally separate from the minimal required CI gate.
 
 ## Safe Check Policy
 
@@ -48,9 +49,11 @@ Safe checks must not:
 
 If a check violates one of these rules, it belongs in a manual or paid/API category, not in required CI.
 
-The safe workflow intentionally runs only `scripts/check_safe.ps1`. Do not add mapping, analysis, transcription, or output-generation checks to this workflow.
+The required safe workflow intentionally runs only `scripts/check_safe.ps1`. Do not add mapping, analysis, transcription, or output-generation checks to this required workflow.
 
-`scripts/check_local_data_integrity.ps1` is a manual read-only local database check. It is useful for validating a research workstation, but it depends on local data and must not be a required CI check.
+`scripts/check_all.ps1 -AllLocal` is a broader non-paid local preflight using self-contained temporary fixtures/directories where applicable. It remains manual/non-required so required CI stays small and does not expand into output-generation or broader integration coverage.
+
+`scripts/check_local_data_integrity.ps1` is a separate manual read-only local research-data check. It can compare structural integrity, minimum counts, source-segment fingerprints, and raw transcript snapshot hashes against an optional baseline. It depends on local data and must not be a required CI check.
 
 ## Paid/API and Whisper Checks
 
@@ -80,6 +83,8 @@ Before running output checks:
 - inspect `git status --short` after the run
 - never stage generated output files
 
+The self-contained output-flag smoke used by `-AllLocal` writes only to a temporary output directory. Manual production-like output checks remain opt-in.
+
 ## Raw Transcript and Segment Protection
 
 Treat these as high-risk areas:
@@ -105,11 +110,13 @@ Secrets must remain in GitHub Secrets or local `.env`, never in repository files
 Before merge, verify that these are not tracked:
 
 - `.env`
+- `instance/`
 - `uploads/`
 - `outputs/`
 - `outputs/raw_transcripts/`
 - `*.db`
 - `*.db-journal`
+- `*.sqlite3-journal`
 - `logs/*.log`
 - generated Word, Excel, CSV, transcript, or analysis output files
 
@@ -161,7 +168,8 @@ Before merging to `master`:
 
 - PR has a clear issue or acceptance criteria.
 - Changed files match the stated purpose.
-- Safe checks passed.
+- `safe-smoke` passed on the current PR head.
+- Relevant manual checks were run where the environment permits them.
 - Paid/API checks were not run unless explicitly requested.
 - Generated files and secrets are not staged.
 - Raw transcript snapshots and `Segment.text` were not modified unless explicitly approved.
