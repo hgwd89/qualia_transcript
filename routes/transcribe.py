@@ -6,6 +6,7 @@ from models import db
 from models.interview import Interview, Transcription
 from models.processing_job import ProcessingJob
 from models.project import Project
+from services.job_conflicts import find_conflicting_active_job
 from services.processing_jobs import (
     create_or_get_active_job,
     launch_job_worker,
@@ -42,6 +43,14 @@ def _queued_response(job: ProcessingJob, created: bool, pid: int | None = None):
     }), 202
 
 
+def _conflict_response(conflict: ProcessingJob):
+    return jsonify({
+        "ok": False,
+        "error": "別の処理ジョブが実行中です。完了または失敗後に再実行してください。",
+        "conflicting_job": conflict.to_dict(),
+    }), 409
+
+
 @bp.route("/api/interviews/<int:interview_id>/transcribe", methods=["POST"])
 def start_transcription(interview_id):
     interview = Interview.query.get_or_404(interview_id)
@@ -63,6 +72,10 @@ def start_transcription(interview_id):
             "segment_count": len(interview.segments),
         })
 
+    conflict = find_conflicting_active_job(interview.project_id, "transcribe", interview.id)
+    if conflict:
+        return _conflict_response(conflict)
+
     job, created = create_or_get_active_job(
         project_id=interview.project_id,
         interview_id=interview.id,
@@ -83,6 +96,10 @@ def start_mapping(interview_id):
     if interview.status == "pending" or not interview.segments:
         return jsonify({"error": "先に文字起こしを完了してください"}), 409
 
+    conflict = find_conflicting_active_job(interview.project_id, "map", interview.id)
+    if conflict:
+        return _conflict_response(conflict)
+
     job, created = create_or_get_active_job(
         project_id=interview.project_id,
         interview_id=interview.id,
@@ -100,6 +117,10 @@ def start_mapping(interview_id):
 @bp.route("/api/projects/<int:project_id>/process/all", methods=["POST"])
 def process_all(project_id):
     project = Project.query.get_or_404(project_id)
+    conflict = find_conflicting_active_job(project.id, "project_pipeline", None)
+    if conflict:
+        return _conflict_response(conflict)
+
     job, created = create_or_get_active_job(
         project_id=project.id,
         interview_id=None,
@@ -149,6 +170,10 @@ def processing_job_status(job_id):
 @bp.route("/api/processing-jobs/<int:job_id>/retry", methods=["POST"])
 def retry_processing_job(job_id):
     job = ProcessingJob.query.get_or_404(job_id)
+    conflict = find_conflicting_active_job(job.project_id, job.job_type, job.interview_id)
+    if conflict:
+        return _conflict_response(conflict)
+
     try:
         retry_failed_job(job)
     except ValueError as exc:
