@@ -10,6 +10,9 @@ from services.job_recovery import recover_stale_jobs
 from services.processing_jobs import ACTIVE_STATUSES, JOB_TYPES, _json_dump
 
 
+PROJECT_EXCLUSIVE_JOB_TYPES = {"project_pipeline", "analyze_cross", "analyze_integrated"}
+
+
 @dataclass(frozen=True)
 class JobAdmission:
     job_id: int | None = None
@@ -33,14 +36,28 @@ def _begin_immediate() -> None:
     db.session.execute(text("BEGIN IMMEDIATE"))
 
 
-def _same_scope(job: ProcessingJob, job_type: str, interview_id: int | None) -> bool:
-    return job.job_type == job_type and job.interview_id == interview_id
+def _same_scope(
+    job: ProcessingJob,
+    job_type: str,
+    interview_id: int | None,
+    question_id: int | None,
+) -> bool:
+    return (
+        job.job_type == job_type
+        and job.interview_id == interview_id
+        and job.question_id == question_id
+    )
 
 
-def _conflicts(job: ProcessingJob, job_type: str, interview_id: int | None) -> bool:
-    if _same_scope(job, job_type, interview_id):
+def _conflicts(
+    job: ProcessingJob,
+    job_type: str,
+    interview_id: int | None,
+    question_id: int | None,
+) -> bool:
+    if _same_scope(job, job_type, interview_id, question_id):
         return False
-    if job_type == "project_pipeline" or job.job_type == "project_pipeline":
+    if job_type in PROJECT_EXCLUSIVE_JOB_TYPES or job.job_type in PROJECT_EXCLUSIVE_JOB_TYPES:
         return True
     return interview_id is not None and job.interview_id == interview_id
 
@@ -59,6 +76,8 @@ def admit_processing_job(
     project_id: int,
     job_type: str,
     interview_id: int | None = None,
+    *,
+    question_id: int | None = None,
 ) -> JobAdmission:
     """Atomically reuse, reject, or create one processing job.
 
@@ -75,18 +94,19 @@ def admit_processing_job(
         active = _active_jobs(project_id)
 
         for job in active:
-            if _same_scope(job, job_type, interview_id):
+            if _same_scope(job, job_type, interview_id, question_id):
                 db.session.commit()
                 return JobAdmission(job_id=job.id, created=False)
 
         for job in active:
-            if _conflicts(job, job_type, interview_id):
+            if _conflicts(job, job_type, interview_id, question_id):
                 db.session.commit()
                 return JobAdmission(conflict_job_id=job.id)
 
         job = ProcessingJob(
             project_id=project_id,
             interview_id=interview_id,
+            question_id=question_id,
             job_type=job_type,
             status="pending",
             progress_json=_json_dump({"stage": "queued"}),
@@ -121,8 +141,16 @@ def admit_retry_job(job_id: int) -> JobAdmission:
 
         active = _active_jobs(project_id)
         for job in active:
-            if _conflicts(job, target.job_type, target.interview_id) or _same_scope(
-                job, target.job_type, target.interview_id
+            if _conflicts(
+                job,
+                target.job_type,
+                target.interview_id,
+                target.question_id,
+            ) or _same_scope(
+                job,
+                target.job_type,
+                target.interview_id,
+                target.question_id,
             ):
                 db.session.commit()
                 return JobAdmission(job_id=target.id, conflict_job_id=job.id)
