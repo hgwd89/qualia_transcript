@@ -67,16 +67,10 @@ def _parse_dt(value) -> datetime | None:
 def _stale_reason_from_row(row: dict) -> str | None:
     if row.get("status") not in {"pending", "running"}:
         return None
-    now = datetime.now(timezone.utc)
     created = _parse_dt(row.get("created_at"))
-    started = _parse_dt(row.get("started_at"))
-
-    if not row.get("worker_pid") and created and (now - created).total_seconds() > 300:
-        return "active job has no worker after launch grace period"
-
-    reference = started or created
-    if reference and (now - reference).total_seconds() > 43200:
-        return "active job exceeded maximum runtime"
+    if not row.get("worker_pid") and created:
+        if (datetime.now(timezone.utc) - created).total_seconds() > 300:
+            return "active job has no worker after launch grace period"
     return None
 
 
@@ -90,7 +84,13 @@ def _display_payload(row: dict) -> dict:
             except (TypeError, json.JSONDecodeError):
                 payload[field[:-5]] = None
         payload.pop(field, None)
-    payload["stale_reason"] = _stale_reason_from_row(row)
+    payload["automatic_recovery_reason"] = _stale_reason_from_row(row)
+    payload["operator_note"] = (
+        "PID-backed active jobs are never auto-failed solely because of age; "
+        "confirm the worker stopped before using --apply --yes."
+        if row.get("status") in {"pending", "running"} and row.get("worker_pid")
+        else None
+    )
     return payload
 
 
