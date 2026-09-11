@@ -11,6 +11,7 @@ MOD_TEXT = "では最初に、普段のスキンケアについて教えてく�
 MAPPED_TEXT_1 = "毎晩、化粧水のあとに保湿クリームを使っています。"
 UNMAPPED_TEXT = "冬は特に乾燥するので、量を増やします。"
 MAPPED_TEXT_2 = "朝も保湿しますが、夜より少なめです。"
+MULTI_FLOW_TEXT = "別フローでは購入時の比較行動について話しました。"
 
 
 def check(name: str, ok: bool, detail: str = "") -> int:
@@ -80,11 +81,15 @@ def main() -> int:
                 db.session.flush()
 
                 flow = InterviewFlow(project_id=project.id, title="本番想定フロー")
-                db.session.add(flow)
+                flow2 = InterviewFlow(project_id=project.id, title="追加フロー")
+                db.session.add_all([flow, flow2])
                 db.session.flush()
+
                 section = InterviewFlowSection(flow_id=flow.id, title="基本行動", seq=1)
-                db.session.add(section)
+                section2 = InterviewFlowSection(flow_id=flow2.id, title="購入行動", seq=1)
+                db.session.add_all([section, section2])
                 db.session.flush()
+
                 question = InterviewFlowQuestion(
                     section_id=section.id,
                     question_code="Q1",
@@ -93,7 +98,15 @@ def main() -> int:
                     is_key_question=True,
                     seq=1,
                 )
-                db.session.add(question)
+                question2 = InterviewFlowQuestion(
+                    section_id=section2.id,
+                    question_code="QX1",
+                    question_text="購入時に何を比較しますか",
+                    question_type="open",
+                    is_key_question=True,
+                    seq=1,
+                )
+                db.session.add_all([question, question2])
                 db.session.flush()
 
                 iv1 = Interview(
@@ -112,7 +125,15 @@ def main() -> int:
                     interviewer_name="モデレーターA",
                     status="mapped",
                 )
-                db.session.add_all([iv1, iv2])
+                iv3 = Interview(
+                    project_id=project.id,
+                    participant_id=participant.id,
+                    flow_id=flow2.id,
+                    interview_date=date(2026, 9, 3),
+                    interviewer_name="モデレーターB",
+                    status="mapped",
+                )
+                db.session.add_all([iv1, iv2, iv3])
                 db.session.flush()
 
                 s_mod = Segment(
@@ -154,7 +175,17 @@ def main() -> int:
                     text=MAPPED_TEXT_2,
                     seq=1,
                 )
-                db.session.add_all([s_mod, s_mapped1, s_unmapped, s_mapped2])
+                s_flow2 = Segment(
+                    interview_id=iv3.id,
+                    participant_id=participant.id,
+                    speaker_label="SPEAKER_01",
+                    speaker_role="respondent",
+                    start_sec=1.0,
+                    end_sec=7.0,
+                    text=MULTI_FLOW_TEXT,
+                    seq=1,
+                )
+                db.session.add_all([s_mod, s_mapped1, s_unmapped, s_mapped2, s_flow2])
                 db.session.flush()
 
                 db.session.add_all([
@@ -168,6 +199,13 @@ def main() -> int:
                     UtteranceMapping(
                         segment_id=s_mapped2.id,
                         question_id=question.id,
+                        mapped_by="manual",
+                        confidence=1.0,
+                        is_unclassified=False,
+                    ),
+                    UtteranceMapping(
+                        segment_id=s_flow2.id,
+                        question_id=question2.id,
                         mapped_by="manual",
                         confidence=1.0,
                         is_unclassified=False,
@@ -190,6 +228,7 @@ def main() -> int:
                     "project": project.id,
                     "iv1": iv1.id,
                     "iv2": iv2.id,
+                    "iv3": iv3.id,
                     "s_mod": s_mod.id,
                     "s_mapped1": s_mapped1.id,
                     "s_unmapped": s_unmapped.id,
@@ -198,7 +237,7 @@ def main() -> int:
                 }
                 baseline = {
                     s.id: s.text
-                    for s in (s_mod, s_mapped1, s_unmapped, s_mapped2)
+                    for s in (s_mod, s_mapped1, s_unmapped, s_mapped2, s_flow2)
                 }
 
                 gf_word = generate_verbatim(iv1.id)
@@ -222,15 +261,20 @@ def main() -> int:
             header_values = [str(c.value or "") for c in ws[1]]
             iv1_headers = [i for i, v in enumerate(header_values, start=1) if f"Interview ID={ids['iv1']}" in v]
             iv2_headers = [i for i, v in enumerate(header_values, start=1) if f"Interview ID={ids['iv2']}" in v]
+            iv3_headers = [i for i, v in enumerate(header_values, start=1) if f"Interview ID={ids['iv3']}" in v]
             failures += check("formatted sheet keeps first interview", len(iv1_headers) == 2, str(iv1_headers))
             failures += check("formatted sheet keeps second interview for same participant", len(iv2_headers) == 2, str(iv2_headers))
+            failures += check("formatted sheet keeps interview on second flow", len(iv3_headers) == 2, str(iv3_headers))
 
             q_row = None
+            q2_row = None
             for row in range(2, ws.max_row + 1):
                 if ws.cell(row, 2).value == "Q1":
                     q_row = row
-                    break
+                if ws.cell(row, 2).value == "QX1":
+                    q2_row = row
             failures += check("formatted sheet Q1 row exists", q_row is not None)
+            failures += check("formatted sheet second-flow question row exists", q2_row is not None)
             if q_row is not None and iv1_headers and iv2_headers:
                 failures += check(
                     "first interview mapped text preserved",
@@ -239,6 +283,15 @@ def main() -> int:
                 failures += check(
                     "second interview mapped text preserved",
                     MAPPED_TEXT_2 in str(ws.cell(q_row, iv2_headers[0]).value or ""),
+                )
+            if q2_row is not None and iv3_headers:
+                failures += check(
+                    "second-flow mapped text preserved",
+                    MULTI_FLOW_TEXT in str(ws.cell(q2_row, iv3_headers[0]).value or ""),
+                )
+                failures += check(
+                    "second-flow section is disambiguated",
+                    "追加フロー" in str(ws.cell(q2_row, 1).value or ""),
                 )
 
             ws_un = wb["未分類発言"]
