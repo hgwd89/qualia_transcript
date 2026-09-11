@@ -108,6 +108,16 @@ def _run_migrations(app):
                     db.session.execute(text(stmt))
                     db.session.commit()
 
+        inspector = sa_inspect(db.engine)
+        existing_tables = set(inspector.get_table_names())
+        if "processing_jobs" in existing_tables:
+            job_cols = {c["name"] for c in inspector.get_columns("processing_jobs")}
+            if "question_id" not in job_cols:
+                db.session.execute(text(
+                    "ALTER TABLE processing_jobs ADD COLUMN question_id INTEGER"
+                ))
+                db.session.commit()
+
 
 def create_app():
     app = Flask(__name__)
