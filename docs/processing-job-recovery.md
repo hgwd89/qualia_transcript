@@ -6,22 +6,19 @@ Qualia Transcript stores long-running transcription, mapping, analysis, and proj
 
 Before a new conflicting job is accepted, the app checks active jobs in the same project.
 
-An active job is automatically moved to `failed` when either condition is true:
+An active `pending` or `running` job is automatically moved to `failed` only when it still has no worker PID more than 5 minutes after creation.
 
-- `pending` or `running` has no worker PID for more than 5 minutes.
-- `pending` or `running` has remained active for more than 12 hours.
-
-The 5-minute grace covers launcher/worker failures without racing normal startup. The conservative 12-hour ceiling avoids treating a legitimate long transcription as dead while ensuring a crashed/rebooted worker cannot block the project forever. Recovered jobs retain an error message beginning with `job recovery:` and can be retried through the normal job retry path.
+The 5-minute grace covers launcher/worker failures without racing normal startup. A PID-backed active job is deliberately never failed merely because it is old: without a trustworthy worker-identity/liveness signal, age-based recovery could incorrectly release a legitimate long-running operation and allow duplicate writes. Recovered no-worker jobs retain an error message beginning with `job recovery:` and can be retried through the normal job retry path.
 
 ## Immediate operator recovery
 
-If the app/worker was explicitly stopped or the PC restarted and you do not want to wait for the automatic threshold, inspect the job first:
+If the app/worker was explicitly stopped or the PC restarted and the row still contains a worker PID, inspect the job first:
 
 ```powershell
 python scripts/recover_processing_job.py --job-id 123
 ```
 
-The inspection path opens SQLite with `mode=ro`. It does not call the application factory, run migrations, create tables, or change job state.
+The inspection path opens SQLite with `mode=ro`. It does not call the application factory, run migrations, create tables, or change job state. PID-backed active jobs include an operator note explaining that they require explicit confirmation before recovery.
 
 After you have confirmed the worker is no longer running, explicitly mark the job failed:
 
