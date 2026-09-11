@@ -8,9 +8,10 @@ class Segment(db.Model):
     id               = db.Column(db.Integer, primary_key=True)
     transcription_id = db.Column(db.Integer, db.ForeignKey("transcriptions.id"))
     interview_id     = db.Column(db.Integer, db.ForeignKey("interviews.id"), nullable=False)
-    participant_id   = db.Column(db.Integer, db.ForeignKey("participants.id"))  # NULL = インタビュアー等
+    participant_id   = db.Column(db.Integer, db.ForeignKey("participants.id"))  # NULL = モデレーター等
     speaker_label    = db.Column(db.Text)       # SPEAKER_00, SPEAKER_01 ...
-    # respondent / interviewer / unknown
+    # moderator / respondent / observer / unknown
+    # Legacy rows may still contain "interviewer"; new writes use "moderator".
     speaker_role     = db.Column(db.Text, default="unknown")
     start_sec        = db.Column(db.Float)
     end_sec          = db.Column(db.Float)
