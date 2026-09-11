@@ -160,8 +160,9 @@ def main() -> int:
                         current_claimed
                         and mapped_count == 1
                         and len(mappings_after_current) == 1
-                        and mappings_after_current[0].id != old_mapping_id
+                        and mappings_after_current[0].mapped_by == "ai"
                         and mappings_after_current[0].question_id == question_id
+                        and mappings_after_current[0].is_unclassified is False
                         and iv_after_current.status == "mapped",
                         f"count={mapped_count} status={iv_after_current.status}",
                     )
