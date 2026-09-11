@@ -1090,7 +1090,7 @@ def auto_assign_speaker_roles(interview_id: int) -> None:
     """
     DI インタビュー向けヒューリスティック話者ロール自動割り当て。
     - 1話者: 全員 respondent
-    - 2話者以上: 発話語数が最も少ない話者 = interviewer、それ以外 = respondent
+    - 2話者以上: 発話語数が最も少ない話者 = moderator、それ以外 = respondent
     """
     segments = Segment.query.filter_by(interview_id=interview_id).all()
     if not segments:
@@ -1111,9 +1111,9 @@ def auto_assign_speaker_roles(interview_id: int) -> None:
         for seg in segments:
             seg.speaker_role = "respondent"
     else:
-        interviewer_label = min(word_counts, key=word_counts.get)
+        moderator_label = min(word_counts, key=word_counts.get)
         for seg in segments:
             label = seg.speaker_label or "SPEAKER_00"
-            seg.speaker_role = "interviewer" if label == interviewer_label else "respondent"
+            seg.speaker_role = "moderator" if label == moderator_label else "respondent"
 
     db.session.commit()

@@ -36,6 +36,7 @@ def main() -> int:
             from models.interview import Interview
             from models.project import Project
             from models.segment import Segment
+            from services.transcription import auto_assign_speaker_roles
 
             app = create_app()
             app.config["TESTING"] = True
@@ -56,9 +57,48 @@ def main() -> int:
                     text="質問です。",
                 )
                 db.session.add(segment)
+
+                auto_interview = Interview(project_id=project.id, status="transcribed")
+                db.session.add(auto_interview)
+                db.session.flush()
+                db.session.add_all([
+                    Segment(
+                        interview_id=auto_interview.id,
+                        seq=1,
+                        speaker_label="SPEAKER_SHORT",
+                        speaker_role="unknown",
+                        text="短い",
+                    ),
+                    Segment(
+                        interview_id=auto_interview.id,
+                        seq=2,
+                        speaker_label="SPEAKER_LONG",
+                        speaker_role="unknown",
+                        text="これは 長い 回答 です",
+                    ),
+                ])
                 db.session.commit()
                 interview_id = interview.id
                 segment_id = segment.id
+                auto_interview_id = auto_interview.id
+
+                auto_assign_speaker_roles(auto_interview_id)
+                auto_segments = (
+                    Segment.query
+                    .filter_by(interview_id=auto_interview_id)
+                    .order_by(Segment.seq.asc())
+                    .all()
+                )
+                auto_roles = {seg.speaker_label: seg.speaker_role for seg in auto_segments}
+                failures += check(
+                    "auto assignment stores canonical moderator role",
+                    auto_roles == {
+                        "SPEAKER_SHORT": "moderator",
+                        "SPEAKER_LONG": "respondent",
+                    }
+                    and all(seg.speaker_role != "interviewer" for seg in auto_segments),
+                    str(auto_roles),
+                )
 
             status_response = client.get(f"/api/interviews/{interview_id}/status")
             status_data = status_response.get_json() or {}
