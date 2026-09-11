@@ -991,6 +991,9 @@ def run_openai_transcription(
         }
 
     except Exception as e:
+        # Never let uncommitted Segment rows hitchhike on the error-state commit.
+        # Completed long-audio chunks were committed earlier and remain auditable.
+        db.session.rollback()
         tr.status = "error"
         tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()
@@ -1074,6 +1077,9 @@ def run_local_whisper_transcription(
         return {"segment_count": seg_count, "word_count": word_count}
 
     except Exception as e:
+        # Never let uncommitted Segment rows hitchhike on the error-state commit.
+        # Completed long-audio chunks were committed earlier and remain auditable.
+        db.session.rollback()
         tr.status = "error"
         tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()
