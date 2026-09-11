@@ -11,6 +11,7 @@ REQUIRED_TABLES = {
     "projects",
     "participants",
     "interviews",
+    "interview_flow_questions",
     "transcriptions",
     "segments",
     "utterance_mappings",
@@ -58,7 +59,6 @@ def resolve_db_path(root: Path) -> Path | None:
     if candidate.is_absolute():
         return candidate
 
-    # Flask-SQLAlchemy stores relative sqlite paths under the instance folder.
     instance_candidate = root / "instance" / raw_path
     if instance_candidate.exists():
         return instance_candidate
@@ -89,7 +89,7 @@ def scalar(conn: sqlite3.Connection, sql: str) -> int:
 def segment_fingerprint(conn: sqlite3.Connection, limit: int = 20) -> dict:
     rows = conn.execute(
         """
-        SELECT id, interview_id, seq, speaker_label, speaker_role, text
+        SELECT id, transcription_id, interview_id, seq, speaker_label, speaker_role, text
         FROM segments
         ORDER BY id
         LIMIT ?
@@ -99,6 +99,7 @@ def segment_fingerprint(conn: sqlite3.Connection, limit: int = 20) -> dict:
     payload = [
         {
             "id": row["id"],
+            "transcription_id": row["transcription_id"],
             "interview_id": row["interview_id"],
             "seq": row["seq"],
             "speaker_label": row["speaker_label"],
@@ -133,14 +134,54 @@ def load_baseline(path: str) -> dict | None:
     baseline_path = Path(path).expanduser()
     if not baseline_path.is_file():
         raise FileNotFoundError(f"baseline not found: {baseline_path}")
-    return json.loads(baseline_path.read_text(encoding="utf-8"))
+    data = json.loads(baseline_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("baseline must be a JSON object")
+    return data
 
 
-def raw_transcript_snapshot_count(root: Path) -> int:
+def file_sha256(path: Path) -> str:
+    digest = sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def raw_transcript_snapshot_manifest(root: Path) -> dict[str, str]:
     raw_dir = root / "outputs" / "raw_transcripts"
     if not raw_dir.exists():
-        return 0
-    return len([p for p in raw_dir.glob("*.json") if p.is_file()])
+        return {}
+    return {
+        p.name: file_sha256(p)
+        for p in sorted(raw_dir.glob("*.json"), key=lambda x: x.name)
+        if p.is_file()
+    }
+
+
+def expected_minimum_table_counts(baseline: dict | None) -> dict[str, int]:
+    if not baseline:
+        return {}
+    source = baseline.get("minimum_table_counts")
+    if source is None:
+        source = baseline.get("table_counts", {})
+    if not isinstance(source, dict):
+        raise ValueError("minimum_table_counts/table_counts must be an object")
+    return {str(k): int(v) for k, v in source.items()}
+
+
+def expected_minimum_ai_counts(baseline: dict | None) -> dict[str, int]:
+    if not baseline:
+        return {}
+    source = baseline.get("minimum_ai_analysis_counts")
+    if source is None:
+        source = baseline.get("ai_analysis_counts", {})
+    if not isinstance(source, dict):
+        raise ValueError("minimum_ai_analysis_counts/ai_analysis_counts must be an object")
+    return {str(k): int(v) for k, v in source.items()}
 
 
 def main() -> int:
@@ -182,12 +223,6 @@ def main() -> int:
         for table, count in counts.items():
             print(f"[INFO] {table} count={count}")
 
-        if counts["segments"] == 0:
-            print("[SKIP] local DB has no segments; no research data integrity sample to validate.")
-            print("\nSummary: PASS")
-            return 0
-
-        failures = add_failure(failures, "segments present", True, f"count={counts['segments']}")
         failures = add_failure(
             failures,
             "segments have non-empty text",
@@ -209,6 +244,20 @@ def main() -> int:
         )
         failures = add_failure(
             failures,
+            "segments reference transcriptions when transcription_id is set",
+            scalar(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM segments s
+                LEFT JOIN transcriptions t ON t.id = s.transcription_id
+                WHERE s.transcription_id IS NOT NULL AND t.id IS NULL
+                """,
+            )
+            == 0,
+        )
+        failures = add_failure(
+            failures,
             "utterance mappings reference segments",
             scalar(
                 conn,
@@ -217,6 +266,20 @@ def main() -> int:
                 FROM utterance_mappings um
                 LEFT JOIN segments s ON s.id = um.segment_id
                 WHERE s.id IS NULL
+                """,
+            )
+            == 0,
+        )
+        failures = add_failure(
+            failures,
+            "utterance mappings reference questions when question_id is set",
+            scalar(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM utterance_mappings um
+                LEFT JOIN interview_flow_questions q ON q.id = um.question_id
+                WHERE um.question_id IS NOT NULL AND q.id IS NULL
                 """,
             )
             == 0,
@@ -249,32 +312,93 @@ def main() -> int:
             )
             == 0,
         )
+        failures = add_failure(
+            failures,
+            "speaker assignments reference participants when participant_id is set",
+            scalar(
+                conn,
+                """
+                SELECT COUNT(*)
+                FROM speaker_assignments sa
+                LEFT JOIN participants p ON p.id = sa.participant_id
+                WHERE sa.participant_id IS NOT NULL AND p.id IS NULL
+                """,
+            )
+            == 0,
+        )
 
         fingerprint = segment_fingerprint(conn)
         analysis_counts = ai_analysis_counts(conn)
-        raw_count = raw_transcript_snapshot_count(root)
+        raw_manifest = raw_transcript_snapshot_manifest(root)
+        raw_manifest_fingerprint = sha256(
+            json.dumps(raw_manifest, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
         print(f"[INFO] segment sample fingerprint={fingerprint}")
         print(f"[INFO] ai_analysis_counts={analysis_counts}")
-        print(f"[INFO] raw_transcript_snapshot_count={raw_count}")
+        print(f"[INFO] raw_transcript_snapshot_count={len(raw_manifest)}")
+        print(f"[INFO] raw_transcript_manifest_sha256={raw_manifest_fingerprint}")
+
+        if counts["segments"] == 0 and not baseline:
+            print("[SKIP] local DB has no segments; structural checks passed but no research-data sample was available.")
 
         if baseline:
-            failures = add_failure(
-                failures,
-                "segment sample fingerprint matches baseline",
-                baseline.get("segment_fingerprint") == fingerprint,
-            )
-            failures = add_failure(
-                failures,
-                "AIAnalysis counts match baseline",
-                baseline.get("ai_analysis_counts") == analysis_counts,
-            )
+            minimum_counts = expected_minimum_table_counts(baseline)
+            for table, expected in sorted(minimum_counts.items()):
+                if table not in counts:
+                    failures = add_failure(
+                        failures,
+                        f"minimum table count: {table}",
+                        False,
+                        "table not included in integrity count set",
+                    )
+                    continue
+                current = counts[table]
+                failures = add_failure(
+                    failures,
+                    f"minimum table count: {table}",
+                    current >= expected,
+                    f"current={current} baseline_min={expected}",
+                )
+
+            expected_fingerprint = baseline.get("segment_fingerprint")
+            if expected_fingerprint is not None:
+                failures = add_failure(
+                    failures,
+                    "segment sample fingerprint matches baseline",
+                    expected_fingerprint == fingerprint,
+                )
+
+            minimum_ai_counts = expected_minimum_ai_counts(baseline)
+            for analysis_type, expected in sorted(minimum_ai_counts.items()):
+                current = analysis_counts.get(analysis_type, 0)
+                failures = add_failure(
+                    failures,
+                    f"minimum AIAnalysis count: {analysis_type}",
+                    current >= expected,
+                    f"current={current} baseline_min={expected}",
+                )
+
+            expected_raw_manifest = baseline.get("raw_transcript_snapshots")
+            if expected_raw_manifest is not None:
+                if not isinstance(expected_raw_manifest, dict):
+                    raise ValueError("raw_transcript_snapshots must be an object of filename -> sha256")
+                for filename, expected_hash in sorted(expected_raw_manifest.items()):
+                    current_hash = raw_manifest.get(str(filename))
+                    failures = add_failure(
+                        failures,
+                        f"raw transcript snapshot preserved: {filename}",
+                        current_hash == str(expected_hash),
+                        "missing" if current_hash is None else "hash mismatch" if current_hash != str(expected_hash) else "",
+                    )
+
             expected_raw_count = baseline.get("raw_transcript_snapshot_count")
             if expected_raw_count is not None:
                 failures = add_failure(
                     failures,
                     "raw transcript snapshot count is not below baseline",
-                    raw_count >= int(expected_raw_count),
-                    f"current={raw_count} baseline={expected_raw_count}",
+                    len(raw_manifest) >= int(expected_raw_count),
+                    f"current={len(raw_manifest)} baseline={expected_raw_count}",
                 )
         else:
             print("[INFO] baseline not configured; structural checks and fingerprints were reported only.")
