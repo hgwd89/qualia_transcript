@@ -1,0 +1,48 @@
+name: Apply Transcription Error Rollback Patch
+
+on:
+  push:
+    branches:
+      - fix/transcription-final-write
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/transcription-final-write
+          fetch-depth: 0
+
+      - name: Roll back pending segments before error commit
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("services/transcription.py")
+          text = path.read_text(encoding="utf-8")
+          old = '''    except Exception as e:\n        tr.status = "error"\n        tr.error_message = _sanitize_error_message(str(e))\n        db.session.commit()\n        raise\n'''
+          new = '''    except Exception as e:\n        # Never let uncommitted Segment rows hitchhike on the error-state commit.\n        # Completed long-audio chunks were committed earlier and remain auditable.\n        db.session.rollback()\n        tr.status = "error"\n        tr.error_message = _sanitize_error_message(str(e))\n        db.session.commit()\n        raise\n'''
+          if new in text:
+              raise SystemExit(0)
+          count = text.count(old)
+          if count != 2:
+              raise SystemExit(f"expected two transcription error handlers, found {count}")
+          path.write_text(text.replace(old, new), encoding="utf-8")
+
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then
+            echo "No source changes needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add services/transcription.py
+          git commit -m "fix: rollback pending transcription rows on error"
+          git push origin HEAD:fix/transcription-final-write
