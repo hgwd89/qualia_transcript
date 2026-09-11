@@ -117,18 +117,38 @@ def find_completed_mapping_count_for_job(job: ProcessingJob) -> int | None:
     return int(count) if count > 0 else None
 
 
-def find_completed_analysis_for_job(job: ProcessingJob) -> AIAnalysis | None:
-    """Find a participant analysis already committed after this job was created."""
-    if job.job_type != "analyze" or job.interview_id is None or job.created_at is None:
+def find_completed_analysis_for_scope(
+    job: ProcessingJob,
+    analysis_type: str,
+) -> AIAnalysis | None:
+    """Find a scoped analysis committed after this durable job was created.
+
+    This closes the crash window where the AIAnalysis commit succeeded but the
+    worker disappeared before persisting the job's terminal success state.
+    """
+    if job.created_at is None:
         return None
 
-    return (
+    query = (
         AIAnalysis.query
-        .filter_by(
-            interview_id=int(job.interview_id),
-            analysis_type="per_participant",
-        )
+        .filter_by(project_id=int(job.project_id), analysis_type=analysis_type)
         .filter(AIAnalysis.created_at >= job.created_at)
-        .order_by(AIAnalysis.id.desc())
-        .first()
     )
+    if job.interview_id is None:
+        query = query.filter(AIAnalysis.interview_id.is_(None))
+    else:
+        query = query.filter(AIAnalysis.interview_id == int(job.interview_id))
+
+    if job.question_id is None:
+        query = query.filter(AIAnalysis.question_id.is_(None))
+    else:
+        query = query.filter(AIAnalysis.question_id == int(job.question_id))
+
+    return query.order_by(AIAnalysis.id.desc()).first()
+
+
+def find_completed_analysis_for_job(job: ProcessingJob) -> AIAnalysis | None:
+    """Find a participant analysis already committed after this job was created."""
+    if job.job_type != "analyze" or job.interview_id is None:
+        return None
+    return find_completed_analysis_for_scope(job, "per_participant")
