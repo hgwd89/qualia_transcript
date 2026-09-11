@@ -132,6 +132,11 @@ def _mark_job_failed_if_unchanged(
     observed_attempt = int(job.attempt_count or 0)
     observed_pid = job.worker_pid
 
+    if observed_status not in ACTIVE_STATUSES:
+        db.session.expire_all()
+        current = db.session.get(ProcessingJob, job_id)
+        return (current or job), False
+
     query = (
         ProcessingJob.query
         .filter(ProcessingJob.id == job_id)
