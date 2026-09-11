@@ -1,5 +1,6 @@
 import hashlib
 import importlib.util
+import os
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -57,12 +58,29 @@ def main() -> int:
             from models.processing_job import ProcessingJob
             from models.project import Project
             from services.job_conflicts import find_conflicting_active_job
-            from services.job_recovery import recover_stale_jobs, stale_reason
+            import services.job_recovery as recovery
 
             app = create_app()
             app.config["TESTING"] = True
             client = app.test_client()
             now = datetime.now(timezone.utc)
+
+            failures += check(
+                "current Python process is detected as alive",
+                recovery.worker_pid_liveness(os.getpid()) is True,
+            )
+
+            live_pid = 11111
+            dead_pid = 22222
+            unknown_pid = 33333
+            pid_states = {
+                live_pid: True,
+                dead_pid: False,
+                unknown_pid: None,
+            }
+
+            def fake_pid_checker(pid):
+                return pid_states.get(int(pid))
 
             with app.app_context():
                 project = Project(name="Job recovery smoke")
@@ -93,49 +111,107 @@ def main() -> int:
                     created_at=now - timedelta(minutes=6),
                     started_at=now - timedelta(minutes=6),
                 )
-                old_running_with_pid = ProcessingJob(
+                live_running = ProcessingJob(
                     project_id=project_id,
                     job_type="map",
                     status="running",
-                    worker_pid=99999,
+                    worker_pid=live_pid,
                     created_at=now - timedelta(hours=24),
                     started_at=now - timedelta(hours=24),
                 )
-                db.session.add_all([fresh, stale_pending, stale_running_no_pid, old_running_with_pid])
+                dead_running = ProcessingJob(
+                    project_id=project_id,
+                    job_type="map",
+                    status="running",
+                    worker_pid=dead_pid,
+                    created_at=now - timedelta(minutes=1),
+                    started_at=now - timedelta(minutes=1),
+                )
+                unknown_running = ProcessingJob(
+                    project_id=project_id,
+                    job_type="analyze",
+                    status="running",
+                    worker_pid=unknown_pid,
+                    created_at=now - timedelta(hours=24),
+                    started_at=now - timedelta(hours=24),
+                )
+                db.session.add_all([
+                    fresh,
+                    stale_pending,
+                    stale_running_no_pid,
+                    live_running,
+                    dead_running,
+                    unknown_running,
+                ])
                 db.session.commit()
                 fresh_id = fresh.id
                 stale_pending_id = stale_pending.id
                 stale_running_no_pid_id = stale_running_no_pid.id
-                old_running_with_pid_id = old_running_with_pid.id
+                live_running_id = live_running.id
+                dead_running_id = dead_running.id
+                unknown_running_id = unknown_running.id
 
-                failures += check("fresh pending job is not stale", stale_reason(fresh, now=now) is None)
-                failures += check("old pending job without worker is stale", stale_reason(stale_pending, now=now) is not None)
-                failures += check("old running job without worker is stale", stale_reason(stale_running_no_pid, now=now) is not None)
                 failures += check(
-                    "PID-backed running job is never auto-stale by age alone",
-                    stale_reason(old_running_with_pid, now=now) is None,
+                    "fresh pending job is not stale",
+                    recovery.stale_reason(fresh, now=now, pid_checker=fake_pid_checker) is None,
+                )
+                failures += check(
+                    "old pending job without worker is stale",
+                    recovery.stale_reason(stale_pending, now=now, pid_checker=fake_pid_checker) is not None,
+                )
+                failures += check(
+                    "old running job without worker is stale",
+                    recovery.stale_reason(stale_running_no_pid, now=now, pid_checker=fake_pid_checker) is not None,
+                )
+                failures += check(
+                    "confirmed live PID remains protected regardless of age",
+                    recovery.stale_reason(live_running, now=now, pid_checker=fake_pid_checker) is None,
+                )
+                failures += check(
+                    "confirmed dead PID is stale immediately",
+                    recovery.stale_reason(dead_running, now=now, pid_checker=fake_pid_checker)
+                    == "worker process is no longer running",
+                )
+                failures += check(
+                    "inconclusive PID remains protected",
+                    recovery.stale_reason(unknown_running, now=now, pid_checker=fake_pid_checker) is None,
                 )
 
-                recovered = recover_stale_jobs(project_id=project_id)
+                recovered = recovery.recover_stale_jobs(
+                    project_id=project_id,
+                    pid_checker=fake_pid_checker,
+                )
                 recovered_ids = {job.id for job in recovered}
                 failures += check(
-                    "unambiguous stale jobs are recovered",
-                    {stale_pending_id, stale_running_no_pid_id}.issubset(recovered_ids)
-                    and old_running_with_pid_id not in recovered_ids,
+                    "unambiguous stale and dead-worker jobs are recovered",
+                    {stale_pending_id, stale_running_no_pid_id, dead_running_id}.issubset(recovered_ids)
+                    and live_running_id not in recovered_ids
+                    and unknown_running_id not in recovered_ids,
                     str(recovered_ids),
                 )
-                failures += check("fresh active job remains pending", db.session.get(ProcessingJob, fresh_id).status == "pending")
-                failures += check("PID-backed running job remains protected", db.session.get(ProcessingJob, old_running_with_pid_id).status == "running")
                 failures += check(
-                    "recovered job becomes retryable failed state",
-                    db.session.get(ProcessingJob, stale_pending_id).status == "failed"
-                    and "job recovery:" in (db.session.get(ProcessingJob, stale_pending_id).error_message or ""),
+                    "fresh active job remains pending",
+                    db.session.get(ProcessingJob, fresh_id).status == "pending",
+                )
+                failures += check(
+                    "live PID-backed running job remains protected",
+                    db.session.get(ProcessingJob, live_running_id).status == "running",
+                )
+                failures += check(
+                    "inconclusive PID-backed running job remains protected",
+                    db.session.get(ProcessingJob, unknown_running_id).status == "running",
+                )
+                failures += check(
+                    "dead PID-backed job becomes retryable failed state",
+                    db.session.get(ProcessingJob, dead_running_id).status == "failed"
+                    and "worker process is no longer running"
+                    in (db.session.get(ProcessingJob, dead_running_id).error_message or ""),
                 )
                 db.session.remove()
 
             before = file_hash(db_path)
             recovery_cli = load_recovery_cli(repo_root)
-            inspected = recovery_cli._read_job(stale_pending_id)
+            inspected = recovery_cli._read_job(dead_running_id)
             after = file_hash(db_path)
             failures += check(
                 "recovery CLI inspection uses read-only DB access",
@@ -143,55 +219,66 @@ def main() -> int:
                 f"before={before} after={after}",
             )
 
-            with app.app_context():
-                db.session.delete(db.session.get(ProcessingJob, fresh_id))
-                db.session.delete(db.session.get(ProcessingJob, old_running_with_pid_id))
-                conflict_stale = ProcessingJob(
-                    project_id=project_id,
-                    interview_id=interview_id,
-                    job_type="map",
-                    status="pending",
-                    created_at=now - timedelta(minutes=6),
-                )
-                db.session.add(conflict_stale)
-                db.session.commit()
-                conflict_stale_id = conflict_stale.id
+            original_checker = recovery.worker_pid_liveness
+            recovery.worker_pid_liveness = fake_pid_checker
+            try:
+                with app.app_context():
+                    for job_id in (fresh_id, live_running_id, unknown_running_id):
+                        db.session.delete(db.session.get(ProcessingJob, job_id))
 
-                conflict = find_conflicting_active_job(project_id, "analyze", interview_id)
+                    conflict_dead = ProcessingJob(
+                        project_id=project_id,
+                        interview_id=interview_id,
+                        job_type="map",
+                        status="running",
+                        worker_pid=dead_pid,
+                        created_at=now - timedelta(minutes=1),
+                        started_at=now - timedelta(minutes=1),
+                    )
+                    db.session.add(conflict_dead)
+                    db.session.commit()
+                    conflict_dead_id = conflict_dead.id
+
+                    conflict = find_conflicting_active_job(project_id, "analyze", interview_id)
+                    failures += check(
+                        "conflict check clears confirmed dead worker",
+                        conflict is None
+                        and db.session.get(ProcessingJob, conflict_dead_id).status == "failed",
+                    )
+
+                    status_dead = ProcessingJob(
+                        project_id=project_id,
+                        interview_id=interview_id,
+                        job_type="transcribe",
+                        status="running",
+                        worker_pid=dead_pid,
+                        created_at=now - timedelta(minutes=1),
+                        started_at=now - timedelta(minutes=1),
+                    )
+                    db.session.add(status_dead)
+                    db.session.commit()
+                    status_dead_id = status_dead.id
+
+                status_response = client.get(f"/api/interviews/{interview_id}/status")
+                status_payload = status_response.get_json() or {}
                 failures += check(
-                    "conflict check clears stale blocker",
-                    conflict is None and db.session.get(ProcessingJob, conflict_stale_id).status == "failed",
+                    "interview status polling recovers confirmed dead worker",
+                    status_response.status_code == 200
+                    and status_payload.get("latest_job", {}).get("id") == status_dead_id
+                    and status_payload.get("latest_job", {}).get("status") == "failed",
+                    str(status_payload.get("latest_job")),
                 )
 
-                status_stale = ProcessingJob(
-                    project_id=project_id,
-                    interview_id=interview_id,
-                    job_type="transcribe",
-                    status="pending",
-                    created_at=now - timedelta(minutes=6),
+                job_response = client.get(f"/api/processing-jobs/{status_dead_id}")
+                job_payload = job_response.get_json() or {}
+                failures += check(
+                    "job polling returns dead-worker recovered failed state",
+                    job_response.status_code == 200
+                    and job_payload.get("job", {}).get("status") == "failed",
+                    str(job_payload),
                 )
-                db.session.add(status_stale)
-                db.session.commit()
-                status_stale_id = status_stale.id
-
-            status_response = client.get(f"/api/interviews/{interview_id}/status")
-            status_payload = status_response.get_json() or {}
-            failures += check(
-                "interview status polling recovers stale job",
-                status_response.status_code == 200
-                and status_payload.get("latest_job", {}).get("id") == status_stale_id
-                and status_payload.get("latest_job", {}).get("status") == "failed",
-                str(status_payload.get("latest_job")),
-            )
-
-            job_response = client.get(f"/api/processing-jobs/{status_stale_id}")
-            job_payload = job_response.get_json() or {}
-            failures += check(
-                "job polling returns recovered failed state",
-                job_response.status_code == 200
-                and job_payload.get("job", {}).get("status") == "failed",
-                str(job_payload),
-            )
+            finally:
+                recovery.worker_pid_liveness = original_checker
         except Exception as exc:
             failures += check("job recovery smoke", False, f"{type(exc).__name__}: {exc}")
         finally:
