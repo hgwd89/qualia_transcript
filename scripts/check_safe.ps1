@@ -31,4 +31,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] media upload integrity smoke checks passed."
 
+Write-Host "[INFO] Running project deletion lifecycle smoke check..."
+python tests/smoke_project_deletion_lifecycle.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] project deletion lifecycle smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] project deletion lifecycle smoke checks passed."
+
 exit 0
