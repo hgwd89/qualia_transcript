@@ -15,6 +15,7 @@ from services.transcription import (
 
 
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
+_TERMINAL_INTERVIEW_STATUSES = {"analyzed", "done"}
 
 
 def _safe_error(exc: Exception) -> str:
@@ -39,6 +40,11 @@ def _step_error(row: dict, step: str, exc: Exception, *, code: str | None = None
     if code:
         item["code"] = code
     row["steps"].append(item)
+
+
+def _status(interview_id: int) -> str | None:
+    interview = db.session.get(Interview, interview_id)
+    return interview.status if interview else None
 
 
 def run_project_pipeline(job, update_progress) -> dict:
@@ -66,12 +72,22 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         interview = db.session.get(Interview, interview_id)
         if not interview:
-            _step_error(row, "load_interview", RuntimeError("interview disappeared during pipeline"), code="missing_interview")
+            _step_error(
+                row,
+                "load_interview",
+                RuntimeError("interview disappeared during pipeline"),
+                code="missing_interview",
+            )
             results.append(row)
             continue
 
         if interview.status == "error":
-            _step_error(row, "precheck", RuntimeError("interview is already in error status"), code="interview_error_status")
+            _step_error(
+                row,
+                "precheck",
+                RuntimeError("interview is already in error status"),
+                code="interview_error_status",
+            )
             results.append(row)
             continue
 
@@ -123,6 +139,8 @@ def run_project_pipeline(job, update_progress) -> dict:
                     db.session.add(tr)
                     db.session.commit()
                     result = run_transcription(tr.id)
+                    if _status(interview_id) != "transcribed":
+                        raise RuntimeError("transcription did not advance interview status to transcribed")
                     row["steps"].append({
                         "step": "transcribe",
                         "result": result,
@@ -130,7 +148,7 @@ def run_project_pipeline(job, update_progress) -> dict:
                     })
                 except Exception as exc:
                     db.session.rollback()
-                    _step_error(row, "transcribe", exc)
+                    _step_error(row, "transcribe", exc, code="transcription_incomplete")
                     results.append(row)
                     continue
 
@@ -149,10 +167,14 @@ def run_project_pipeline(job, update_progress) -> dict:
         if interview and interview.status == "transcribed":
             try:
                 count = run_mapping(interview.id)
+                if _status(interview_id) != "mapped":
+                    raise RuntimeError(
+                        "mapping did not advance interview status to mapped; verify flow, questions, and respondent segments"
+                    )
                 row["steps"].append({"step": "mapping", "result": count})
             except Exception as exc:
                 db.session.rollback()
-                _step_error(row, "mapping", exc)
+                _step_error(row, "mapping", exc, code="mapping_incomplete")
                 results.append(row)
                 continue
 
@@ -160,10 +182,23 @@ def run_project_pipeline(job, update_progress) -> dict:
         if interview and interview.status == "mapped":
             try:
                 analysis = analyze_interview_summary(interview.id)
+                if _status(interview_id) != "analyzed":
+                    raise RuntimeError("analysis did not advance interview status to analyzed")
                 row["steps"].append({"step": "analyze", "result": analysis.id})
             except Exception as exc:
                 db.session.rollback()
-                _step_error(row, "analyze", exc)
+                _step_error(row, "analyze", exc, code="analysis_incomplete")
+                results.append(row)
+                continue
+
+        final_status = _status(interview_id)
+        if final_status not in _TERMINAL_INTERVIEW_STATUSES:
+            _step_error(
+                row,
+                "finalize",
+                RuntimeError(f"interview remained incomplete with status={final_status}"),
+                code="pipeline_incomplete_status",
+            )
 
         results.append(row)
 
