@@ -12,6 +12,7 @@ from models import db
 from models.analysis import AIAnalysis
 from models.generated_file import GeneratedFile
 from models.project import Project
+from services.file_manager import prepare_output_target, register_generated_file
 
 
 SUMMARY_HEADERS = [
@@ -180,25 +181,18 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"承認済AI分析_{project.name}_{ts}.xlsx"
-    out_dir = os.path.join(config.OUTPUT_DIR, str(project_id))
-    os.makedirs(out_dir, exist_ok=True)
-    full_path = os.path.join(out_dir, filename)
-    wb.save(full_path)
+    target = prepare_output_target(project_id, filename)
+    wb.save(target.full_path)
 
-    rel_path = os.path.join(str(project_id), filename)
     params = {
         "approved_only": True,
         "analysis_count": len(summary_rows) - 1,
         "finding_count": finding_count,
     }
-    gf = GeneratedFile(
+    return register_generated_file(
+        target,
         project_id=project_id,
         file_type="approved_analysis",
         file_format="xlsx",
-        original_filename=filename,
-        stored_path=rel_path,
         generation_params_json=json.dumps(params, ensure_ascii=False),
     )
-    db.session.add(gf)
-    db.session.commit()
-    return gf
