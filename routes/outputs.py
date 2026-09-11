@@ -9,6 +9,7 @@ from services.report_verbatim import generate_verbatim
 from services.report_formatted import generate_formatted_sheet
 from services.report_analysis import generate_analysis_xlsx, generate_analysis_csv
 from services.report_approved_analysis import generate_approved_analysis_xlsx
+from services.file_manager import get_full_path
 
 bp = Blueprint("outputs", __name__)
 
@@ -99,7 +100,10 @@ def gen_approved_analysis(project_id):
 @bp.route("/api/outputs/<int:file_id>/download")
 def download(file_id):
     gf = GeneratedFile.query.get_or_404(file_id)
-    full_path = os.path.join(config.OUTPUT_DIR, gf.stored_path)
+    try:
+        full_path = get_full_path(gf)
+    except ValueError:
+        abort(404)
     if not os.path.isfile(full_path):
         abort(404)
     return send_file(

@@ -15,6 +15,7 @@ from models import db
 from models.generated_file import GeneratedFile
 from models.interview import Interview
 from models.speaker_assignment import SpeakerAssignment
+from services.file_manager import prepare_output_target, register_generated_file
 
 
 ROLE_LABELS = {
@@ -122,20 +123,12 @@ def generate_verbatim(interview_id: int) -> GeneratedFile:
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"発言録_{participant.participant_code if participant else 'unknown'}_{ts}.docx"
-    out_dir = os.path.join(config.OUTPUT_DIR, str(interview.project_id))
-    os.makedirs(out_dir, exist_ok=True)
-    full_path = os.path.join(out_dir, filename)
-    doc.save(full_path)
-
-    rel_path = os.path.join(str(interview.project_id), filename)
-    gf = GeneratedFile(
+    target = prepare_output_target(interview.project_id, filename)
+    doc.save(target.full_path)
+    return register_generated_file(
+        target,
         project_id=project.id,
         interview_id=interview_id,
         file_type="verbatim",
         file_format="docx",
-        original_filename=filename,
-        stored_path=rel_path,
     )
-    db.session.add(gf)
-    db.session.commit()
-    return gf

@@ -17,6 +17,7 @@ from models.generated_file import GeneratedFile
 from models.interview import Interview
 from models.project import Project
 from models.segment import Segment, UtteranceMapping
+from services.file_manager import prepare_output_target, register_generated_file
 
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F3864")
@@ -220,22 +221,14 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"整形シート_{project.name}_{ts}.xlsx"
-    out_dir = os.path.join(config.OUTPUT_DIR, str(project_id))
-    os.makedirs(out_dir, exist_ok=True)
-    full_path = os.path.join(out_dir, filename)
-    wb.save(full_path)
-
-    rel_path = os.path.join(str(project_id), filename)
-    gf = GeneratedFile(
+    target = prepare_output_target(project_id, filename)
+    wb.save(target.full_path)
+    return register_generated_file(
+        target,
         project_id=project_id,
         file_type="formatted_sheet",
         file_format="xlsx",
-        original_filename=filename,
-        stored_path=rel_path,
     )
-    db.session.add(gf)
-    db.session.commit()
-    return gf
 
 
 def _fmt_time(sec: float) -> str:
