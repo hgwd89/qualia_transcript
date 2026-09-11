@@ -42,6 +42,7 @@ def main() -> int:
                 _claim_pending_job,
                 _finish_job_failure,
                 _finish_job_success,
+                assert_job_lease,
                 execute_job,
                 retry_failed_job,
                 update_progress,
@@ -157,7 +158,7 @@ def main() -> int:
                 db.session.commit()
                 progress_id = progress_job.id
                 first, claimed = _claim_pending_job(progress_id, worker_pid=5555)
-                stale_snapshot = SimpleNamespace(id=progress_id, attempt_count=first.attempt_count)
+                first_attempt = first.attempt_count
                 first.status = "failed"
                 first.worker_pid = None
                 first.error_message = "operator recovery"
@@ -165,17 +166,31 @@ def main() -> int:
                 retried = retry_failed_job(first)
                 second, second_claimed = _claim_pending_job(retried.id, worker_pid=6666)
 
+                # Simulate an expired ORM object reloading the newer attempt_count.
+                # The worker's immutable lease token must still remain attempt 1.
+                stale_snapshot = SimpleNamespace(
+                    id=progress_id,
+                    attempt_count=second.attempt_count,
+                    _lease_attempt=first_attempt,
+                )
                 stale_progress_rejected = False
                 try:
                     update_progress(stale_snapshot, "stale_progress")
                 except JobLeaseLost:
                     stale_progress_rejected = True
+                stale_lease_rejected = False
+                try:
+                    assert_job_lease(stale_snapshot)
+                except JobLeaseLost:
+                    stale_lease_rejected = True
+
                 current = db.session.get(ProcessingJob, progress_id)
                 failures += check(
-                    "stale worker progress is fenced",
+                    "stale worker frozen attempt token survives ORM refresh",
                     claimed
                     and second_claimed
                     and stale_progress_rejected
+                    and stale_lease_rejected
                     and current.status == "running"
                     and current.attempt_count == 2
                     and (current.to_dict().get("progress") or {}).get("stage") != "stale_progress",
