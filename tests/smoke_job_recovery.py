@@ -1,3 +1,5 @@
+import hashlib
+import importlib.util
 import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -9,6 +11,21 @@ def check(name: str, ok: bool, detail: str = "") -> int:
     suffix = f": {detail}" if detail else ""
     print(f"[{status}] {name}{suffix}")
     return 0 if ok else 1
+
+
+def file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def load_recovery_cli(repo_root: Path):
+    path = repo_root / "scripts" / "recover_processing_job.py"
+    spec = importlib.util.spec_from_file_location("recover_processing_job", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
 
 
 def main() -> int:
@@ -28,7 +45,8 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="qualia_job_recovery_") as tmp:
         root = Path(tmp)
-        config.DATABASE_URI = f"sqlite:///{(root / 'recovery.db').as_posix()}"
+        db_path = root / "recovery.db"
+        config.DATABASE_URI = f"sqlite:///{db_path.as_posix()}"
         config.UPLOAD_DIR = str(root / "uploads")
         config.OUTPUT_DIR = str(root / "outputs")
 
@@ -61,6 +79,13 @@ def main() -> int:
                     status="pending",
                     created_at=now - timedelta(minutes=6),
                 )
+                stale_running_no_pid = ProcessingJob(
+                    project_id=project_id,
+                    job_type="analyze",
+                    status="running",
+                    created_at=now - timedelta(minutes=6),
+                    started_at=now - timedelta(minutes=6),
+                )
                 stale_running = ProcessingJob(
                     project_id=project_id,
                     job_type="map",
@@ -69,10 +94,11 @@ def main() -> int:
                     created_at=now - timedelta(hours=13),
                     started_at=now - timedelta(hours=13),
                 )
-                db.session.add_all([fresh, stale_pending, stale_running])
+                db.session.add_all([fresh, stale_pending, stale_running_no_pid, stale_running])
                 db.session.commit()
                 fresh_id = fresh.id
                 stale_pending_id = stale_pending.id
+                stale_running_no_pid_id = stale_running_no_pid.id
                 stale_running_id = stale_running.id
 
                 failures += check(
@@ -84,6 +110,10 @@ def main() -> int:
                     stale_reason(stale_pending, now=now) is not None,
                 )
                 failures += check(
+                    "old running job without worker is stale",
+                    stale_reason(stale_running_no_pid, now=now) is not None,
+                )
+                failures += check(
                     "very old running job is stale",
                     stale_reason(stale_running, now=now) is not None,
                 )
@@ -92,7 +122,7 @@ def main() -> int:
                 recovered_ids = {job.id for job in recovered}
                 failures += check(
                     "stale jobs are recovered",
-                    {stale_pending_id, stale_running_id}.issubset(recovered_ids),
+                    {stale_pending_id, stale_running_no_pid_id, stale_running_id}.issubset(recovered_ids),
                     str(recovered_ids),
                 )
                 failures += check(
@@ -105,6 +135,19 @@ def main() -> int:
                     and "job recovery:" in (db.session.get(ProcessingJob, stale_pending_id).error_message or ""),
                 )
 
+                db.session.remove()
+
+            before = file_hash(db_path)
+            recovery_cli = load_recovery_cli(repo_root)
+            inspected = recovery_cli._read_job(stale_pending_id)
+            after = file_hash(db_path)
+            failures += check(
+                "recovery CLI inspection uses read-only DB access",
+                inspected is not None and before == after,
+                f"before={before} after={after}",
+            )
+
+            with app.app_context():
                 # Remove the intentionally fresh project-wide job, then verify a
                 # stale conflicting row is cleared before conflict evaluation.
                 db.session.delete(db.session.get(ProcessingJob, fresh_id))
