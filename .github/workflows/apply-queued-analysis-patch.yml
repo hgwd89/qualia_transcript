@@ -1,0 +1,30 @@
+name: Apply Queued Analysis Patch
+
+on:
+  push:
+    branches:
+      - fix/queued-analysis
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/queued-analysis
+          fetch-depth: 0
+      - name: Apply queued analysis source patch
+        run: python scripts/apply_queued_analysis_patch.py
+      - name: Commit patch
+        shell: bash
+        run: |
+          if git diff --quiet; then exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add services/processing_jobs.py services/analyzer.py templates/analysis/index.html
+          git commit -m "feat: run secondary analyses as durable jobs"
+          git push origin HEAD:fix/queued-analysis
