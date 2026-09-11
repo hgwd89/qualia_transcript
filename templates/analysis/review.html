@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}AI分析承認 | {{ project.name }}{% endblock %}
+
+{% block content %}
+<nav class="text-sm text-gray-400 mb-4">
+  <a href="{{ url_for('projects.detail', project_id=project.id) }}" class="hover:underline">{{ project.name }}</a>
+  <span class="mx-1">/</span>
+  <a href="{{ url_for('analysis_view.index', project_id=project.id) }}" class="hover:underline">分析</a>
+  <span class="mx-1">/</span>
+  <span class="text-gray-700">AI分析承認</span>
+</nav>
+
+<div class="flex items-start justify-between mb-6 gap-4">
+  <div>
+    <h1 class="text-2xl font-bold text-brand-900">AI分析承認</h1>
+    <p class="text-sm text-gray-500 mt-1">正式出力に含めるAI分析を人手で確定します。承認時に根拠引用を原文Segmentへ照合します。</p>
+  </div>
+  <a href="{{ url_for('outputs.index', project_id=project.id) }}"
+     class="text-sm text-gray-500 border border-gray-300 rounded px-3 py-1.5 hover:border-gray-400 transition whitespace-nowrap">
+    出力管理 →
+  </a>
+</div>
+
+<div class="grid grid-cols-3 gap-3 mb-6 max-w-xl">
+  <div class="bg-white border border-gray-200 rounded-lg p-3 text-center">
+    <div class="text-xl font-bold text-gray-700">{{ status_counts.get('draft', 0) }}</div>
+    <div class="text-xs text-gray-500">未承認</div>
+  </div>
+  <div class="bg-white border border-green-200 rounded-lg p-3 text-center">
+    <div class="text-xl font-bold text-green-700">{{ status_counts.get('approved', 0) }}</div>
+    <div class="text-xs text-green-600">承認済み</div>
+  </div>
+  <div class="bg-white border border-red-200 rounded-lg p-3 text-center">
+    <div class="text-xl font-bold text-red-700">{{ status_counts.get('rejected', 0) }}</div>
+    <div class="text-xs text-red-600">却下</div>
+  </div>
+</div>
+
+<div id="status-msg" class="hidden mb-5 p-3 rounded text-sm"></div>
+
+{% if analyses %}
+<div class="space-y-5">
+  {% for item in analyses %}
+  {% set a = item.obj %}
+  {% set c = item.content %}
+  {% set status = a.review_status or 'draft' %}
+  <section class="bg-white rounded-lg border {% if status == 'approved' %}border-green-300{% elif status == 'rejected' %}border-red-300{% else %}border-gray-200{% endif %} overflow-hidden">
+    <div class="px-5 py-3 bg-gray-50 border-b border-gray-200 flex items-start justify-between gap-4">
+      <div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <h2 class="font-semibold text-brand-900">{{ a.title or ('AIAnalysis #' ~ a.id) }}</h2>
+          <span class="text-xs px-2 py-0.5 rounded-full
+            {% if status == 'approved' %}bg-green-100 text-green-700
+            {% elif status == 'rejected' %}bg-red-100 text-red-700
+            {% else %}bg-gray-200 text-gray-700{% endif %}">
+            {{ {'draft':'未承認','approved':'承認済み','rejected':'却下'}.get(status, status) }}
+          </span>
+          <span class="text-xs text-gray-400">{{ a.analysis_type }}</span>
+        </div>
+        <p class="text-xs text-gray-400 mt-1">
+          ID {{ a.id }} · {{ a.created_at.strftime('%Y/%m/%d %H:%M') if a.created_at }}
+          {% if a.model_used %} · {{ a.model_used }}{% endif %}
+        </p>
+      </div>
+      <div class="flex gap-2 shrink-0">
+        <button onclick="reviewAnalysis({{ a.id }}, 'approved')"
+                class="text-xs px-3 py-1.5 rounded bg-green-600 text-white hover:bg-green-700 transition">
+          承認
+        </button>
+        <button onclick="reviewAnalysis({{ a.id }}, 'draft')"
+                class="text-xs px-3 py-1.5 rounded border border-gray-300 text-gray-600 hover:bg-gray-50 transition">
+          未承認へ戻す
+        </button>
+        <button onclick="reviewAnalysis({{ a.id }}, 'rejected')"
+                class="text-xs px-3 py-1.5 rounded border border-red-300 text-red-600 hover:bg-red-50 transition">
+          却下
+        </button>
+      </div>
+    </div>
+
+    <div class="p-5 space-y-4">
+      {% if a.summary_text %}
+      <div>
+        <h3 class="text-xs font-semibold text-gray-500 uppercase mb-1">要約 / 示唆</h3>
+        <p class="text-sm text-gray-800">{{ a.summary_text }}</p>
+      </div>
+      {% endif %}
+
+      {% if c.get('findings') %}
+      <div>
+        <h3 class="text-xs font-semibold text-gray-500 uppercase mb-2">Findings / 根拠</h3>
+        <div class="space-y-3">
+          {% for f in c.findings %}
+          <div class="border-l-4 border-gray-300 pl-4">
+            <p class="text-sm font-medium text-gray-800">{{ loop.index }}. {{ f.point }}</p>
+            <blockquote class="mt-1 text-sm text-gray-600 bg-gray-50 rounded px-3 py-2">{{ f.evidence_quote }}</blockquote>
+            <div class="mt-1 text-xs text-gray-400 flex flex-wrap gap-2">
+              {% if f.participant_codes %}<span>参加者: {{ f.participant_codes | join(', ') }}</span>{% endif %}
+              {% if f.question_codes %}<span>質問: {{ f.question_codes | join(', ') }}</span>{% endif %}
+              {% if f.source_segment_ids %}
+              <span class="text-green-600">source_segment_ids: {{ f.source_segment_ids | join(', ') }}</span>
+              {% else %}
+              <span class="text-orange-600">source_segment_ids: 未確定（承認時に照合）</span>
+              {% endif %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% else %}
+      <p class="text-sm text-orange-600">findings がありません。この分析は承認できません。</p>
+      {% endif %}
+
+      {% if a.review_note %}
+      <div class="text-xs text-gray-500 bg-gray-50 rounded px-3 py-2">レビュー注記: {{ a.review_note }}</div>
+      {% endif %}
+    </div>
+  </section>
+  {% endfor %}
+</div>
+{% else %}
+<div class="text-center py-12 text-gray-400 bg-white rounded-lg border border-dashed border-gray-300">
+  <p class="text-sm">AI分析はまだありません。</p>
+</div>
+{% endif %}
+
+<script>
+const projectId = {{ project.id }};
+
+function showMsg(text, type='info') {
+  const el = document.getElementById('status-msg');
+  el.className = `mb-5 p-3 rounded text-sm flash-${type}`;
+  el.textContent = text;
+  el.classList.remove('hidden');
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+async function reviewAnalysis(analysisId, status) {
+  let note = '';
+  if (status === 'rejected') {
+    note = window.prompt('却下理由（任意）', '') || '';
+  }
+
+  try {
+    const response = await fetch(`/api/projects/${projectId}/analysis/${analysisId}/review`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({status, note}),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      if (response.status === 409 && data.unresolved) {
+        const details = data.unresolved.map(x => `#${x.finding_no}: ${x.reason}`).join(' / ');
+        throw new Error(`${data.error} (${details})`);
+      }
+      throw new Error(data.error || `HTTP ${response.status}`);
+    }
+    showMsg(`レビュー状態を「${status}」へ更新しました`, 'success');
+    setTimeout(() => location.reload(), 600);
+  } catch (e) {
+    showMsg('レビュー更新エラー: ' + e.message, 'error');
+  }
+}
+</script>
+{% endblock %}

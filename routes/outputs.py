@@ -3,10 +3,12 @@ from flask import Blueprint, jsonify, request, send_file, abort, render_template
 import config
 from models.project import Project
 from models.interview import Interview
+from models.analysis import AIAnalysis
 from models.generated_file import GeneratedFile
 from services.report_verbatim import generate_verbatim
 from services.report_formatted import generate_formatted_sheet
 from services.report_analysis import generate_analysis_xlsx, generate_analysis_csv
+from services.report_approved_analysis import generate_approved_analysis_xlsx
 
 bp = Blueprint("outputs", __name__)
 
@@ -20,7 +22,18 @@ def index(project_id):
         .order_by(GeneratedFile.created_at.desc())
         .all()
     )
-    return render_template("outputs/index.html", project=project, files=files)
+    approved_count = AIAnalysis.query.filter_by(
+        project_id=project_id,
+        review_status="approved",
+    ).count()
+    analysis_count = AIAnalysis.query.filter_by(project_id=project_id).count()
+    return render_template(
+        "outputs/index.html",
+        project=project,
+        files=files,
+        approved_count=approved_count,
+        analysis_count=analysis_count,
+    )
 
 
 @bp.route("/api/projects/<int:project_id>/generate/verbatim", methods=["POST"])
@@ -67,6 +80,18 @@ def gen_analysis(project_id):
     try:
         gf = generate_analysis_csv(project_id) if fmt == "csv" else generate_analysis_xlsx(project_id)
         return jsonify({"ok": True, "file_id": gf.id, "filename": gf.original_filename})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@bp.route("/api/projects/<int:project_id>/generate/approved-analysis", methods=["POST"])
+def gen_approved_analysis(project_id):
+    Project.query.get_or_404(project_id)
+    try:
+        gf = generate_approved_analysis_xlsx(project_id)
+        return jsonify({"ok": True, "file_id": gf.id, "filename": gf.original_filename})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

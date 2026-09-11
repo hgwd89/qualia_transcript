@@ -73,6 +73,8 @@ def _run_migrations(app):
             ))
             db.session.commit()
             inspector = sa_inspect(db.engine)
+            existing_tables = set(inspector.get_table_names())
+
         existing_cols = {c["name"] for c in inspector.get_columns("projects")}
         pending = [
             ("method", "ALTER TABLE projects ADD COLUMN method TEXT DEFAULT 'DI'"),
@@ -87,6 +89,23 @@ def _run_migrations(app):
             if col_name not in existing_cols:
                 db.session.execute(text(stmt))
                 db.session.commit()
+
+        inspector = sa_inspect(db.engine)
+        existing_tables = set(inspector.get_table_names())
+        if "ai_analyses" in existing_tables:
+            analysis_cols = {c["name"] for c in inspector.get_columns("ai_analyses")}
+            analysis_pending = [
+                (
+                    "review_status",
+                    "ALTER TABLE ai_analyses ADD COLUMN review_status TEXT NOT NULL DEFAULT 'draft'",
+                ),
+                ("review_note", "ALTER TABLE ai_analyses ADD COLUMN review_note TEXT"),
+                ("reviewed_at", "ALTER TABLE ai_analyses ADD COLUMN reviewed_at DATETIME"),
+            ]
+            for col_name, stmt in analysis_pending:
+                if col_name not in analysis_cols:
+                    db.session.execute(text(stmt))
+                    db.session.commit()
 
 
 def create_app():
