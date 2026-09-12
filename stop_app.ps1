@@ -7,20 +7,45 @@ $pythonExe = Get-QualiaPythonExecutable -ProjectDir $ProjectDir
 $runtime = Get-QualiaRuntimeConfig -ProjectDir $ProjectDir -PythonExe $pythonExe
 $Port = $runtime.Port
 
-function Get-PortProcessInfo {
-    param([int]$LocalPort)
+function Test-ProcessExistsById {
+    param([int]$ProcessId)
+    return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+}
 
-    $conn = Get-NetTCPConnection -State Listen -LocalPort $LocalPort -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $conn) { return $null }
+function Get-ProcessInfoById {
+    param([int]$ProcessId)
 
-    $ownerPid = $conn.OwningProcess
-    $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
-    $wmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerPid" -ErrorAction SilentlyContinue
+    $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $proc) { return $null }
+
+    $startTimeUtcTicks = $null
+    try {
+        $startTimeUtcTicks = [long]$proc.StartTime.ToUniversalTime().Ticks
+    } catch {
+        return $null
+    }
+
+    $wmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if (-not $wmi -or -not $wmi.CommandLine) { return $null }
+
+    # Re-read the process after the CIM lookup. If the PID was reused while the
+    # command line was being read, the start time changes and the snapshot is
+    # rejected rather than combining metadata from two process instances.
+    $verifiedProc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $verifiedProc -or -not $verifiedProc.ProcessName) { return $null }
+    try {
+        $verifiedStartTimeUtcTicks = [long]$verifiedProc.StartTime.ToUniversalTime().Ticks
+    } catch {
+        return $null
+    }
+    if ($verifiedStartTimeUtcTicks -ne $startTimeUtcTicks) { return $null }
 
     [PSCustomObject]@{
-        Pid         = $ownerPid
-        Name        = if ($proc) { $proc.ProcessName } else { "" }
-        CommandLine = if ($wmi) { $wmi.CommandLine } else { "" }
+        Pid               = $ProcessId
+        Name              = $verifiedProc.ProcessName
+        CommandLine       = $wmi.CommandLine
+        StartTimeUtcTicks = $verifiedStartTimeUtcTicks
+        ProcessObject     = $verifiedProc
     }
 }
 
@@ -33,14 +58,38 @@ function Is-QualiaFlaskProcess {
         -ProcessName "$($ProcessInfo.Name)"
 }
 
-$target = Get-PortProcessInfo -LocalPort $Port
-if (-not $target) {
+function Is-SameQualiaProcessInstance {
+    param(
+        [object]$Candidate,
+        [object]$Initial
+    )
+    return Test-QualiaSameProcessInstance `
+        -Candidate $Candidate `
+        -Initial $Initial `
+        -ProjectDir $ProjectDir
+}
+
+$listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+if ($listeners.Count -eq 0) {
     Write-Host "ポート $Port を使用中のプロセスはありません。停止対象なし。" -ForegroundColor Yellow
     exit 0
 }
 
-if (-not (Is-QualiaFlaskProcess -ProcessInfo $target)) {
-    Write-Host "ポート $Port は使用中ですが、このリポジトリの Qualia Transcript プロセスと確認できないため停止しません。" -ForegroundColor Red
+$ownerPids = @($listeners | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+if ($ownerPids.Count -ne 1) {
+    Write-Host "ポート $Port に複数の listener PID があり停止対象を一意に特定できないため停止しません。" -ForegroundColor Red
+    Write-Host "PIDs: $($ownerPids -join ', ')" -ForegroundColor Red
+    exit 1
+}
+
+$target = Get-ProcessInfoById -ProcessId ([int]$ownerPids[0])
+if (-not $target) {
+    Write-Host "ポート $Port の listener process identity を安全に取得できないため停止しません。" -ForegroundColor Red
+    exit 1
+}
+
+if (-not (Is-QualiaFlaskProcess -ProcessInfo $target) -or $null -eq $target.StartTimeUtcTicks) {
+    Write-Host "ポート $Port は使用中ですが、このリポジトリの Qualia Transcript プロセスと安全に確認できないため停止しません。" -ForegroundColor Red
     Write-Host "PID: $($target.Pid), Name: $($target.Name)" -ForegroundColor Red
     if ($target.CommandLine) {
         Write-Host "CommandLine: $($target.CommandLine)" -ForegroundColor Red
@@ -55,26 +104,72 @@ if ($target.CommandLine) {
     Write-Host "CommandLine: $($target.CommandLine)" -ForegroundColor DarkYellow
 }
 
+# Re-read the PID immediately before the first termination signal. If the
+# original process already exited and Windows reused the PID, do not touch the
+# replacement process.
+$preStop = Get-ProcessInfoById -ProcessId $initialPid
+if (-not $preStop) {
+    if (Test-ProcessExistsById -ProcessId $initialPid) {
+        Write-Host "停止操作前にプロセス identity を安全に再確認できなかったため停止しません。" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "停止対象は停止操作前に既に終了しました。" -ForegroundColor Green
+    exit 0
+}
+if (-not (Is-SameQualiaProcessInstance -Candidate $preStop -Initial $target)) {
+    Write-Host "停止操作前に PID のプロセス identity が変化したため停止しません。" -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "Qualia Transcript を停止します (PID: $initialPid)..." -ForegroundColor Cyan
-Stop-Process -Id $initialPid -ErrorAction SilentlyContinue
+Stop-Process -InputObject $preStop.ProcessObject -ErrorAction SilentlyContinue
 
 for ($i = 1; $i -le 10; $i++) {
     Start-Sleep -Seconds 1
-    $after = Get-PortProcessInfo -LocalPort $Port
+    $after = Get-ProcessInfoById -ProcessId $initialPid
     if (-not $after) {
+        if (Test-ProcessExistsById -ProcessId $initialPid) {
+            Write-Host "停止後のプロセス identity を安全に再確認できないため強制停止しません。" -ForegroundColor Red
+            exit 1
+        }
         Write-Host "停止成功。" -ForegroundColor Green
         exit 0
     }
 
-    # Force only the same listener we originally identified, and only when its
-    # command line still points at this repository's absolute app.py path.
-    if ([int]$after.Pid -eq $initialPid -and (Is-QualiaFlaskProcess -ProcessInfo $after)) {
-        Stop-Process -Id $after.Pid -Force -ErrorAction SilentlyContinue
+    # A different start time proves the original process is gone and this PID was
+    # reused. Missing/mismatched app identity with the same start time is not
+    # treated as success because that means revalidation is inconclusive.
+    if ([long]$after.StartTimeUtcTicks -ne [long]$target.StartTimeUtcTicks) {
+        Write-Host "元の Qualia Transcript は終了しました。再利用された PID のプロセスは停止しません。" -ForegroundColor Green
+        exit 0
     }
+    if (-not (Is-SameQualiaProcessInstance -Candidate $after -Initial $target)) {
+        Write-Host "停止後のプロセス identity を安全に再確認できないため強制停止しません。" -ForegroundColor Red
+        exit 1
+    }
+
+    Stop-Process -InputObject $after.ProcessObject -Force -ErrorAction SilentlyContinue
 }
 
-$final = Get-PortProcessInfo -LocalPort $Port
-Write-Host "停止確認に失敗しました。まだポート $Port が使用中です。" -ForegroundColor Red
+$final = Get-ProcessInfoById -ProcessId $initialPid
+if (-not $final) {
+    if (Test-ProcessExistsById -ProcessId $initialPid) {
+        Write-Host "最終プロセス identity を安全に再確認できないため、停止成功とは判定しません。" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "停止成功。" -ForegroundColor Green
+    exit 0
+}
+if ([long]$final.StartTimeUtcTicks -ne [long]$target.StartTimeUtcTicks) {
+    Write-Host "元の Qualia Transcript は終了しました。再利用された PID のプロセスは停止しません。" -ForegroundColor Green
+    exit 0
+}
+if (-not (Is-SameQualiaProcessInstance -Candidate $final -Initial $target)) {
+    Write-Host "最終プロセス identity を安全に再確認できないため、停止成功とは判定しません。" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "停止確認に失敗しました。元の Qualia Transcript プロセスがまだ実行中です。" -ForegroundColor Red
 Write-Host "PID: $($final.Pid), Name: $($final.Name)" -ForegroundColor Red
 if ($final.CommandLine) {
     Write-Host "CommandLine: $($final.CommandLine)" -ForegroundColor Red
