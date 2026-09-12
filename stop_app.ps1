@@ -6,8 +6,6 @@ $ProjectDir = $PSScriptRoot
 $pythonExe = Get-QualiaPythonExecutable -ProjectDir $ProjectDir
 $runtime = Get-QualiaRuntimeConfig -ProjectDir $ProjectDir -PythonExe $pythonExe
 $Port = $runtime.Port
-$RootUrl = $runtime.Url
-$ServiceName = $runtime.ServiceName
 
 function Get-PortProcessInfo {
     param([int]$LocalPort)
@@ -41,14 +39,8 @@ if (-not $target) {
     exit 0
 }
 
-$looksLikeQualiaProcess = Is-QualiaFlaskProcess -ProcessInfo $target
-$looksLikeQualiaEndpoint = Test-QualiaAppEndpoint `
-    -RootUrl $RootUrl `
-    -ServiceName $ServiceName `
-    -TimeoutSec 2
-
-if (-not ($looksLikeQualiaProcess -or $looksLikeQualiaEndpoint)) {
-    Write-Host "ポート $Port は使用中ですが、Qualia Transcript と確認できないため停止しません。" -ForegroundColor Red
+if (-not (Is-QualiaFlaskProcess -ProcessInfo $target)) {
+    Write-Host "ポート $Port は使用中ですが、このリポジトリの Qualia Transcript プロセスと確認できないため停止しません。" -ForegroundColor Red
     Write-Host "PID: $($target.Pid), Name: $($target.Name)" -ForegroundColor Red
     if ($target.CommandLine) {
         Write-Host "CommandLine: $($target.CommandLine)" -ForegroundColor Red
