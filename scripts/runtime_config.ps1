@@ -52,6 +52,27 @@ function Test-QualiaProcessCommandLine {
     return [Regex]::IsMatch($normalizedLine, $argumentPattern)
 }
 
+function Test-QualiaSameProcessInstance {
+    param(
+        [object]$Candidate,
+        [object]$Initial,
+        [string]$ProjectDir
+    )
+
+    if (-not $Candidate -or -not $Initial) { return $false }
+    if ([int]$Candidate.Pid -ne [int]$Initial.Pid) { return $false }
+    if ($null -eq $Candidate.StartTimeUtcTicks -or $null -eq $Initial.StartTimeUtcTicks) {
+        return $false
+    }
+    if ([long]$Candidate.StartTimeUtcTicks -ne [long]$Initial.StartTimeUtcTicks) {
+        return $false
+    }
+    return Test-QualiaProcessCommandLine `
+        -CommandLine "$($Candidate.CommandLine)" `
+        -ProjectDir $ProjectDir `
+        -ProcessName "$($Candidate.Name)"
+}
+
 function Get-QualiaBrowserHost {
     param([string]$HostAddress)
 
