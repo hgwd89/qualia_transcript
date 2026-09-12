@@ -84,11 +84,38 @@ def main() -> int:
             linked_rejected and not (linked_stage / "uploads" / "linked.txt").exists(),
         )
 
+        pending_source = root / "pending-source"
+        pending_stage = root / "pending-stage"
+        pending_source.mkdir()
+        pending_dir = pending_source / "nested"
+        pending_dir.mkdir()
+        link_checks = {"nested": 0}
+
+        def becomes_linked_on_recheck(path):
+            if Path(path).name != "nested":
+                return False
+            link_checks["nested"] += 1
+            return link_checks["nested"] >= 2
+
+        local_backup.is_link_or_reparse = becomes_linked_on_recheck
+        pending_rejected = False
+        try:
+            local_backup._collect_tree(pending_source, "uploads", pending_stage)
+        except ValueError as exc:
+            pending_rejected = "directory changed during collection" in str(exc)
+        finally:
+            local_backup.is_link_or_reparse = original_link_check
+        failures += check(
+            "backup collector revalidates pending directories before traversal",
+            link_checks["nested"] >= 2 and pending_rejected,
+        )
+
         source_text = (repo_root / "services" / "local_backup.py").read_text(encoding="utf-8")
         failures += check(
             "backup collector uses descriptor-fenced copy and rejects unsupported entries",
             "_copy_regular_snapshot_file(source, staged)" in source_text
             and "managed backup tree contains unsupported entry type" in source_text
+            and "managed backup directory changed during collection" in source_text
             and "shutil.copy2(source, staged)" not in source_text,
         )
 
