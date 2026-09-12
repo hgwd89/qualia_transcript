@@ -443,22 +443,31 @@ def update_segment_role(interview_id, segment_id):
     if seg.interview_id != interview.id:
         return jsonify({"ok": False, "error": "segment does not belong to interview"}), 400
 
-    data = request.get_json(force=True, silent=True) or {}
-    speaker_role = str(data.get("speaker_role") or seg.speaker_role or "unknown").strip()
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not data:
+        return jsonify({"ok": False, "error": "valid JSON object is required"}), 400
+    if "speaker_role" not in data and "participant_id" not in data:
+        return jsonify({"ok": False, "error": "no role fields supplied"}), 400
+
+    speaker_role = seg.speaker_role or "unknown"
+    if "speaker_role" in data:
+        speaker_role = str(data.get("speaker_role") or "").strip()
     if speaker_role not in SPEAKER_ROLES:
         return jsonify({"ok": False, "error": "invalid speaker_role"}), 400
 
-    participant_id = data.get("participant_id")
-    if participant_id in (None, ""):
-        participant_id = None
-    else:
-        try:
-            participant_id = int(participant_id)
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "invalid participant_id"}), 400
-        participant = Participant.query.get(participant_id)
-        if not participant or participant.project_id != interview.project_id:
-            return jsonify({"ok": False, "error": "participant does not belong to project"}), 400
+    participant_id = seg.participant_id
+    if "participant_id" in data:
+        participant_id = data.get("participant_id")
+        if participant_id in (None, ""):
+            participant_id = None
+        else:
+            try:
+                participant_id = int(participant_id)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "invalid participant_id"}), 400
+            participant = Participant.query.get(participant_id)
+            if not participant or participant.project_id != interview.project_id:
+                return jsonify({"ok": False, "error": "participant does not belong to project"}), 400
 
     seg.speaker_role = speaker_role
     seg.participant_id = participant_id
