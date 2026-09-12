@@ -31,10 +31,14 @@ function Get-QualiaAppScriptPath {
 function Test-QualiaProcessCommandLine {
     param(
         [string]$CommandLine,
-        [string]$ProjectDir
+        [string]$ProjectDir,
+        [string]$ProcessName = ""
     )
 
     if (-not $CommandLine) { return $false }
+    if ($ProcessName -and -not $ProcessName.ToLowerInvariant().StartsWith("python")) {
+        return $false
+    }
     try {
         $appScript = Get-QualiaAppScriptPath -ProjectDir $ProjectDir
     } catch {
