@@ -112,19 +112,19 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 
 `scripts/check_outputs_flags.ps1` / `tests/smoke_outputs_flags.py` are output-flag reflection checks.
 - OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes on `segment_id=257` flags (create/delete/restore).
-- They verify Word marker (`★引用候補`) and Excel flag columns/values.
-- Keep them out of default safe checks; run only when needed.
+- They create their own temporary SQLite database plus temporary upload/output directories; do not rewrite them to depend on a fixed real-data Segment ID.
+- They verify Word marker (`★引用候補`) and Excel flag columns/values while preserving fixture `Segment.text`.
+- They generate temporary Word/Excel artifacts, so keep them out of the default safe gate; run them through the relevant local/output check when needed.
 
 `scripts/check_flags.ps1` / `tests/smoke_flags.py` are segment-flag checks.
 - OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes (create/delete/restore flags), so they are not fully read-only.
-- Keep them out of default safe checks; run only when needed.
+- They use a self-contained temporary database and temporary runtime directories; they must not mutate the existing research database.
+- Keep them out of the default safe gate; run them through the broader local checks when relevant.
 
 `scripts/check_speaker_assignments.ps1` / `tests/smoke_speaker_assignments.py` are speaker-assignment checks.
 - OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes (upsert/restore speaker assignments).
-- Keep them out of default safe checks; run only when needed.
+- They use a self-contained temporary database and temporary runtime directories; they must not mutate the existing research database.
+- Keep them out of the default safe gate; run them through the broader local checks when relevant.
 
 `scripts/check_all.ps1` is a runner.
 - Default: safe check only.
