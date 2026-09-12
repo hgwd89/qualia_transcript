@@ -8,6 +8,7 @@ if str(ROOT) not in sys.path:
 
 import config
 from services.local_backup import create_backup
+from services.runtime_lock import RuntimeLockError, runtime_lock
 
 
 def main() -> int:
@@ -22,8 +23,14 @@ def main() -> int:
     parser.add_argument("--label", default="manual", help="Short backup label")
     args = parser.parse_args()
 
-    # create_backup performs full manifest/hash/SQLite validation before returning.
-    archive = create_backup(args.destination, label=args.label)
+    try:
+        with runtime_lock("maintenance"):
+            # create_backup performs full manifest/hash/SQLite validation before returning.
+            archive = create_backup(args.destination, label=args.label)
+    except RuntimeLockError as exc:
+        print(f"[FAIL] backup refused while Qualia Transcript or maintenance is active: {exc}")
+        return 3
+
     print(f"[PASS] backup created and verified: {archive}")
     return 0
 
