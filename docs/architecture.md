@@ -106,7 +106,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/storage_paths.py`: shared output/upload path validation, including symlink and Windows reparse/junction rejection below managed roots.
 - `services/local_backup.py`: verified local backup/restore boundary for the application SQLite database, uploads, outputs, manifest/hash validation, staged restore, and rollback.
 - `services/runtime_lock.py`: cross-platform shared/exclusive process-lifetime lock; app and detached workers are shared readers, while backup/applied restore use exclusive maintenance mode.
-- `services/project_deletion.py`: serialized project deletion plus post-commit managed-storage cleanup.
+- `services/project_deletion.py`: serialized project deletion with pre-commit managed-storage quarantine, rollback restoration, and post-commit cleanup of bound storage entries.
 - `services/report_verbatim.py`: Word verbatim report generation.
 - `services/report_formatted.py`: Excel formatted sheet generation.
 - `services/report_analysis.py`: flat utterance/mapping analysis CSV/XLSX generation.
@@ -170,9 +170,9 @@ Reads and registration use the same resolver rather than trusting a previously s
 
 Project deletion is coordinated with durable processing jobs. After stale-job recovery, `services/project_deletion.py` starts a serialized database write transaction before checking active jobs. On SQLite it uses `BEGIN IMMEDIATE`, matching job admission's write reservation, so a new job cannot pass admission between the active-job check and the project deletion commit. Active `pending` or `running` jobs block deletion.
 
-Terminal `ProcessingJob` rows and the ORM-owned project graph are deleted in the database transaction first. Managed filesystem cleanup runs only after the database commit. Cleanup is best-effort: path-resolution or deletion failures are returned as cleanup warnings rather than reported as a failed database deletion.
+Before the project graph is committed as deleted, every pre-existing numeric project-output directory and interview-upload directory is renamed inside its own managed root to a unique non-numeric quarantine path. This rename binds the later filesystem cleanup to the exact storage entry observed before deletion. It applies to normal directories as well as symlinks, Windows junctions, and other reparse entries; link targets are never traversed. If any required quarantine rename fails, the database deletion is aborted. If a later database commit fails, all successfully quarantined entries are renamed back to their original numeric ID paths before the error is returned.
 
-Managed project/interview ID directories are never recursively removed through a symlink, Windows junction, or other reparse point. When an ID path is linked, cleanup removes only the link/reparse entry itself and never traverses its target. This also prevents a deleted project's stale linked path from being inherited if SQLite later reuses the same integer ID.
+After a successful database commit, cleanup removes only the bound quarantine entries and captured processing-job log files. It never recursively deletes an output/upload numeric ID path after commit, because SQLite may already have reused that integer ID for a replacement record. If a numeric ID path reappears after staging, it is left untouched and reported as a cleanup warning. Failure to remove a quarantine entry is also a cleanup warning; the stale data remains under a unique non-numeric name and therefore cannot be inherited through SQLite ID reuse.
 
 Raw transcript snapshots under `outputs/raw_transcripts/` are immutable source snapshots and are outside generic project-deletion cleanup. Deleting a project does not enumerate, unlink, rewrite, or otherwise mutate those snapshots, even after the corresponding transcription rows are removed. Any raw-snapshot purge must be a separate, explicit user-requested operation rather than an implicit side effect of project deletion.
 
