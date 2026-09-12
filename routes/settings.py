@@ -1,5 +1,6 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash
 import config
+from models import db
 from models.setting import AppSetting
 from services.secret_store import (
     SECRET_SETTING_KEYS,
@@ -35,12 +36,17 @@ def index():
                 if not val:
                     continue
                 if key in SECRET_SETTING_KEYS:
-                    set_secret_setting(key, val)
+                    set_secret_setting(key, val, commit=False)
                 else:
-                    AppSetting.set(key, val)
+                    AppSetting.set(key, val, commit=False)
+            db.session.commit()
         except SecretStorageError as exc:
+            db.session.rollback()
             flash(f"秘密設定を安全に保存できませんでした: {exc}", "error")
             return redirect(url_for("settings.index"))
+        except Exception:
+            db.session.rollback()
+            raise
         flash("設定を保存しました", "success")
         return redirect(url_for("settings.index"))
 

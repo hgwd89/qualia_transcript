@@ -171,11 +171,11 @@ def unprotect_secret(stored: str) -> str:
     return _unprotect_windows(stored)
 
 
-def set_secret_setting(key: str, value: str) -> None:
+def set_secret_setting(key: str, value: str, *, commit: bool = True) -> None:
     if key not in SECRET_SETTING_KEYS:
         raise ValueError(f"unsupported secret setting: {key}")
     protected = protect_secret(value)
-    AppSetting.set(key, protected)
+    AppSetting.set(key, protected, commit=commit)
 
 
 def get_secret_setting(key: str, fallback: str = "") -> str:

@@ -17,11 +17,13 @@ class AppSetting(db.Model):
         return row.value if row else default
 
     @classmethod
-    def set(cls, key, value):
+    def set(cls, key, value, *, commit: bool = True):
         row = cls.query.filter_by(key=key).first()
         if row:
             row.value = value
         else:
             row = cls(key=key, value=value)
             db.session.add(row)
-        db.session.commit()
+        if commit:
+            db.session.commit()
+        return row
