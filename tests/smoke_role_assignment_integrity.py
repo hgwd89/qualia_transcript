@@ -43,6 +43,7 @@ def main() -> int:
             from services.report_formatted import (
                 _effective_speaker_role,
                 _respondent_mappings,
+                _respondent_unclassified_segments,
                 _speaker_assignment_maps,
             )
 
@@ -117,11 +118,19 @@ def main() -> int:
                     text="raw respondent text",
                     seq=4,
                 )
+                assigned_unmapped = Segment(
+                    interview_id=interview.id,
+                    speaker_label="ASSIGNED_UNMAPPED",
+                    speaker_role="unknown",
+                    text="assigned zero-mapping respondent text",
+                    seq=5,
+                )
                 db.session.add_all([
                     role_segment,
                     assigned_respondent,
                     assigned_moderator,
                     raw_respondent,
+                    assigned_unmapped,
                 ])
                 db.session.flush()
 
@@ -161,6 +170,12 @@ def main() -> int:
                         speaker_label="ASSIGNED_MOD",
                         speaker_role="moderator",
                     ),
+                    SpeakerAssignment(
+                        interview_id=interview.id,
+                        speaker_label="ASSIGNED_UNMAPPED",
+                        speaker_role="respondent",
+                        participant_id=participant.id,
+                    ),
                 ])
                 db.session.commit()
 
@@ -172,6 +187,7 @@ def main() -> int:
                     "assigned_mapping": mapping_assigned.id,
                     "moderator_mapping": mapping_moderator.id,
                     "raw_mapping": mapping_raw.id,
+                    "assigned_unmapped": assigned_unmapped.id,
                 }
                 baseline_text = role_segment.text
 
@@ -254,6 +270,11 @@ def main() -> int:
                     assignment_map,
                 )
                 mapping_ids = {item.id for item in mapped}
+                unclassified = _respondent_unclassified_segments(
+                    interview,
+                    assignment_map,
+                )
+                unclassified_ids = {item.id for item in unclassified}
 
                 assigned_seg = (
                     Segment.query
@@ -281,6 +302,11 @@ def main() -> int:
                     "raw respondent remains included without assignment",
                     ids["raw_mapping"] in mapping_ids,
                     str(mapping_ids),
+                )
+                failures += check(
+                    "zero-mapping assigned respondent is retained for unclassified output",
+                    ids["assigned_unmapped"] in unclassified_ids,
+                    str(unclassified_ids),
                 )
 
                 role_seg = db.session.get(Segment, ids["role_segment"])
