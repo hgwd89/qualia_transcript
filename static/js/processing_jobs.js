@@ -137,6 +137,25 @@
     }
   }
 
+  // Project analysis pages define pollAnalysisJob inline before this shared script
+  // loads. Wrap it here so resumed polling and manually started analysis use the
+  // same failure cleanup. The wrapper runs before DOMContentLoaded, so the resume
+  // handler resolves the guarded global function when it starts polling.
+  if (
+    typeof window.pollAnalysisJob === 'function'
+    && typeof window.setAnalysisButtonBusy === 'function'
+  ) {
+    const originalPollAnalysisJob = window.pollAnalysisJob;
+    window.pollAnalysisJob = async (jobId, btn, runningLabel) => {
+      try {
+        return await originalPollAnalysisJob(jobId, btn, runningLabel);
+      } catch (error) {
+        window.setAnalysisButtonBusy(btn, false);
+        throw error;
+      }
+    };
+  }
+
   const interviewId = interviewIdFromPath();
   if (!interviewId) return;
 
