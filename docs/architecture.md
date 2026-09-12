@@ -100,6 +100,9 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/analysis_review.py`: human review transitions and evidence-quote → respondent source-segment resolution.
 - `services/semantic_analysis.py`: semantic clustering and dry-run/no-ai support.
 - `services/integrated_analysis.py`: no-ai integrated analysis assembly from existing local data.
+- `services/job_admission.py`: serialized durable-job admission/retry and conflict handling.
+- `services/processing_jobs.py`: worker launch, lease ownership, progress, execution, and terminal state handling.
+- `services/processing_result_guard.py`: crash-window reuse and canonical result-write cleanup/fencing helpers.
 - `services/project_deletion.py`: serialized project deletion plus post-commit managed-storage cleanup.
 - `services/report_verbatim.py`: Word verbatim report generation.
 - `services/report_formatted.py`: Excel formatted sheet generation.
@@ -115,6 +118,20 @@ On Windows, `services/secret_store.py` protects configured secret settings with 
 Environment values remain the fallback when no database secret is configured. Existing plaintext database secrets are migrated to DPAPI during Windows application startup. Migration failure is non-destructive: startup continues, and legacy plaintext remains readable until migration can succeed. Non-Windows environments do not rewrite database secrets into a weaker plaintext representation and continue to rely on supported fallbacks.
 
 The settings UI exposes only configured/not-configured state for password fields; decrypted secret values are not rendered back into HTML.
+
+## Durable Processing Job Contract
+
+Long-running transcription, mapping, participant analysis, question analysis, cross-participant analysis, integrated analysis, and project-pipeline work use `ProcessingJob` rather than executing the expensive operation inside the initiating request. The API route admits a durable job, launches a worker, returns a job ID, and the UI polls the job status endpoint. A browser reload can therefore resume observation of an existing `pending` or `running` job instead of starting the work again.
+
+`services/job_admission.py` is the concurrency boundary for new work and retries. On SQLite it acquires `BEGIN IMMEDIATE` before deciding whether a job may be admitted. Same-scope active work is reused where appropriate, incompatible active work is rejected, and a new `pending` row is created only while the write reservation is held. Retry admission uses the same serialization. This prevents two requests from independently observing an empty slot and both creating conflicting durable jobs.
+
+`services/processing_jobs.py` treats `status='running'` plus `attempt_count` as the worker lease. Claiming a pending job increments the attempt token. Progress updates and terminal writes are conditional on the same immutable attempt number; if stale recovery or retry has moved ownership to a later attempt, the older worker raises `JobLeaseLost` rather than continuing to publish progress or success.
+
+Canonical result writes have an additional fence. After expensive external work and before changing canonical result rows, `begin_job_result_write()` acquires a database write reservation (`BEGIN IMMEDIATE` on SQLite, row lock on databases that support it) and revalidates the worker's attempt token. That closes the race where stale recovery/retry could supersede a worker between its final lease check and its result commit. Analysis handlers receive this result-write guard before committing `AIAnalysis`; transcription/mapping paths have corresponding cleanup/invalidation helpers in `services/processing_result_guard.py`.
+
+Crash-window idempotency is explicit. `services/processing_result_guard.py` can detect mapping or analysis results that were already committed after the durable job was created but before the worker managed to mark the job `succeeded`. A retry reuses that committed result instead of duplicating canonical analysis rows. Stale transcription attempts can be invalidated and their partial derived segments removed without rewriting immutable raw transcript snapshots.
+
+Worker and UI failure are recoverable states rather than UI locks. Failed jobs can be retried through durable admission; stale jobs are recovered before conflicting admission/deletion decisions; and resumed project-analysis polling must restore its associated button when polling fails so the user can retry instead of remaining permanently disabled.
 
 ## Legacy ProcessingJob Question Integrity Contract
 
