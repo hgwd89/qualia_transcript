@@ -116,6 +116,14 @@ Environment values remain the fallback when no database secret is configured. Ex
 
 The settings UI exposes only configured/not-configured state for password fields; decrypted secret values are not rendered back into HTML.
 
+## SQLite Schema Upgrade Contract
+
+Application startup calls `_run_migrations()` after `db.create_all()` to reconcile older local SQLite installations with the current model shape. Most historical upgrades are additive columns/tables. One special legacy path exists for `processing_jobs.question_id`: older installations may contain the column because it was added after initial deployment, but SQLite cannot add the model's foreign-key constraint to an existing table in place.
+
+`services/schema_migrations.py` detects that legacy shape and rebuilds only `processing_jobs` with the current foreign keys. Existing processing-job rows are copied without rewriting their values, and explicit indexes/triggers attached to the table are recreated. Existing orphan `question_id` values are intentionally preserved rather than silently repaired or deleted; after the rebuild they remain visible through `PRAGMA foreign_key_check` and therefore block production readiness until reconciled. New writes are constrained by the restored foreign key.
+
+The rebuild temporarily disables SQLite foreign-key enforcement only for the table-copy transaction and restores the connection's previous setting afterward. The migration verifies row-count preservation before replacing the legacy table. Because this is a startup schema operation on durable job history, migration failures abort startup rather than silently discarding or coercing rows.
+
 ## Project Deletion Contract
 
 Project deletion is coordinated with durable processing jobs. After stale-job recovery, `services/project_deletion.py` starts a serialized database write transaction before checking active jobs. On SQLite it uses `BEGIN IMMEDIATE`, matching job admission's write reservation, so a new job cannot pass admission between the active-job check and the project deletion commit. Active `pending` or `running` jobs block deletion.
@@ -158,7 +166,6 @@ Human AI-analysis review, source-evidence resolution, approved-analysis export, 
 
 ## Unconfirmed Items
 
-- The exact production database lifecycle is not documented here beyond the local Flask/SQLAlchemy behavior observed in `app.py`.
 - The behavior of every semantic-analysis mode with respect to OpenAI embeddings must be checked before running it outside `--dry-run --no-ai`.
 - Large media performance, long-running transcription behavior, and bulk output-generation limits are not validated by the safe checks.
 - Evidence resolution currently depends on textual quote matching plus available participant/question scope; it is conservative and may require manual correction when an AI quote paraphrases rather than reproduces the source text.
