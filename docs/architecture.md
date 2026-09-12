@@ -76,8 +76,9 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `SegmentFlag`: derived flags for review and output behavior.
 - `SpeakerAssignment`: derived mapping from speaker label to role and participant.
 - `AIAnalysis`: derived structured analysis payload plus human review state (`review_status`, `review_note`, `reviewed_at`).
+- `ProcessingJob`: durable background-work record for transcription, mapping, analysis, and project pipelines; question-scoped jobs may reference `InterviewFlowQuestion`.
 - `GeneratedFile`: generated output metadata, including `approved_analysis` XLSX outputs.
-- `AppSetting`: local application settings.
+- `AppSetting`: local application settings. Secret values are storage records and must be consumed through the secret-store service rather than read as plaintext directly.
 
 ## Core Routes
 
@@ -103,7 +104,16 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/report_formatted.py`: Excel formatted sheet generation.
 - `services/report_analysis.py`: flat utterance/mapping analysis CSV/XLSX generation.
 - `services/report_approved_analysis.py`: formal XLSX generation from approved `AIAnalysis` rows only, with separate analysis-summary and evidence sheets.
+- `services/secret_store.py`: protected application-secret storage/read boundary.
 - `services/product_hint.py`, `services/domain_glossary.py`, `services/fragmentation.py`: derived text-analysis helpers that must not alter source transcript text.
+
+## Secret Storage Contract
+
+On Windows, `services/secret_store.py` protects configured secret settings with current-user DPAPI and stores them with the `dpapi:v1:` marker. Consumers must call `get_secret_setting()` rather than read secret `AppSetting` values directly. This applies to chat/transcription clients, product-hint provider credentials, and semantic embedding clients.
+
+Environment values remain the fallback when no database secret is configured. Existing plaintext database secrets are migrated to DPAPI during Windows application startup. Migration failure is non-destructive: startup continues, and legacy plaintext remains readable until migration can succeed. Non-Windows environments do not rewrite database secrets into a weaker plaintext representation and continue to rely on supported fallbacks.
+
+The settings UI exposes only configured/not-configured state for password fields; decrypted secret values are not rendered back into HTML.
 
 ## Checks and Tests
 
@@ -131,7 +141,7 @@ The following data must remain untracked:
 
 ## External API Boundaries
 
-OpenAI API usage appears in transcription, mapping, analyzer, and semantic-analysis paths. These must not be run as part of default safe checks or `-AllLocal`.
+OpenAI API usage appears in transcription, mapping, analyzer, and semantic-analysis paths. These must not be run as part of default safe checks or `-AllLocal`. OpenAI credentials must be obtained through the protected secret-store boundary, with the environment used only as fallback when no database secret is configured.
 
 Whisper usage appears in transcription paths. It must not be run unless transcription has been explicitly requested.
 
