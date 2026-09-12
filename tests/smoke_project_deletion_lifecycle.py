@@ -269,9 +269,6 @@ def main() -> int:
                     and any("cleanup path rejected" in item for item in warning_result.cleanup_errors),
                     f"errors={warning_result.cleanup_errors}",
                 )
-                # The warning fixture intentionally leaves its ID directory behind.
-                # Remove it before the next project is created because SQLite may
-                # reuse the deleted highest row ID when AUTOINCREMENT is not used.
                 if warning_marker.exists():
                     warning_marker.unlink()
                 if warning_dir.exists():
@@ -321,15 +318,25 @@ def main() -> int:
                     if link_created:
                         linked_result = delete_project(linked_project)
                         failures += check(
-                            "linked project output is rejected without traversing target",
+                            "linked project output entry is detached without traversing target",
                             db.session.get(Project, linked_project_id) is None
                             and protected_marker.is_file()
-                            and any(
-                                "symlink or reparse point" in item
-                                or "linked path" in item
-                                for item in linked_result.cleanup_errors
-                            ),
-                            f"errors={linked_result.cleanup_errors}",
+                            and not linked_output.exists()
+                            and not linked_output.is_symlink()
+                            and not linked_result.cleanup_errors,
+                            f"removed_paths={linked_result.removed_paths} errors={linked_result.cleanup_errors}",
+                        )
+
+                        replacement = Project(name="Replacement after linked deletion")
+                        db.session.add(replacement)
+                        db.session.commit()
+                        failures += check(
+                            "reused project ID does not inherit stale managed link",
+                            int(replacement.id) == linked_project_id
+                            and protected_marker.is_file()
+                            and not linked_output.exists()
+                            and not linked_output.is_symlink(),
+                            f"replacement_id={replacement.id} deleted_id={linked_project_id}",
                         )
                 finally:
                     try:
