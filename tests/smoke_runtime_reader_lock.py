@@ -98,6 +98,21 @@ def main() -> int:
                         f"exit={result.returncode} stdout={result.stdout.strip()}",
                     )
 
+                local_integrity = subprocess.run(
+                    [sys.executable, "tests/smoke_local_data_integrity.py"],
+                    cwd=str(repo_root),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                failures += check(
+                    "direct local-data integrity inspection refuses maintenance",
+                    local_integrity.returncode == 3
+                    and "maintenance is active" in local_integrity.stdout,
+                    f"exit={local_integrity.returncode} stdout={local_integrity.stdout.strip()}",
+                )
+
                 sys.argv = ["recover_processing_job.py", "--job-id", "1"]
                 recovery_exit = recover_processing_job.main()
                 failures += check(
