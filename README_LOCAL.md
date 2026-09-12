@@ -30,8 +30,9 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 - 別プロセスがポートを使用中なら、そのプロセスを停止せず起動を中止する
 - 未使用なら、このリポジトリの `app.py` を絶対パスで Python に渡してバックグラウンド起動する
 - `logs/flask_out.log` / `logs/flask_err.log` にログ保存
-- 最大30秒、1秒ごとに Qualia Transcript 固有の endpoint を確認
+- wall-clock で最大30秒、Qualia Transcript 固有の endpoint を確認
 - endpoint 確認後、同じブラウザ到達用URLを既定ブラウザで開く
+- readiness に失敗した場合は、`Start-Process -PassThru` が返した同一 Process オブジェクトだけを cleanup 対象にし、数値PIDを再解決して別プロセスを停止しない
 
 ブラウザURL生成ルール:
 - `APP_HOST=0.0.0.0` の場合は `127.0.0.1` へアクセス
@@ -52,10 +53,12 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 ```
 
 動作:
-- 設定ポートを使用しているプロセスを確認
-- 停止対象として認めるのは、このリポジトリの絶対 `app.py` パスを command line に含む Python process だけ
+- 設定ポートを使用している listener を確認し、複数PIDが曖昧に見える場合は停止しない
+- 停止対象として認めるのは、このリポジトリの解決済み絶対 `app.py` パスが完全な command-line argument として存在する Python process だけ
 - generic な `python app.py`、別 checkout の `app.py`、endpoint 応答だけでは停止対象と判定しない
-- 通常停止後に listener が残る場合も、強制停止できるのは最初に識別した同一 PID かつ、このリポジトリの絶対 `app.py` identity が維持されている場合だけ
+- 通常停止・強制停止の直前に、PID・process start time・exact `app.py` identity が最初に識別した process instance と一致するか再検証する
+- 停止には、再検証済みの `System.Diagnostics.Process` オブジェクトを使用し、数値PIDだけで再検索しない
+- PID再利用、identity取得不能、複数listenerなど判定が曖昧な場合は fail-closed で停止しない
 - 停止待ち中に同じポートを別プロセスが取得しても、その新しいプロセスは停止しない
 
 ## トラブルシュート
@@ -79,25 +82,25 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
 
 - Safe Smoke Check は無料・非破壊（外部API呼び出しなし）です。
-- launcher の host/port URL 生成、絶対 `app.py` process identity、Qualia 固有 endpoint 判定、exact-process-only stop、force-stop PID fence を `scripts/check_runtime_config.ps1` で検証します。
+- launcher の host/port URL 生成、絶対 `app.py` argument identity、Qualia 固有 endpoint 判定、wall-clock readiness deadline、PID/start-time/process-object stop fence、failed-start cleanup fence を `scripts/check_runtime_config.ps1` で検証します。
 
-## Segment Flag Smoke Check（外部APIなし・可逆DB更新あり）
+## Segment Flag Smoke Check（外部APIなし・一時fixtureのみ）
 
 - Segment flag の作成/重複防止/削除/復元を確認します。
 - 外部APIは呼びません。
-- 実行中に `segment_flags` を一時更新しますが、テスト終了時に元状態へ復元します。
-- 完全read-onlyではないため、Safe Smoke Check（デフォルト）には含めません。
+- self-contained な一時SQLite DBと一時runtime directoryを使い、既存の研究DBは更新しません。
+- Safe Smoke Check（デフォルト）には含めず、broader local check として実行します。
 
 ```powershell
 python tests/smoke_flags.py
 powershell -ExecutionPolicy Bypass -File scripts/check_flags.ps1
 ```
 
-## Speaker Assignment Smoke Check（外部APIなし・可逆DB更新あり）
+## Speaker Assignment Smoke Check（外部APIなし・一時fixtureのみ）
 
-- `speaker_assignments` の作成/重複upsert防止/復元を確認します。
+- `speaker_assignments` の作成/重複upsert防止を確認します。
 - 外部APIは呼びません。
-- 実行中に `speaker_assignments` を一時更新しますが、テスト終了時に元状態へ復元します。
+- self-contained な一時SQLite DBと一時runtime directoryを使い、既存の研究DBは更新しません。
 
 ```powershell
 python tests/smoke_speaker_assignments.py
@@ -181,12 +184,12 @@ powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllPaid
 powershell -ExecutionPolicy Bypass -File scripts/check_outputs.ps1
 ```
 
-## Output Flag Smoke Check（外部APIなし・可逆DB更新あり）
+## Output Flag Smoke Check（外部APIなし・一時fixtureのみ）
 
 - Segment flag（`favorite / quote / exclude / needs_review`）がWord/Excel出力へ反映されるか確認します。
 - 外部APIは呼びません。
-- 実行中に `segment_id=257` の flag を一時更新しますが、テスト終了時に実行前状態へ復元します。
-- `Segment.text` は変更しません。
+- self-contained な一時SQLite DBと一時upload/output directoryを作成し、固定の実データ `Segment` IDには依存しません。
+- `Segment.text` はfixture内でも変更しません。
 
 ```powershell
 python tests/smoke_outputs_flags.py
