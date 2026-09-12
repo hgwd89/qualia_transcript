@@ -122,7 +122,7 @@ Project deletion is coordinated with durable processing jobs. After stale-job re
 
 Terminal `ProcessingJob` rows and the ORM-owned project graph are deleted in the database transaction first. Managed filesystem cleanup runs only after the database commit. Cleanup is best-effort: path-resolution or deletion failures are returned as cleanup warnings rather than reported as a failed database deletion.
 
-Managed project/interview ID directories are never recursively removed through a symlink, Windows junction, or other reparse point. Linked ID directories are rejected and left for explicit audit/cleanup, preventing one project's deletion from traversing into another managed directory.
+Managed project/interview ID directories are never recursively removed through a symlink, Windows junction, or other reparse point. When an ID path is linked, cleanup removes only the link/reparse entry itself and never traverses its target. This also prevents a deleted project's stale linked path from being inherited if SQLite later reuses the same integer ID.
 
 ## Checks and Tests
 
