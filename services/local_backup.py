@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
 import config
+from services.storage_paths import is_link_or_reparse
 
 
 BACKUP_FORMAT_VERSION = 1
@@ -55,6 +56,22 @@ def _sqlite_path(database_uri: str | None = None) -> Path:
         # instance directory. Mirror that rule for explicit legacy relative URIs.
         path = Path(getattr(config, "INSTANCE_DIR", Path(config.BASE_DIR) / "instance")) / path
     return path.resolve()
+
+
+def _touches_live_recovery_set(
+    database_uri: str | None,
+    upload_dir: str | os.PathLike | None,
+    output_dir: str | os.PathLike | None,
+) -> bool:
+    """Return True when any requested target is part of the configured live set."""
+    database_path = _sqlite_path(database_uri)
+    uploads = Path(upload_dir or config.UPLOAD_DIR).resolve()
+    outputs = Path(output_dir or config.OUTPUT_DIR).resolve()
+    return (
+        database_path == Path(config.DATABASE_PATH).resolve()
+        or uploads == Path(config.UPLOAD_DIR).resolve()
+        or outputs == Path(config.OUTPUT_DIR).resolve()
+    )
 
 
 def _safe_member_name(name: str) -> str:
@@ -100,23 +117,49 @@ def _collect_tree(source_dir: Path, archive_prefix: str, staging_root: Path) -> 
     if not source_dir.is_dir():
         raise ValueError(f"expected directory: {source_dir}")
 
-    for source in sorted(source_dir.rglob("*")):
-        if not source.is_file():
-            continue
-        relative = source.relative_to(source_dir).as_posix()
-        archive_path = _safe_member_name(f"{archive_prefix}/{relative}")
-        staged = staging_root / Path(archive_path)
-        staged.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, staged)
-        entries.append({
-            "path": archive_path,
-            "size": staged.stat().st_size,
-            "sha256": _sha256(staged),
-        })
+    root = source_dir.resolve()
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        for source in sorted(current.iterdir(), key=lambda path: path.name):
+            if is_link_or_reparse(source):
+                raise ValueError(
+                    f"managed backup tree contains linked/reparse entry: {source}"
+                )
+            try:
+                resolved = source.resolve()
+                resolved.relative_to(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ValueError(
+                    f"managed backup tree escapes configured root: {source}"
+                ) from exc
+
+            if source.is_dir():
+                pending.append(source)
+                continue
+            if not source.is_file():
+                continue
+
+            # Re-check immediately before copying so a replaced file entry is not
+            # silently followed into an unmanaged location.
+            if is_link_or_reparse(source):
+                raise ValueError(
+                    f"managed backup file became linked/reparse: {source}"
+                )
+            relative = source.relative_to(root).as_posix()
+            archive_path = _safe_member_name(f"{archive_prefix}/{relative}")
+            staged = staging_root / Path(archive_path)
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, staged)
+            entries.append({
+                "path": archive_path,
+                "size": staged.stat().st_size,
+                "sha256": _sha256(staged),
+            })
     return entries
 
 
-def create_backup(
+def _create_backup_unlocked(
     destination_dir: str | os.PathLike | None = None,
     *,
     database_uri: str | None = None,
@@ -124,7 +167,6 @@ def create_backup(
     output_dir: str | os.PathLike | None = None,
     label: str = "manual",
 ) -> Path:
-    """Create and verify a single ZIP backup archive."""
     database_path = _sqlite_path(database_uri)
     uploads = Path(upload_dir or config.UPLOAD_DIR).resolve()
     outputs = Path(output_dir or config.OUTPUT_DIR).resolve()
@@ -169,6 +211,35 @@ def create_backup(
     _restrict_permissions(archive, 0o600)
     validate_backup(archive)
     return archive
+
+
+def create_backup(
+    destination_dir: str | os.PathLike | None = None,
+    *,
+    database_uri: str | None = None,
+    upload_dir: str | os.PathLike | None = None,
+    output_dir: str | os.PathLike | None = None,
+    label: str = "manual",
+) -> Path:
+    """Create and verify a backup, excluding live runtime access when necessary."""
+    if _touches_live_recovery_set(database_uri, upload_dir, output_dir):
+        from services.runtime_lock import runtime_lock
+
+        with runtime_lock("maintenance"):
+            return _create_backup_unlocked(
+                destination_dir,
+                database_uri=database_uri,
+                upload_dir=upload_dir,
+                output_dir=output_dir,
+                label=label,
+            )
+    return _create_backup_unlocked(
+        destination_dir,
+        database_uri=database_uri,
+        upload_dir=upload_dir,
+        output_dir=output_dir,
+        label=label,
+    )
 
 
 def validate_backup(archive_path: str | os.PathLike) -> dict:
@@ -288,7 +359,7 @@ def _preserve_unvalidated_database(database_path: Path, backup_dir: Path) -> Pat
     return target
 
 
-def restore_backup(
+def _restore_backup_unlocked(
     archive_path: str | os.PathLike,
     *,
     apply: bool = False,
@@ -299,13 +370,6 @@ def restore_backup(
     create_pre_restore_backup: bool = True,
     allow_unvalidated_pre_restore: bool = False,
 ) -> dict:
-    """Validate a backup and optionally restore it.
-
-    `apply=False` is deliberately the default. Applying restore first copies the
-    source ZIP into a private temporary directory, validates that staged copy, and
-    restores only from the same staged bytes. The application must be stopped
-    before restore; process-lifetime enforcement is handled separately.
-    """
     source_archive = Path(archive_path).resolve()
     if not apply:
         manifest = validate_backup(source_archive)
@@ -426,3 +490,41 @@ def restore_backup(
             str(pre_restore_database_copy) if pre_restore_database_copy else None
         ),
     }
+
+
+def restore_backup(
+    archive_path: str | os.PathLike,
+    *,
+    apply: bool = False,
+    database_uri: str | None = None,
+    upload_dir: str | os.PathLike | None = None,
+    output_dir: str | os.PathLike | None = None,
+    backup_dir: str | os.PathLike | None = None,
+    create_pre_restore_backup: bool = True,
+    allow_unvalidated_pre_restore: bool = False,
+) -> dict:
+    """Validate a backup or apply it under the live maintenance boundary."""
+    if apply and _touches_live_recovery_set(database_uri, upload_dir, output_dir):
+        from services.runtime_lock import runtime_lock
+
+        with runtime_lock("maintenance"):
+            return _restore_backup_unlocked(
+                archive_path,
+                apply=True,
+                database_uri=database_uri,
+                upload_dir=upload_dir,
+                output_dir=output_dir,
+                backup_dir=backup_dir,
+                create_pre_restore_backup=create_pre_restore_backup,
+                allow_unvalidated_pre_restore=allow_unvalidated_pre_restore,
+            )
+    return _restore_backup_unlocked(
+        archive_path,
+        apply=apply,
+        database_uri=database_uri,
+        upload_dir=upload_dir,
+        output_dir=output_dir,
+        backup_dir=backup_dir,
+        create_pre_restore_backup=create_pre_restore_backup,
+        allow_unvalidated_pre_restore=allow_unvalidated_pre_restore,
+    )
