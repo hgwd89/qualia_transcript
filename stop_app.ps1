@@ -31,7 +31,8 @@ function Is-QualiaFlaskProcess {
     if (-not $ProcessInfo) { return $false }
     return Test-QualiaProcessCommandLine `
         -CommandLine "$($ProcessInfo.CommandLine)" `
-        -ProjectDir $ProjectDir
+        -ProjectDir $ProjectDir `
+        -ProcessName "$($ProcessInfo.Name)"
 }
 
 $target = Get-PortProcessInfo -LocalPort $Port
