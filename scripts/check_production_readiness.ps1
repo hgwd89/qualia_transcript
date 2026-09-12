@@ -4,8 +4,21 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Resolve-Path (Join-Path $scriptDir "..")
 Set-Location $projectRoot
 
-Write-Host "[INFO] Running read-only production readiness audit..."
-python scripts/audit_production_readiness_v2.py @args
+$projectScoped = $false
+foreach ($arg in $args) {
+    if ($arg -eq "--project-id" -or $arg -like "--project-id=*") {
+        $projectScoped = $true
+        break
+    }
+}
+
+if ($projectScoped) {
+    Write-Host "[INFO] Running read-only project-scoped production readiness audit..."
+    python scripts/audit_production_readiness_project.py @args
+} else {
+    Write-Host "[INFO] Running read-only database-wide production readiness audit..."
+    python scripts/audit_production_readiness_v2.py @args
+}
 $exitCode = $LASTEXITCODE
 
 if ($exitCode -eq 0) {
