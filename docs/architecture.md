@@ -104,7 +104,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/processing_jobs.py`: worker launch, lease ownership, progress, execution, and terminal state handling.
 - `services/processing_result_guard.py`: crash-window reuse and canonical result-write cleanup/fencing helpers.
 - `services/storage_paths.py`: shared output/upload path validation, including symlink and Windows reparse/junction rejection below managed roots.
-- `services/local_backup.py`: verified local backup/restore boundary for the application SQLite database, uploads, outputs, manifest/hash validation, staged restore, and rollback.
+- `services/local_backup.py`: authoritative verified local backup/restore boundary for the application SQLite database, uploads, and outputs; it owns manifest/hash validation, linked/reparse tree rejection, live recovery-set maintenance exclusion, staged restore, and rollback.
 - `services/runtime_lock.py`: cross-platform shared/exclusive process-lifetime lock; app, detached workers, and operational readers use shared runtime slots, canonical app-factory launches retain a process-lifetime slot automatically, and backup/applied restore use exclusive maintenance mode.
 - `services/project_deletion.py`: serialized project deletion with pre-commit output/upload/job-log quarantine, rollback restoration, and post-commit cleanup of bound entries.
 - `services/report_verbatim.py`: Word verbatim report generation.
@@ -148,7 +148,9 @@ Existing orphan values are never silently repaired, nulled, or deleted. `audit_p
 
 The application SQLite database has one canonical absolute path under `instance/`. `config.DATABASE_URI`, backup creation, readiness tooling, and restore must refer to that same file; legacy explicit relative `sqlite:///...` URIs are resolved using Flask's instance-directory rule rather than the repository root.
 
-`services/local_backup.py` creates a recovery set containing a SQLite snapshot plus uploads and outputs, records exact size/SHA-256 metadata in a manifest, and validates archive membership, hashes, and SQLite integrity before a backup is accepted. Completed backup archives and their destination directory are owner-only on POSIX systems.
+`services/local_backup.py` creates a recovery set containing a SQLite snapshot plus uploads and outputs, records exact size/SHA-256 metadata in a manifest, and validates archive membership, hashes, and SQLite integrity before a backup is accepted. Completed backup archives and their destination directory are owner-only on POSIX systems. Backup traversal never follows an entry below the configured uploads/outputs roots when that entry is a symlink, Windows junction, or other reparse point; such a tree is rejected rather than allowing an external target to be copied into the archive.
+
+The service boundary, not only the command-line wrappers, owns maintenance exclusion. A direct `create_backup()` call that touches any configured live database/upload/output target acquires the exclusive `maintenance` lock before snapshotting. An applied `restore_backup()` does the same before replacing live targets. CLI wrappers may already hold the same maintenance lock; same-mode nesting is intentional and preserves one uninterrupted exclusion boundary. Calls whose database, uploads, and outputs are all explicit non-live fixture paths remain lock-free so safe tests do not contend on the real runtime lock. Validation-only restore does not mutate the live recovery set and does not require maintenance exclusion.
 
 Applied restore is deliberately staged. The source ZIP is first copied into a private temporary location, that staged copy is fully validated, and extraction/restoration uses those same bytes so a subsequently replaced source archive cannot change the recovery payload after validation. The database member used for restore is the manifest-declared `database_archive_path`; validation requires that member to be present in the declared file set.
 
@@ -158,7 +160,7 @@ Every application process that creates the Flask app against the canonical confi
 
 Detached durable workers and operational readers share the same runtime-lock slot range. Backup and applied restore acquire that range in exclusive `maintenance` mode before reading or replacing the live recovery set and hold it until the full operation completes. Shared live holders can coexist, but maintenance cannot overlap any of them; conversely, canonical app-factory startup, workers, and readers fail while maintenance owns the lock. Normal interpreter shutdown releases retained process holds, and OS process teardown is the final stale-lock safety net after crashes or forced termination.
 
-The lock is non-blocking and uses `msvcrt.locking` on Windows and `fcntl.flock` on POSIX. Validation-only restore does not mutate the local recovery set and therefore does not require exclusive maintenance mode. The SQLite `BEGIN EXCLUSIVE` probe during applied restore remains a secondary defense; the process-lifetime runtime lock is the lifecycle boundary that prevents database/file-tree snapshots or replacements from racing with live readers or writers.
+The lock is non-blocking and uses `msvcrt.locking` on Windows and `fcntl.lockf` on POSIX. The SQLite `BEGIN EXCLUSIVE` probe during applied restore remains a secondary defense; the process-lifetime runtime lock is the lifecycle boundary that prevents database/file-tree snapshots or replacements from racing with live readers or writers.
 
 ## Managed Storage Path Contract
 
