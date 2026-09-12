@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import config
 from models import db
@@ -58,14 +59,28 @@ def _resolve_stored_path(stored_path: str) -> Path:
     return candidate
 
 
+def _unique_storage_name(filename: str) -> str:
+    """Return an internal storage name independent of the download filename."""
+    path = Path(filename)
+    suffix = path.suffix
+    stem = path.name[:-len(suffix)] if suffix else path.name
+    return f"{stem}_{uuid4().hex}{suffix}"
+
+
 def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
-    """Create a safe project-scoped destination for a generated output file."""
+    """Create a safe project-scoped, collision-resistant generated-file target.
+
+    ``filename`` remains the user-facing download name. The filesystem/DB
+    ``stored_path`` uses a UUID-backed internal name so concurrent generations of
+    the same report cannot overwrite one another or share rollback cleanup.
+    """
     project_id = int(project_id)
     if project_id <= 0:
         raise ValueError("project_id must be positive")
 
     safe_name = safe_output_filename(filename)
-    stored_path = f"{project_id}/{safe_name}"
+    storage_name = _unique_storage_name(safe_name)
+    stored_path = f"{project_id}/{storage_name}"
     full_path = _resolve_stored_path(stored_path)
     full_path.parent.mkdir(parents=True, exist_ok=True)
     return OutputTarget(
@@ -84,11 +99,11 @@ def register_generated_file(
     interview_id: int | None = None,
     generation_params_json: str | None = None,
 ) -> GeneratedFile:
-    """Register a generated file; remove the file if DB registration fails.
+    """Register a generated file; remove only this target if DB registration fails.
 
-    Filesystem and database commits cannot be made truly atomic. This closes the
-    ordinary exception window: once generation succeeded, a failed flush/commit
-    rolls back the DB transaction and best-effort removes the generated file.
+    Filesystem and database commits cannot be made truly atomic. Each prepared
+    target has a unique internal path, so rollback cleanup cannot delete an older
+    successful generation that has the same user-facing filename.
     """
     managed_path = _resolve_stored_path(target.stored_path)
     if managed_path != Path(target.full_path).resolve():
