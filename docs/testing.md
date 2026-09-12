@@ -2,112 +2,55 @@
 
 ## Purpose
 
-This document separates safe local checks from paid/API checks, output-generation checks, AI-analysis review/export checks, and manual local research-data integrity checks. It is intended for Codex, Claude Code, and human reviewers.
+This guide defines the required safe test gate and the optional local/provider-backed checks. `AGENTS.md` remains the top-level rule.
 
-`AGENTS.md` remains the top-level rule. If there is a conflict, follow `AGENTS.md`.
+## Required safe gate
 
-## Check Categories
-
-Safe checks must not call OpenAI, run Whisper, depend on existing research-data fixture IDs, or modify source transcript text.
-
-Paid/API checks call external providers or intentionally validate paid paths. Run them only when explicitly requested.
-
-Output-generation checks may create Word, Excel, CSV, or `GeneratedFile` records. Self-contained smoke checks must direct these outputs to temporary directories rather than the repository's real `outputs/` directory.
-
-AI-analysis review/export checks validate the human approval gate and approved-only formal analysis workbook. They use temporary fixtures and temporary output paths and must not call OpenAI or Whisper.
-
-Manual local-data-integrity checks inspect an existing local database and raw transcript snapshots in read-only mode. They are intentionally separate from CI because their result depends on local research data.
-
-## Aggregate Runner
-
-Run the default safe check with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1
-```
-
-With no arguments, this runs the safe smoke check only.
-
-Run the self-contained non-paid local suite with:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllLocal
-```
-
-`-AllLocal` runs the safe smoke check, segment-flag smoke, speaker-assignment smoke, output-flag smoke, integrated analysis no-AI check, integrated-analysis CLI guards, AI-analysis review/export smoke, and integrated-analysis preview UI check. These checks use temporary fixtures/directories where applicable and must not depend on existing local research-data IDs.
-
-Other opt-in flags include:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -IntegratedPreview
-powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Mapping
-powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Analysis
-powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Transcription
-powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -Outputs
-powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllPaid
-```
-
-`-AllPaid` enables mapping, analysis, transcription, and outputs according to the current script. Confirm provider configuration and API-key handling before running it.
-
-## Safe Checks
-
-Run the safe smoke check for documentation and low-risk operations changes:
+Run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
 
-Contract:
+The same required category is run by `.github/workflows/safe-check.yml` as `safe-smoke` and by `scripts/check_all.ps1` with no flags.
 
-- uses a temporary SQLite database and temporary upload/output directories
-- does not call OpenAI or Whisper
-- does not depend on existing local fixture IDs
-- verifies the main routes and models can initialize/query
-- verifies `.env`, `instance/`, uploads, outputs, raw transcript snapshots, DB files, and logs are not tracked
-- leaves the repository's real instance/upload/output directory state unchanged
+Safe checks use temporary fixtures where data or storage is needed. They must not depend on existing research-data IDs, must not change `Segment.text` or raw transcript snapshots, and must leave the repository's real runtime data directories unchanged.
 
-GitHub Actions runs the same category through `.github/workflows/safe-check.yml` with the `safe-smoke` job.
+The required `safe-smoke` gate currently covers:
 
-## Manual Local Data Integrity Check
+- baseline application/model/route initialization
+- generated-file integrity
+- media-upload integrity
+- project deletion lifecycle
+- participant/interview-flow project boundaries and delete guards
+- interview-creation scope validation
+- SQLite foreign-key enforcement
+- detection of pre-existing SQLite foreign-key violations
+- Windows DPAPI secret-store behavior
 
-Use this only when a human wants to inspect the existing local SQLite database and raw transcript snapshots without modifying them:
+The Windows-only DPAPI regression reports a skip/pass on non-Windows systems. On Windows it validates local protection/migration behavior and verifies that the application consumers covered by the regression receive usable settings without contacting an external service.
+
+## Broader non-paid local suite
+
+Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_all.ps1 -AllLocal
+```
+
+This adds segment flags, speaker assignments, output flags, integrated no-AI checks, CLI guards, AI-analysis review/export, and integrated preview checks. These checks must use temporary fixtures/directories where applicable.
+
+## Manual local data integrity
+
+Use only for read-only inspection of the existing local research database and transcript snapshots:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_local_data_integrity.ps1
 ```
 
-Contract:
+This check is manual-only and must not become a required CI gate. It opens SQLite read-only and checks important table relationships, source fingerprints, analysis counts, and snapshot hashes without modifying the source dataset.
 
-- opens SQLite with `mode=ro`
-- does not call `create_app()` or `db.create_all()`
-- does not call OpenAI
-- does not run Whisper
-- does not generate Word or Excel outputs
-- checks required tables
-- checks `Segment.text` non-emptiness
-- checks Segment → Interview and Segment → Transcription references
-- checks UtteranceMapping → Segment and → InterviewFlowQuestion references
-- checks SegmentFlag → Segment references
-- checks SpeakerAssignment → Interview and optional Participant references
-- reports a representative `Segment.text` fingerprint
-- reports AIAnalysis counts by analysis type
-- hashes raw transcript snapshot files without modifying them
-
-An optional JSON baseline can be supplied through `QUALIA_LOCAL_DATA_BASELINE`. Supported baseline keys are:
-
-- `segment_fingerprint`: exact fingerprint of the representative source segment sample
-- `minimum_table_counts` (or legacy `table_counts`): minimum acceptable counts, useful for detecting unexpected row loss
-- `minimum_ai_analysis_counts` (or legacy `ai_analysis_counts`): minimum counts by analysis type
-- `raw_transcript_snapshots`: filename → SHA-256 map; every baseline snapshot must still exist with identical content
-- `raw_transcript_snapshot_count`: legacy minimum snapshot count
-
-If the database has no segments and no baseline requiring existing research data, the check reports that the research-data sample is unavailable but still runs structural checks. If a configured baseline expects segments or other rows, an emptied database fails the minimum-count/fingerprint checks instead of silently passing.
-
-This check is manual-only. Do not add it to `.github/workflows/safe-check.yml` and do not make it a required branch-protection check.
-
-## Integrated Analysis No-AI Checks
-
-Run integrated analysis checks only when validating no-AI integrated assembly:
+## Integrated analysis no-AI checks
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_integrated_analysis.ps1
@@ -115,91 +58,45 @@ powershell -ExecutionPolicy Bypass -File scripts/check_integrated_analysis_cli_g
 powershell -ExecutionPolicy Bypass -File scripts/check_integrated_analysis_preview_ui.ps1
 ```
 
-Expected contract:
+Expected contract: no external request, no save for dry-run preview, no `Segment.text` change, and no raw transcript change.
 
-- no OpenAI API call
-- no Whisper execution
-- no database save for dry-run preview
-- no `Segment.text` change
-- no raw transcript change
-
-## AI Analysis Review and Approved Export Check
-
-Run this when changing `AIAnalysis` review state, evidence traceability, the review UI/API, or the approved-only analysis workbook:
+## AI analysis review/export
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_analysis_review.ps1
 ```
 
-Expected contract:
+Use temporary fixtures and output paths. Approval must require resolvable respondent evidence and formal exports must remain approved-only.
 
-- temporary SQLite database and temporary output directory only
-- no OpenAI or Whisper call
-- an AI finding can be approved only when its `evidence_quote` resolves to respondent `Segment` rows inside the analysis scope
-- approval persists `source_segment_ids` into the finding payload
-- an unresolved evidence quote is rejected by the approval endpoint and remains unapproved
-- formal AI-analysis XLSX contains only `review_status=approved` analyses
-- the evidence sheet preserves `evidence_quote` and `source_segment_ids`
-- `Segment.text` remains unchanged
-- generated workbook stays under the temporary output directory
-
-This check is included in `scripts/check_all.ps1 -AllLocal`. It is not part of the minimal required `safe-smoke` workflow.
-
-## Segment Flag Checks
-
-Run segment flag checks when changing flag routes, models, or output reflection:
+## Segment flags
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_flags.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_outputs_flags.ps1
 ```
 
-Expected contract:
+Flags remain derived data separate from `Segment.text`; self-contained output checks write only to temporary directories.
 
-- temporary DB fixtures only; no fixed local segment IDs
-- flags are stored separately from `Segment.text`
-- quote, favorite, exclude, and needs-review behavior remains explicit
-- Word and Excel flag reflection remains traceable to segment flags
-- output-flag smoke writes generated artifacts only under its temporary output directory
-- no OpenAI or Whisper call
-
-## Speaker Assignment Checks
-
-Run speaker assignment checks when changing speaker role logic or UI/API behavior:
+## Speaker assignments
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_speaker_assignments.ps1
 ```
 
-Expected contract:
+Use temporary fixtures. Duplicate upserts must not create duplicate assignment rows.
 
-- temporary DB fixtures only; no fixed local interview IDs
-- respondent assignments can link to participants
-- moderator and observer assignments can remain unlinked from participants
-- duplicate upserts do not create duplicate assignment rows
-- `Segment.text` remains unchanged
-
-## Output Generation Checks
-
-Run output checks only when Word, Excel, CSV, output flags, or `GeneratedFile` behavior changes:
+## Output generation
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_outputs.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_outputs_flags.ps1
 ```
 
-Expected contract:
+Generated artifacts must stay out of Git and output generation must not modify source transcripts.
 
-- output generation must not modify raw transcripts
-- output generation must not modify `Segment.text`
-- generated files must stay out of Git
-- self-contained output-flag smoke writes only to a temporary output directory
-- approved AI-analysis output must never include draft or rejected `AIAnalysis` rows
-- inspect `git status --short` before committing after any non-temporary manual output generation
+## Provider-backed checks
 
-## Paid/API Checks
-
-Run only with explicit approval:
+Run only when explicitly requested:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_mapping.ps1
@@ -207,31 +104,19 @@ powershell -ExecutionPolicy Bypass -File scripts/check_analysis.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
 ```
 
-Expected behavior:
+These are not part of safe-smoke or the normal CI path.
 
-- `check_mapping.ps1` may call OpenAI for mapping.
-- `check_analysis.ps1` may call OpenAI for analysis.
-- `check_transcription.ps1` may call OpenAI or transcription providers according to implementation.
-- Do not run these in CI or safe checks without explicit approval and API-key handling.
+## Semantic analysis
 
-## Semantic Analysis Checks
-
-For semantic analysis, start with dry-run and no-AI:
+Start with dry-run/no-AI:
 
 ```powershell
 python scripts/run_semantic_analysis.py --interview-id <id> --dry-run --no-ai
 ```
 
-Do not run semantic analysis with persistence or API-backed behavior unless the task explicitly requires it.
+`Segment.text` and raw snapshots must remain unchanged. Fragmentation and normalization are derived data. Provider-backed semantic execution must use the application's protected settings boundary.
 
-Expected contract:
-
-- `Segment.text` remains unchanged
-- raw transcript snapshots remain unchanged
-- fragmentation and glossary normalization are derived data only
-- source evidence fields remain traceable to source segments
-
-## PR Preflight
+## PR preflight
 
 Before proposing completion:
 
@@ -241,43 +126,6 @@ git diff --stat
 git diff --check
 ```
 
-Then run only the checks relevant to the changed files. For broad test-infrastructure changes, run `scripts/check_all.ps1 -AllLocal` locally when PowerShell and the application dependencies are available.
-
-For documentation-only changes, the minimum check is:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
-```
-
-If generated files appear in `git status --short`, do not stage them. Identify which command created them and report it.
+Run checks relevant to the changed files. For broad test-infrastructure changes, run `scripts/check_all.ps1 -AllLocal` when the local dependencies are available. Generated/private runtime files must not be staged.
 
 For GitHub review and branch-protection guidance, also read `docs/github-operations.md`.
-
-## Git Hygiene Checks
-
-Before staging:
-
-```powershell
-git status --short
-git diff --name-only
-```
-
-Confirm these are not staged:
-
-- `.env`
-- `instance/`
-- `uploads/`
-- `outputs/`
-- `outputs/raw_transcripts/`
-- `*.db`
-- `*.db-journal`
-- `*.sqlite3-journal`
-- `logs/*.log`
-- generated Word, Excel, CSV, or transcript files
-
-## Future Test Candidates
-
-- A broader text-analysis contract smoke that verifies evidence fields remain derived and source-safe across every analysis type.
-- A speaker-role evidence guard smoke that verifies unknown and interviewer-like speakers are excluded from respondent evidence in all analysis paths.
-
-Prefer extending existing smoke tests when they already cover the same behavior. Avoid duplicate tests that add maintenance cost without increasing coverage.
