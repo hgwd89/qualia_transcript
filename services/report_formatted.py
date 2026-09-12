@@ -111,6 +111,18 @@ def _respondent_mappings(
     ]
 
 
+def _respondent_unclassified_segments(
+    interview: Interview,
+    assignment_map: dict[str, SpeakerAssignment] | None = None,
+) -> list[Segment]:
+    return [
+        seg
+        for seg in sorted(interview.segments, key=lambda s: (s.seq, s.id or 0))
+        if _effective_speaker_role(seg, assignment_map) == "respondent"
+        and _is_unclassified(seg)
+    ]
+
+
 def generate_formatted_sheet(project_id: int) -> GeneratedFile:
     project = Project.query.get(project_id)
     if not project:
@@ -239,12 +251,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
         code = p.participant_code if p and p.participant_code else "?"
         date = iv.interview_date.isoformat() if iv.interview_date else ""
         assignment_map = assignment_maps.get(int(iv.id), {})
-        for seg in sorted(iv.segments, key=lambda s: (s.seq, s.id or 0)):
-            if (
-                _effective_speaker_role(seg, assignment_map) != "respondent"
-                or not _is_unclassified(seg)
-            ):
-                continue
+        for seg in _respondent_unclassified_segments(iv, assignment_map):
             flag_map = _segment_flag_map(seg)
             mapping_state = "no_mapping" if not seg.utterance_mappings else "unclassified"
             ws2.append([
