@@ -103,6 +103,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/job_admission.py`: serialized durable-job admission/retry and conflict handling.
 - `services/processing_jobs.py`: worker launch, lease ownership, progress, execution, and terminal state handling.
 - `services/processing_result_guard.py`: crash-window reuse and canonical result-write cleanup/fencing helpers.
+- `services/storage_paths.py`: shared output/upload path validation, including symlink and Windows reparse/junction rejection below managed roots.
 - `services/project_deletion.py`: serialized project deletion plus post-commit managed-storage cleanup.
 - `services/report_verbatim.py`: Word verbatim report generation.
 - `services/report_formatted.py`: Excel formatted sheet generation.
@@ -140,6 +141,14 @@ New SQLite databases receive the model-declared foreign key from `processing_job
 The compatibility strategy is deliberately non-destructive. Startup keeps the existing durable `processing_jobs` table and rows unchanged, ensures the `question_id` column exists, and installs two SQLite triggers for inserts and question-ID updates. Those triggers reject a non-null `question_id` when the referenced interview-flow question does not exist. They remain effective even if `PRAGMA foreign_keys` is disabled, so legacy tables receive a database-level guard without a table rebuild or history rewrite.
 
 Existing orphan values are never silently repaired, nulled, or deleted. `audit_production_readiness_v2.py` explicitly checks `ProcessingJob.question_id` rows in addition to normal `PRAGMA foreign_key_check`. Professional readiness is blocked when the column is missing, when a legacy table has neither a declared FK nor both compatibility triggers, or when historical jobs still reference missing questions. This separates forward enforcement from historical-data remediation.
+
+## Managed Storage Path Contract
+
+Generated output and uploaded media are stored under configured managed roots. `GeneratedFile.stored_path` is project-scoped (`<project_id>/<uuid>.<ext>`), and `MediaFile.stored_path` is interview-scoped (`<interview_id>/<uuid>.<ext>`). User-facing filenames are metadata only and do not determine internal path components.
+
+`services/storage_paths.py` owns path validation for these output/upload stores. Absolute paths and `..` traversal are rejected, the resolved target must remain inside the configured root, and every existing path component below that root must be a normal entry rather than a symlink, Windows junction, or other reparse point. ID directories are checked before and after creation. This prevents a linked `outputs/<project_id>` or `uploads/<interview_id>` directory from redirecting a generated file or source-media upload into another managed ID directory.
+
+Reads and registration use the same resolver rather than trusting a previously stored relative path. If an ID directory or stored file is later replaced by a linked/reparse entry, download/media resolution treats that path as invalid instead of following it. Filesystem and database operations still cannot form one transaction; UUID-only basenames and rollback cleanup remain the collision/partial-write controls around that boundary.
 
 ## Project Deletion Contract
 
