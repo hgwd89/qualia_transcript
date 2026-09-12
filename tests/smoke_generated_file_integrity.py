@@ -62,14 +62,16 @@ def main() -> int:
                 output_root = Path(config.OUTPUT_DIR).resolve()
                 project_dir = (output_root / str(project_id)).resolve()
                 failures += check(
-                    "output target remains project-scoped",
+                    "output target remains project-scoped with internal unique name",
                     target_path.parent == project_dir
-                    and target_path.name == target.filename
-                    and target.stored_path == f"{project_id}/{target.filename}",
+                    and target_path.name == Path(target.stored_path).name
+                    and target_path.name != target.filename
+                    and target_path.suffix == Path(target.filename).suffix
+                    and target.stored_path.startswith(f"{project_id}/"),
                     f"target={target}",
                 )
                 failures += check(
-                    "generated filename is cross-platform safe",
+                    "generated download filename is cross-platform safe",
                     all(ch not in target.filename for ch in '<>:"/\\|?*')
                     and "\\" not in target.stored_path,
                     target.filename,
@@ -85,16 +87,35 @@ def main() -> int:
                 failures += check(
                     "successful registration keeps file and DB row aligned",
                     gf.id is not None
+                    and gf.original_filename == target.filename
+                    and gf.stored_path == target.stored_path
                     and file_exists(gf)
                     and Path(get_full_path(gf)) == target_path,
                     f"file_id={gf.id} stored_path={gf.stored_path}",
                 )
 
-                before_count = GeneratedFile.query.count()
-                failed_target = prepare_output_target(project_id, "commit_failure.csv")
-                failed_path = Path(failed_target.full_path)
-                failed_path.write_text("orphan candidate", encoding="utf-8")
+                first_collision = prepare_output_target(project_id, "同時生成.xlsx")
+                second_collision = prepare_output_target(project_id, "同時生成.xlsx")
+                first_collision_path = Path(first_collision.full_path)
+                second_collision_path = Path(second_collision.full_path)
+                failures += check(
+                    "same download filename receives distinct managed paths",
+                    first_collision.filename == second_collision.filename == "同時生成.xlsx"
+                    and first_collision.stored_path != second_collision.stored_path
+                    and first_collision_path != second_collision_path,
+                    f"first={first_collision.stored_path} second={second_collision.stored_path}",
+                )
 
+                first_collision_path.write_bytes(b"first-success")
+                first_collision_gf = register_generated_file(
+                    first_collision,
+                    project_id=project_id,
+                    file_type="analysis",
+                    file_format="xlsx",
+                )
+                before_count = GeneratedFile.query.count()
+
+                second_collision_path.write_bytes(b"second-fails")
                 session = db.session()
 
                 def fail_before_commit(_session):
@@ -104,10 +125,10 @@ def main() -> int:
                 raised = False
                 try:
                     register_generated_file(
-                        failed_target,
+                        second_collision,
                         project_id=project_id,
                         file_type="analysis",
-                        file_format="csv",
+                        file_format="xlsx",
                     )
                 except RuntimeError as exc:
                     raised = "simulated generated-file DB commit failure" in str(exc)
@@ -116,11 +137,18 @@ def main() -> int:
                         event.remove(session, "before_commit", fail_before_commit)
 
                 failures += check(
-                    "DB registration failure removes generated orphan",
+                    "failed colliding registration removes only its own orphan",
                     raised
-                    and not failed_path.exists()
+                    and first_collision_path.is_file()
+                    and first_collision_path.read_bytes() == b"first-success"
+                    and file_exists(first_collision_gf)
+                    and not second_collision_path.exists()
                     and GeneratedFile.query.count() == before_count,
-                    f"raised={raised} exists={failed_path.exists()} count={GeneratedFile.query.count()}",
+                    (
+                        f"raised={raised} first_exists={first_collision_path.exists()} "
+                        f"second_exists={second_collision_path.exists()} "
+                        f"count={GeneratedFile.query.count()}"
+                    ),
                 )
 
                 outside = root / "outside.txt"
