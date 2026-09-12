@@ -60,19 +60,18 @@ def _resolve_stored_path(stored_path: str) -> Path:
 
 
 def _unique_storage_name(filename: str) -> str:
-    """Return an internal storage name independent of the download filename."""
-    path = Path(filename)
-    suffix = path.suffix
-    stem = path.name[:-len(suffix)] if suffix else path.name
-    return f"{stem}_{uuid4().hex}{suffix}"
+    """Return a short internal storage name independent of the download filename."""
+    suffix = Path(filename).suffix
+    return f"{uuid4().hex}{suffix}"
 
 
 def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
     """Create a safe project-scoped, collision-resistant generated-file target.
 
     ``filename`` remains the user-facing download name. The filesystem/DB
-    ``stored_path`` uses a UUID-backed internal name so concurrent generations of
-    the same report cannot overwrite one another or share rollback cleanup.
+    ``stored_path`` uses a UUID-only internal basename plus the original extension,
+    so concurrent generations cannot collide and long display names cannot push the
+    filesystem component beyond common 255-byte limits.
     """
     project_id = int(project_id)
     if project_id <= 0:
@@ -129,8 +128,6 @@ def register_generated_file(
         try:
             managed_path.unlink(missing_ok=True)
         except OSError:
-            # Preserve the original DB exception. A later integrity audit can
-            # report an undeleted orphan if the filesystem itself rejected cleanup.
             pass
         raise
 
