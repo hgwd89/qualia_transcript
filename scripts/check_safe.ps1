@@ -23,6 +23,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] launcher runtime-config smoke checks passed."
 
+Write-Host "[INFO] Running role/assignment integrity smoke check..."
+python tests/smoke_role_assignment_integrity.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] role/assignment integrity smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] role/assignment integrity smoke checks passed."
+
 Write-Host "[INFO] Running generated-file integrity smoke check..."
 python tests/smoke_generated_file_integrity.py
 if ($LASTEXITCODE -ne 0) {
