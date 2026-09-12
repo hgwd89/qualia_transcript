@@ -37,12 +37,25 @@ function Get-QualiaRuntimeConfig {
 
     $hostAddress = "$($runtime.host)"
     $port = [int]$runtime.port
-    $browserHost = if ($hostAddress -eq "0.0.0.0") { "127.0.0.1" } else { $hostAddress }
+
+    # Bind-all addresses are not valid browser destinations. Use the matching
+    # loopback family for readiness checks and browser launch.
+    if ($hostAddress -eq "0.0.0.0") {
+        $browserHost = "127.0.0.1"
+    } elseif ($hostAddress -eq "::") {
+        $browserHost = "::1"
+    } else {
+        $browserHost = $hostAddress
+    }
+
+    # RFC 3986 requires IPv6 literals to be bracketed in URLs. Keep BrowserHost
+    # unbracketed for diagnostics and expose only the URL-formatted host here.
+    $urlHost = if ($browserHost.Contains(":")) { "[$browserHost]" } else { $browserHost }
 
     return [PSCustomObject]@{
-        Host       = $hostAddress
-        Port       = $port
+        Host        = $hostAddress
+        Port        = $port
         BrowserHost = $browserHost
-        Url        = "http://${browserHost}:${port}/"
+        Url         = "http://${urlHost}:${port}/"
     }
 }
