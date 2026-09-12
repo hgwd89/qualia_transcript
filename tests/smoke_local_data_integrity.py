@@ -184,8 +184,7 @@ def expected_minimum_ai_counts(baseline: dict | None) -> dict[str, int]:
     return {str(k): int(v) for k, v in source.items()}
 
 
-def main() -> int:
-    root = repo_root()
+def _run_check(root: Path) -> int:
     failures = 0
 
     db_path = resolve_db_path(root)
@@ -414,6 +413,24 @@ def main() -> int:
 
     print(f"\nSummary: FAIL ({failures} checks failed)")
     return 1
+
+
+def main() -> int:
+    root = repo_root()
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+
+    from services.runtime_lock import RuntimeLockError, runtime_lock
+
+    try:
+        with runtime_lock("reader"):
+            return _run_check(root)
+    except RuntimeLockError as exc:
+        print(
+            "[FAIL] local data integrity check refused while backup/restore "
+            f"maintenance is active: {exc}"
+        )
+        return 3
 
 
 if __name__ == "__main__":
