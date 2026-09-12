@@ -104,6 +104,27 @@ def main() -> int:
                     and get_secret_setting("openai_api_key") == "replacement-openai-secret",
                 )
 
+                from services import semantic_analysis
+
+                captured: dict[str, str | None] = {}
+                original_openai = semantic_analysis.openai.OpenAI
+
+                class CapturingOpenAI:
+                    def __init__(self, api_key=None, **_kwargs):
+                        captured["api_key"] = api_key
+
+                semantic_analysis.openai.OpenAI = CapturingOpenAI
+                try:
+                    semantic_analysis._client()
+                finally:
+                    semantic_analysis.openai.OpenAI = original_openai
+
+                failures += check(
+                    "semantic embeddings receive decrypted OpenAI key",
+                    captured.get("api_key") == "replacement-openai-secret"
+                    and captured.get("api_key") != stored_replacement,
+                )
+
                 db.session.remove()
                 db.engine.dispose()
         finally:
