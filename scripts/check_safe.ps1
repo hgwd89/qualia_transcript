@@ -47,6 +47,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] backup/restore integrity hardening smoke checks passed."
 
+Write-Host "[INFO] Running runtime maintenance exclusion smoke check..."
+python tests/smoke_runtime_maintenance_lock.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] runtime maintenance exclusion smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] runtime maintenance exclusion smoke checks passed."
+
 Write-Host "[INFO] Running project deletion lifecycle smoke check..."
 python tests/smoke_project_deletion_lifecycle.py
 if ($LASTEXITCODE -ne 0) {
