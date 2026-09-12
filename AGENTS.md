@@ -72,6 +72,7 @@ For Windows local launcher work, only edit:
 - It may treat an existing listener as Qualia Transcript only when the endpoint positively identifies the configured service; a generic HTTP 200 is insufficient.
 - It must wait for readiness with a retry loop: max 30 seconds, 1-second interval, success only when the Qualia endpoint identity check passes.
 - It must not kill unrelated processes.
+- If a newly launched process fails readiness, cleanup must terminate only the `System.Diagnostics.Process` object returned by that `Start-Process` call; it must not re-resolve the numeric PID for termination.
 - `stop_app.ps1` may stop only one unambiguous Python listener on the configured `APP_PORT` whose command line contains this repository's resolved absolute `app.py` as a complete argument. Before both normal and forced termination, it must revalidate the same process instance using PID, process start time, and exact repository `app.py` identity, and terminate through that validated process object. PID reuse or unreadable/inconclusive identity must never cause an unrelated process to be stopped; ambiguous identity fails closed.
 - `open_app.ps1` must open the runtime-config URL. Browser URLs normalize wildcard bind hosts (`0.0.0.0` → `127.0.0.1`, `::` → `::1`) and bracket IPv6 literals.
 
