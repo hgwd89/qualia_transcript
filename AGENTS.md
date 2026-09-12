@@ -71,7 +71,7 @@ For Windows local launcher work, only edit:
 - It may treat an existing listener as Qualia Transcript only when the endpoint positively identifies the configured service; a generic HTTP 200 is insufficient.
 - It must wait for readiness with a retry loop: max 30 seconds, 1-second interval, success only when the Qualia endpoint identity check passes.
 - It must not kill unrelated processes.
-- `stop_app.ps1` may stop only the Qualia Transcript Flask process using the configured `APP_PORT`. Generic `python app.py` is insufficient process identity: use this repository's resolved absolute `app.py` command-line identity or a positively verified Qualia endpoint. Any force-stop retry must remain fenced to the originally identified PID and exact repository process identity.
+- `stop_app.ps1` may stop only the Python process using the configured `APP_PORT` whose command line contains this repository's resolved absolute `app.py` path. Generic `python app.py` or endpoint identity alone is insufficient. Any force-stop retry must remain fenced to the originally identified PID and exact repository process identity.
 - `open_app.ps1` must open the runtime-config URL. Browser URLs normalize wildcard bind hosts (`0.0.0.0` → `127.0.0.1`, `::` → `::1`) and bracket IPv6 literals.
 
 ## Lightweight verification
