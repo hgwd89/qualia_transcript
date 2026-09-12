@@ -7,21 +7,34 @@ $pythonExe = Get-QualiaPythonExecutable -ProjectDir $ProjectDir
 $runtime = Get-QualiaRuntimeConfig -ProjectDir $ProjectDir -PythonExe $pythonExe
 $Port = $runtime.Port
 
+function Get-ProcessInfoById {
+    param([int]$ProcessId)
+
+    $proc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $proc) { return $null }
+
+    $startTimeUtcTicks = $null
+    try {
+        $startTimeUtcTicks = [long]$proc.StartTime.ToUniversalTime().Ticks
+    } catch {
+        $startTimeUtcTicks = $null
+    }
+    $wmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+
+    [PSCustomObject]@{
+        Pid               = $ProcessId
+        Name              = $proc.ProcessName
+        CommandLine       = if ($wmi) { $wmi.CommandLine } else { "" }
+        StartTimeUtcTicks = $startTimeUtcTicks
+    }
+}
+
 function Get-PortProcessInfo {
     param([int]$LocalPort)
 
     $conn = Get-NetTCPConnection -State Listen -LocalPort $LocalPort -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $conn) { return $null }
-
-    $ownerPid = $conn.OwningProcess
-    $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
-    $wmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerPid" -ErrorAction SilentlyContinue
-
-    [PSCustomObject]@{
-        Pid         = $ownerPid
-        Name        = if ($proc) { $proc.ProcessName } else { "" }
-        CommandLine = if ($wmi) { $wmi.CommandLine } else { "" }
-    }
+    return Get-ProcessInfoById -ProcessId ([int]$conn.OwningProcess)
 }
 
 function Is-QualiaFlaskProcess {
@@ -33,14 +46,25 @@ function Is-QualiaFlaskProcess {
         -ProcessName "$($ProcessInfo.Name)"
 }
 
+function Is-SameQualiaProcessInstance {
+    param(
+        [object]$Candidate,
+        [object]$Initial
+    )
+    return Test-QualiaSameProcessInstance `
+        -Candidate $Candidate `
+        -Initial $Initial `
+        -ProjectDir $ProjectDir
+}
+
 $target = Get-PortProcessInfo -LocalPort $Port
 if (-not $target) {
     Write-Host "ポート $Port を使用中のプロセスはありません。停止対象なし。" -ForegroundColor Yellow
     exit 0
 }
 
-if (-not (Is-QualiaFlaskProcess -ProcessInfo $target)) {
-    Write-Host "ポート $Port は使用中ですが、このリポジトリの Qualia Transcript プロセスと確認できないため停止しません。" -ForegroundColor Red
+if (-not (Is-QualiaFlaskProcess -ProcessInfo $target) -or $null -eq $target.StartTimeUtcTicks) {
+    Write-Host "ポート $Port は使用中ですが、このリポジトリの Qualia Transcript プロセスと安全に確認できないため停止しません。" -ForegroundColor Red
     Write-Host "PID: $($target.Pid), Name: $($target.Name)" -ForegroundColor Red
     if ($target.CommandLine) {
         Write-Host "CommandLine: $($target.CommandLine)" -ForegroundColor Red
@@ -55,26 +79,48 @@ if ($target.CommandLine) {
     Write-Host "CommandLine: $($target.CommandLine)" -ForegroundColor DarkYellow
 }
 
+# Re-read the PID immediately before the first termination signal. If the
+# original process already exited and Windows reused the PID, do not touch the
+# replacement process.
+$preStop = Get-ProcessInfoById -ProcessId $initialPid
+if (-not $preStop) {
+    Write-Host "停止対象は停止操作前に既に終了しました。" -ForegroundColor Green
+    exit 0
+}
+if (-not (Is-SameQualiaProcessInstance -Candidate $preStop -Initial $target)) {
+    Write-Host "停止操作前に PID のプロセス identity が変化したため停止しません。" -ForegroundColor Red
+    exit 1
+}
+
 Write-Host "Qualia Transcript を停止します (PID: $initialPid)..." -ForegroundColor Cyan
 Stop-Process -Id $initialPid -ErrorAction SilentlyContinue
 
 for ($i = 1; $i -le 10; $i++) {
     Start-Sleep -Seconds 1
-    $after = Get-PortProcessInfo -LocalPort $Port
+    $after = Get-ProcessInfoById -ProcessId $initialPid
     if (-not $after) {
         Write-Host "停止成功。" -ForegroundColor Green
         exit 0
     }
 
-    # Force only the same listener we originally identified, and only when its
-    # command line still points at this repository's absolute app.py path.
-    if ([int]$after.Pid -eq $initialPid -and (Is-QualiaFlaskProcess -ProcessInfo $after)) {
-        Stop-Process -Id $after.Pid -Force -ErrorAction SilentlyContinue
+    # A reused PID is a different process instance even when the number matches.
+    # Never force-stop it. Force is allowed only while PID, start time, and exact
+    # repository app.py argument still identify the original process instance.
+    if (-not (Is-SameQualiaProcessInstance -Candidate $after -Initial $target)) {
+        Write-Host "元の Qualia Transcript は終了しました。再利用された PID のプロセスは停止しません。" -ForegroundColor Green
+        exit 0
     }
+
+    Stop-Process -Id $initialPid -Force -ErrorAction SilentlyContinue
 }
 
-$final = Get-PortProcessInfo -LocalPort $Port
-Write-Host "停止確認に失敗しました。まだポート $Port が使用中です。" -ForegroundColor Red
+$final = Get-ProcessInfoById -ProcessId $initialPid
+if (-not $final -or -not (Is-SameQualiaProcessInstance -Candidate $final -Initial $target)) {
+    Write-Host "停止成功。" -ForegroundColor Green
+    exit 0
+}
+
+Write-Host "停止確認に失敗しました。元の Qualia Transcript プロセスがまだ実行中です。" -ForegroundColor Red
 Write-Host "PID: $($final.Pid), Name: $($final.Name)" -ForegroundColor Red
 if ($final.CommandLine) {
     Write-Host "CommandLine: $($final.CommandLine)" -ForegroundColor Red
