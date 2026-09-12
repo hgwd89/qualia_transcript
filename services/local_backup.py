@@ -159,6 +159,48 @@ def _collect_tree(source_dir: Path, archive_prefix: str, staging_root: Path) -> 
     return entries
 
 
+def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
+    """Copy a managed tree for rollback without following linked/reparse entries."""
+    if not source_dir.exists():
+        return
+    if not source_dir.is_dir():
+        raise ValueError(f"expected directory: {source_dir}")
+
+    root = source_dir.resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        for source in sorted(current.iterdir(), key=lambda path: path.name):
+            if is_link_or_reparse(source):
+                raise ValueError(
+                    f"managed restore rollback tree contains linked/reparse entry: {source}"
+                )
+            try:
+                resolved = source.resolve()
+                resolved.relative_to(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ValueError(
+                    f"managed restore rollback tree escapes configured root: {source}"
+                ) from exc
+
+            relative = source.relative_to(root)
+            target = destination / relative
+            if source.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                pending.append(source)
+                continue
+            if not source.is_file():
+                continue
+
+            if is_link_or_reparse(source):
+                raise ValueError(
+                    f"managed restore rollback file became linked/reparse: {source}"
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+
 def _create_backup_unlocked(
     destination_dir: str | os.PathLike | None = None,
     *,
@@ -443,9 +485,9 @@ def _restore_backup_unlocked(
         if database_existed:
             shutil.copy2(database_path, rollback_db)
         if uploads_existed:
-            shutil.copytree(uploads, rollback_uploads)
+            _snapshot_tree_no_links(uploads, rollback_uploads)
         if outputs_existed:
-            shutil.copytree(outputs, rollback_outputs)
+            _snapshot_tree_no_links(outputs, rollback_outputs)
 
         try:
             database_path.parent.mkdir(parents=True, exist_ok=True)
