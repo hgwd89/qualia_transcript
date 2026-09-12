@@ -28,7 +28,7 @@ The required `safe-smoke` gate currently covers:
 - detection of pre-existing SQLite foreign-key violations
 - Windows DPAPI secret-store behavior
 
-The Windows-only DPAPI regression reports a skip/pass on non-Windows systems. On Windows it validates local protection/migration behavior and verifies that the application consumers covered by the regression receive usable settings without contacting an external service.
+The Windows-only DPAPI regression reports a skip/pass on non-Windows systems. On Windows it validates local protection/migration behavior, verifies that covered application consumers receive decrypted usable settings without contacting an external service, and verifies settings-form atomicity: if a later secret field cannot be protected, earlier secret and non-secret field changes from the same POST are rolled back together rather than partially committed.
 
 ## Broader non-paid local suite
 

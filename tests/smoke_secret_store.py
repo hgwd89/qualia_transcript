@@ -33,6 +33,7 @@ def main() -> int:
             from models.setting import AppSetting
             from services.secret_store import (
                 PROTECTED_PREFIX,
+                SecretStorageError,
                 get_secret_setting,
                 is_protected_secret,
                 migrate_legacy_plaintext_secrets,
@@ -102,6 +103,38 @@ def main() -> int:
                     and is_protected_secret(stored_replacement)
                     and "replacement-openai-secret" not in stored_replacement
                     and get_secret_setting("openai_api_key") == "replacement-openai-secret",
+                )
+
+                AppSetting.set("whisper_model", "baseline-whisper")
+                from routes import settings as settings_route
+
+                original_route_set_secret = settings_route.set_secret_setting
+
+                def fail_last_secret(key, value, *, commit=True):
+                    if key == "rakuten_access_key":
+                        raise SecretStorageError("simulated DPAPI failure")
+                    return original_route_set_secret(key, value, commit=commit)
+
+                settings_route.set_secret_setting = fail_last_secret
+                try:
+                    failed_response = client.post(
+                        "/settings",
+                        data={
+                            "openai_api_key": "must-not-partially-save",
+                            "whisper_model": "must-not-partially-save-model",
+                            "rakuten_access_key": "trigger-failure",
+                        },
+                        follow_redirects=False,
+                    )
+                finally:
+                    settings_route.set_secret_setting = original_route_set_secret
+
+                failures += check(
+                    "multi-field settings failure rolls back every earlier field",
+                    failed_response.status_code == 302
+                    and get_secret_setting("openai_api_key") == "replacement-openai-secret"
+                    and AppSetting.get("whisper_model") == "baseline-whisper"
+                    and get_secret_setting("rakuten_access_key") == "rakuten-secret-value",
                 )
 
                 from services import semantic_analysis
