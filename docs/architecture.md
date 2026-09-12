@@ -104,6 +104,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/processing_jobs.py`: worker launch, lease ownership, progress, execution, and terminal state handling.
 - `services/processing_result_guard.py`: crash-window reuse and canonical result-write cleanup/fencing helpers.
 - `services/storage_paths.py`: shared output/upload path validation, including symlink and Windows reparse/junction rejection below managed roots.
+- `services/local_backup.py`: verified local backup/restore boundary for the application SQLite database, uploads, outputs, manifest/hash validation, staged restore, and rollback.
 - `services/project_deletion.py`: serialized project deletion plus post-commit managed-storage cleanup.
 - `services/report_verbatim.py`: Word verbatim report generation.
 - `services/report_formatted.py`: Excel formatted sheet generation.
@@ -141,6 +142,18 @@ New SQLite databases receive the model-declared foreign key from `processing_job
 The compatibility strategy is deliberately non-destructive. Startup keeps the existing durable `processing_jobs` table and rows unchanged, ensures the `question_id` column exists, and installs two SQLite triggers for inserts and question-ID updates. Those triggers reject a non-null `question_id` when the referenced interview-flow question does not exist. They remain effective even if `PRAGMA foreign_keys` is disabled, so legacy tables receive a database-level guard without a table rebuild or history rewrite.
 
 Existing orphan values are never silently repaired, nulled, or deleted. `audit_production_readiness_v2.py` explicitly checks `ProcessingJob.question_id` rows in addition to normal `PRAGMA foreign_key_check`. Professional readiness is blocked when the column is missing, when a legacy table has neither a declared FK nor both compatibility triggers, or when historical jobs still reference missing questions. This separates forward enforcement from historical-data remediation.
+
+## Backup and Restore Contract
+
+The application SQLite database has one canonical absolute path under `instance/`. `config.DATABASE_URI`, backup creation, readiness tooling, and restore must refer to that same file; legacy explicit relative `sqlite:///...` URIs are resolved using Flask's instance-directory rule rather than the repository root.
+
+`services/local_backup.py` creates a recovery set containing a SQLite snapshot plus uploads and outputs, records exact size/SHA-256 metadata in a manifest, and validates archive membership, hashes, and SQLite integrity before a backup is accepted. Completed backup archives and their destination directory are owner-only on POSIX systems.
+
+Applied restore is deliberately staged. The source ZIP is first copied into a private temporary location, that staged copy is fully validated, and extraction/restoration uses those same bytes so a subsequently replaced source archive cannot change the recovery payload after validation. The database member used for restore is the manifest-declared `database_archive_path`; validation requires that member to be present in the declared file set.
+
+Restore snapshots the pre-existing database/uploads/outputs for rollback before replacement. If the target database did not exist before restore and a later step fails, the newly created database is removed rather than left as a partial recovery. When the existing database is damaged enough that a normal verified pre-restore backup cannot be produced, recovery requires an explicit acknowledgement and preserves the original database bytes as a separate unvalidated owner-only copy before replacement.
+
+Application/backup mutual exclusion is a separate lifecycle requirement: backup and applied restore must not race with live application writes. Until process-lifetime locking is implemented, the current busy check remains advisory and operators must stop the application before applied restore.
 
 ## Managed Storage Path Contract
 
