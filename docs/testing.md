@@ -28,6 +28,7 @@ The required `safe-smoke` gate currently covers:
 - project deletion lifecycle, including durable-job serialization, managed-storage cleanup, non-recursive linked-path handling, DB-failure preservation, and mandatory retention of raw transcript snapshots
 - participant/interview-flow project boundaries and delete guards
 - interview-creation scope validation
+- segment-role normalization/update integrity: canonical `moderator` handling, malformed or empty JSON rejection without mutation, and partial role updates that preserve an existing participant unless `participant_id` is explicitly supplied
 - SQLite foreign-key enforcement
 - legacy `processing_jobs.question_id` compatibility guards: insert/update triggers must reject orphan question references even when `PRAGMA foreign_keys=OFF`
 - readiness detection of declared SQLite FK violations and explicit `ProcessingJob.question_id` orphans
@@ -100,7 +101,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check_outputs.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_outputs_flags.ps1
 ```
 
-Generated artifacts must stay out of Git and output generation must not modify source transcripts.
+Generated artifacts must stay out of Git and output generation must not modify source transcripts. The output check also runs a self-contained formatted-sheet regression proving that human `SpeakerAssignment` roles override stale `Segment.speaker_role` values for both mapped and unclassified respondent rows.
 
 ## Provider-backed checks
 
