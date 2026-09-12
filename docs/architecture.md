@@ -100,6 +100,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/analysis_review.py`: human review transitions and evidence-quote → respondent source-segment resolution.
 - `services/semantic_analysis.py`: semantic clustering and dry-run/no-ai support.
 - `services/integrated_analysis.py`: no-ai integrated analysis assembly from existing local data.
+- `services/project_deletion.py`: serialized project deletion plus post-commit managed-storage cleanup.
 - `services/report_verbatim.py`: Word verbatim report generation.
 - `services/report_formatted.py`: Excel formatted sheet generation.
 - `services/report_analysis.py`: flat utterance/mapping analysis CSV/XLSX generation.
@@ -114,6 +115,14 @@ On Windows, `services/secret_store.py` protects configured secret settings with 
 Environment values remain the fallback when no database secret is configured. Existing plaintext database secrets are migrated to DPAPI during Windows application startup. Migration failure is non-destructive: startup continues, and legacy plaintext remains readable until migration can succeed. Non-Windows environments do not rewrite database secrets into a weaker plaintext representation and continue to rely on supported fallbacks.
 
 The settings UI exposes only configured/not-configured state for password fields; decrypted secret values are not rendered back into HTML.
+
+## Project Deletion Contract
+
+Project deletion is coordinated with durable processing jobs. After stale-job recovery, `services/project_deletion.py` starts a serialized database write transaction before checking active jobs. On SQLite it uses `BEGIN IMMEDIATE`, matching job admission's write reservation, so a new job cannot pass admission between the active-job check and the project deletion commit. Active `pending` or `running` jobs block deletion.
+
+Terminal `ProcessingJob` rows and the ORM-owned project graph are deleted in the database transaction first. Managed filesystem cleanup runs only after the database commit. Cleanup is best-effort: path-resolution or deletion failures are returned as cleanup warnings rather than reported as a failed database deletion.
+
+Managed project/interview ID directories are never recursively removed through a symlink, Windows junction, or other reparse point. Linked ID directories are rejected and left for explicit audit/cleanup, preventing one project's deletion from traversing into another managed directory.
 
 ## Checks and Tests
 
