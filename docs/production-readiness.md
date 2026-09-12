@@ -2,36 +2,54 @@
 
 ## Purpose
 
-`production readiness audit` is the final read-only acceptance gate for the real Qualia Transcript database snapshot before professional delivery or broad internal use.
+`production readiness audit` is the final read-only acceptance gate for real Qualia Transcript data before professional delivery or broad internal use.
 
-The current audit is database-wide, not a single-project selector. Every project and relationship present in the selected SQLite database can contribute blockers or warnings. If one workstation database contains unrelated work-in-progress projects, a strict audit may therefore fail because of those projects as well. Use a clean delivery/recovery copy when a database-wide acceptance result is required for only a subset of work; do not interpret a whole-database PASS as project-scoped certification.
+Two scopes are supported:
 
-It is intentionally separate from CI. CI uses temporary fixtures and cannot inspect the private local research database, raw transcript snapshots, generated deliverables, or backup archives on the research workstation.
+- Database-wide mode is the default and audits every project/business row in the selected SQLite database.
+- Project-scoped mode uses `--project-id <ID>` and limits project-owned workflow/content checks to that project. Shared database integrity, declared foreign-key consistency, raw-snapshot structural validation, and backup-set validation remain global because they describe the safety of the common database/recovery set rather than one project's rows.
+
+Project-scoped mode is intended for the normal multi-project workstation case: an unrelated draft project should not block delivery of a different completed project merely because it still has unknown speakers, incomplete mappings, missing draft outputs, or active project-specific jobs.
+
+It is intentionally separate from real-data CI acceptance. CI uses temporary fixtures and cannot inspect the private local research database, raw transcript snapshots, generated deliverables, or backup archives on the research workstation.
 
 ## Command
 
-From the repository root:
+From the repository root, audit the entire database:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_production_readiness.ps1
 ```
 
-For a stricter acceptance where warnings also fail:
+Audit one project while retaining shared database/recovery-set checks:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/check_production_readiness.ps1 --strict
+powershell -ExecutionPolicy Bypass -File scripts/check_production_readiness.ps1 --project-id 123
 ```
 
-For machine-readable output:
+For stricter acceptance where warnings also fail:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_production_readiness.ps1 --project-id 123 --strict
+```
+
+For machine-readable database-wide output:
 
 ```powershell
 python scripts/audit_production_readiness_v2.py --json
 ```
 
+For machine-readable project-scoped output:
+
+```powershell
+python scripts/audit_production_readiness_project.py --project-id 123 --json
+```
+
 Custom paths can be supplied when validating a copy or recovery environment:
 
 ```powershell
-python scripts/audit_production_readiness_v2.py `
+python scripts/audit_production_readiness_project.py `
+  --project-id 123 `
   --db C:\path\to\qualia_transcript.db `
   --output-dir C:\path\to\outputs `
   --backup-dir C:\path\to\backups `
@@ -42,7 +60,8 @@ python scripts/audit_production_readiness_v2.py `
 
 The audit:
 
-- opens SQLite in `mode=ro`
+- opens the application SQLite database in `mode=ro`
+- uses connection-local TEMP VIEWs for project scoping and does not write them into the application database
 - does not call `create_app()`
 - does not run migrations
 - does not call OpenAI
@@ -52,9 +71,23 @@ The audit:
 - does not modify raw transcript snapshots
 - does not create or restore backups
 
+## Scope semantics
+
+In project-scoped mode, project-owned tables such as interviews, flows/questions, segments, mappings, speaker assignments, AI analyses, generated files, media, and transcriptions are exposed to the existing audit through connection-local TEMP VIEWs limited to the selected project. The original SQLite file remains unchanged.
+
+Project-specific active/orphan `ProcessingJob` findings are filtered to the selected project. By contrast, these checks deliberately remain database-wide even in project mode:
+
+- SQLite `PRAGMA integrity_check`
+- declared foreign-key violations from `PRAGMA foreign_key_check`
+- existence/schema protection of the shared `processing_jobs` table
+- structural/hash validity of the shared raw-transcript snapshot store
+- validity/existence of the newest shared local backup archive
+
+A project-scoped PASS therefore means the selected project's content/traceability checks passed and the shared persistence/recovery substrate was also acceptable. It does not certify unrelated project content.
+
 ## Blocking conditions
 
-A BLOCKER means the selected database snapshot should not be treated as professionally deliverable until resolved.
+A BLOCKER means the audited scope should not be treated as professionally deliverable until resolved.
 
 The audit currently blocks on:
 
@@ -63,7 +96,7 @@ The audit currently blocks on:
 - existing SQLite foreign-key violations reported by `PRAGMA foreign_key_check`
 - missing `processing_jobs.question_id` on an installation that has not completed the compatibility upgrade
 - legacy `processing_jobs.question_id` with neither a declared FK nor the compatibility insert/update trigger guard
-- existing `ProcessingJob.question_id` values that reference missing interview-flow questions
+- existing `ProcessingJob.question_id` values that reference missing interview-flow questions in the audited project scope
 - empty source Segment text
 - unsupported speaker roles
 - interview/segment/speaker-assignment participant links crossing project boundaries
@@ -97,26 +130,26 @@ Current warnings include:
 - completed transcriptions without raw transcript snapshots
 - analyzed/done interviews with no approved AI analysis
 - generated file extension mismatching recorded format
-- active processing jobs that have not reached a terminal state
+- active processing jobs that have not reached a terminal state in the audited project scope
 - no local backup archive yet
 
 Some warnings may be legitimate during work-in-progress. They should not remain unexplained at final delivery.
 
 ## Recommended professional release gate
 
-Before treating the selected database snapshot as ready for delivery:
+Before treating one project as ready for delivery:
 
 1. Run `scripts/check_all.ps1 -AllLocal`.
 2. Run `scripts/check_local_data_integrity.ps1` with a baseline for important production datasets.
 3. Create and validate a backup with `scripts/backup_local_data.py`.
-4. Run `scripts/check_production_readiness.ps1 --strict` against the database, outputs, and backup set you intend to accept.
+4. Run `scripts/check_production_readiness.ps1 --project-id <ID> --strict` against the database, outputs, and backup set you intend to accept. Omit `--project-id` only when you deliberately want whole-database acceptance.
 5. Open the final Word/Excel files and compare them with the agreed deliverable template/golden file.
 6. Only then copy or send the deliverables outside the workstation.
 
 The backup precedes the strict audit deliberately: `no_backup_archive` is a readiness warning, and `--strict` converts warnings into a non-zero result. On a fresh workstation, running strict readiness before creating the first backup would therefore fail by design.
 
-A clean strict readiness audit means the application's database-wide structural and traceability checks passed for the selected snapshot. It does not replace human qualitative-research review of interpretation quality, moderation context, or client-specific formatting requirements.
+A clean project-scoped strict readiness audit means the selected project's structural/traceability checks and the shared database/recovery-set checks passed. It does not replace human qualitative-research review of interpretation quality, moderation context, or client-specific formatting requirements.
 
 ## CI coverage
 
-The real-data audit remains manual-only. Required CI includes focused temporary-fixture regressions for readiness foreign-key/orphan behavior and traceability rules such as flow ownership and per-source evidence matching. The broader `tests/smoke_production_readiness.py` uses a temporary SQLite database and temporary outputs to verify the hardened audit, artifact validation, raw-snapshot validation, backup validation, and job-quiescence logic; it remains part of `scripts/check_all.ps1 -AllLocal` rather than reading the real project database.
+The real-data audit remains manual-only. Required CI includes focused temporary-fixture regressions for readiness foreign-key/orphan behavior, traceability rules such as flow ownership/per-source evidence matching, and project-scope isolation. The project-scope regression proves that unrelated project content defects do not leak into the selected project and that the source SQLite bytes remain unchanged. The broader `tests/smoke_production_readiness.py` uses a temporary SQLite database and temporary outputs to verify the hardened audit, artifact validation, raw-snapshot validation, backup validation, and job-quiescence logic; it remains part of `scripts/check_all.ps1 -AllLocal` rather than reading the real project database.
