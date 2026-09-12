@@ -47,7 +47,9 @@ function Test-QualiaProcessCommandLine {
 
     $normalizedLine = "$CommandLine".Replace("/", "\").ToLowerInvariant()
     $normalizedScript = "$appScript".Replace("/", "\").ToLowerInvariant()
-    return $normalizedLine.Contains($normalizedScript)
+    $escapedScript = [Regex]::Escape($normalizedScript)
+    $argumentPattern = '(?:^|\s)(?:"' + $escapedScript + '"|' + $escapedScript + ')(?=\s|$)'
+    return [Regex]::IsMatch($normalizedLine, $argumentPattern)
 }
 
 function Get-QualiaBrowserHost {
@@ -94,26 +96,48 @@ function Test-QualiaSettingsContent {
     )
 
     if (-not $Content -or -not $ServiceName) { return $false }
+    $decodedContent = [System.Net.WebUtility]::HtmlDecode("$Content")
     return (
-        $Content.Contains($ServiceName) -and
-        ($Content -match "OpenAI APIキー|Whisperモデル")
+        $decodedContent.Contains($ServiceName) -and
+        ($decodedContent -match "OpenAI APIキー|Whisperモデル")
     )
+}
+
+function Get-QualiaRequestTimeoutSec {
+    param(
+        [datetime]$DeadlineUtc,
+        [int]$DefaultTimeoutSec = 2
+    )
+
+    if ($DefaultTimeoutSec -lt 1) { return 0 }
+    $remainingSeconds = ($DeadlineUtc - [DateTime]::UtcNow).TotalSeconds
+    if ($remainingSeconds -lt 1) { return 0 }
+    return [int][Math]::Min($DefaultTimeoutSec, [Math]::Floor($remainingSeconds))
 }
 
 function Test-QualiaAppEndpoint {
     param(
         [string]$RootUrl,
         [string]$ServiceName,
-        [int]$TimeoutSec = 2
+        [int]$TimeoutSec = 2,
+        [datetime]$DeadlineUtc = [datetime]::MaxValue
     )
 
     if (-not $RootUrl -or -not $ServiceName) { return $false }
     try {
-        $root = Invoke-WebRequest -Uri $RootUrl -UseBasicParsing -TimeoutSec $TimeoutSec
+        $rootTimeout = Get-QualiaRequestTimeoutSec `
+            -DeadlineUtc $DeadlineUtc `
+            -DefaultTimeoutSec $TimeoutSec
+        if ($rootTimeout -lt 1) { return $false }
+        $root = Invoke-WebRequest -Uri $RootUrl -UseBasicParsing -TimeoutSec $rootTimeout
         if ([int]$root.StatusCode -ne 200) { return $false }
 
+        $settingsTimeout = Get-QualiaRequestTimeoutSec `
+            -DeadlineUtc $DeadlineUtc `
+            -DefaultTimeoutSec $TimeoutSec
+        if ($settingsTimeout -lt 1) { return $false }
         $settingsUrl = "${RootUrl}settings"
-        $settings = Invoke-WebRequest -Uri $settingsUrl -UseBasicParsing -TimeoutSec $TimeoutSec
+        $settings = Invoke-WebRequest -Uri $settingsUrl -UseBasicParsing -TimeoutSec $settingsTimeout
         if ([int]$settings.StatusCode -ne 200) { return $false }
 
         return Test-QualiaSettingsContent `
