@@ -269,6 +269,13 @@ def main() -> int:
                     and any("cleanup path rejected" in item for item in warning_result.cleanup_errors),
                     f"errors={warning_result.cleanup_errors}",
                 )
+                # The warning fixture intentionally leaves its ID directory behind.
+                # Remove it before the next project is created because SQLite may
+                # reuse the deleted highest row ID when AUTOINCREMENT is not used.
+                if warning_marker.exists():
+                    warning_marker.unlink()
+                if warning_dir.exists():
+                    warning_dir.rmdir()
 
                 linked_project = Project(name="Linked output path")
                 db.session.add(linked_project)
