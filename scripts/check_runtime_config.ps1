@@ -93,6 +93,9 @@ $stopScriptText = Get-Content (Join-Path $projectRoot "stop_app.ps1") -Raw
 Assert-Bool -Name "launcher passes absolute app.py identity to Python" `
     -Actual ($startScriptText.Contains("Get-QualiaAppScriptPath") -and $startScriptText.Contains('$AppArgument')) `
     -Expected $true
+Assert-Bool -Name "stop requires exact repository process identity" `
+    -Actual ($stopScriptText.Contains("Is-QualiaFlaskProcess") -and -not $stopScriptText.Contains("Test-QualiaAppEndpoint")) `
+    -Expected $true
 Assert-Bool -Name "forced stop is fenced to the original listener PID" `
     -Actual ($stopScriptText.Contains('$after.Pid -eq $initialPid')) `
     -Expected $true
