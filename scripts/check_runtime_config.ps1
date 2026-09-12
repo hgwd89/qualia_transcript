@@ -76,8 +76,20 @@ Assert-Bool -Name "another repository app.py is rejected" `
     -Actual (Test-QualiaProcessCommandLine -CommandLine '"C:\Python\python.exe" "C:\other-project\app.py"' -ProjectDir $projectRoot -ProcessName "python") `
     -Expected $false
 
+Assert-Bool -Name "app.py path used only as a longer argument substring is rejected" `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine ("python `"$appScript.backup`"") -ProjectDir $projectRoot -ProcessName "python") `
+    -Expected $false
+
+Assert-Bool -Name "app.py path mentioned inside another argument is rejected" `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine ("python -c `"print('$appScript')`"") -ProjectDir $projectRoot -ProcessName "python") `
+    -Expected $false
+
 Assert-Bool -Name "Qualia settings content requires service identity and marker" `
     -Actual (Test-QualiaSettingsContent -Content '<title>設定 | Qualia Transcript</title><div>Whisperモデル</div>' -ServiceName "Qualia Transcript") `
+    -Expected $true
+
+Assert-Bool -Name "HTML-escaped service name is decoded before identity comparison" `
+    -Actual (Test-QualiaSettingsContent -Content '<title>Research &amp; Insights</title><div>Whisperモデル</div>' -ServiceName "Research & Insights") `
     -Expected $true
 
 Assert-Bool -Name "generic settings page is not accepted as Qualia" `
@@ -88,10 +100,17 @@ Assert-Bool -Name "service name alone is insufficient without a Qualia settings 
     -Actual (Test-QualiaSettingsContent -Content '<title>Qualia Transcript</title>' -ServiceName "Qualia Transcript") `
     -Expected $false
 
+Assert-Equal -Name "expired readiness deadline refuses another request" `
+    -Actual ([string](Get-QualiaRequestTimeoutSec -DeadlineUtc ([DateTime]::UtcNow.AddMilliseconds(-1)) -DefaultTimeoutSec 2)) `
+    -Expected "0"
+
 $startScriptText = Get-Content (Join-Path $projectRoot "start_app.ps1") -Raw
 $stopScriptText = Get-Content (Join-Path $projectRoot "stop_app.ps1") -Raw
 Assert-Bool -Name "launcher passes absolute app.py identity to Python" `
     -Actual ($startScriptText.Contains("Get-QualiaAppScriptPath") -and $startScriptText.Contains('$AppArgument')) `
+    -Expected $true
+Assert-Bool -Name "readiness loop uses one wall-clock UTC deadline" `
+    -Actual ($startScriptText.Contains('[DateTime]::UtcNow.AddSeconds($MaxSeconds)') -and $startScriptText.Contains('-DeadlineUtc $deadlineUtc')) `
     -Expected $true
 Assert-Bool -Name "stop requires exact repository process identity" `
     -Actual ($stopScriptText.Contains("Is-QualiaFlaskProcess") -and -not $stopScriptText.Contains("Test-QualiaAppEndpoint")) `
