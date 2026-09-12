@@ -19,8 +19,9 @@ Safe checks use temporary fixtures where data or storage is needed. They must no
 The required `safe-smoke` gate currently covers:
 
 - baseline application/model/route initialization
-- generated-file integrity, including project-scoped path enforcement, UUID-isolated internal storage for same-name outputs, rollback isolation, and bounded storage basenames for long display filenames
-- media-upload integrity
+- generated-file integrity, including project-scoped path enforcement, UUID-isolated internal storage for same-name outputs, rollback isolation, bounded storage basenames for long display filenames, and rejection of linked/reparse project storage paths
+- media-upload integrity, including rejection of linked/reparse interview storage paths
+- managed-storage path guards that reject symlinks and Windows junction/reparse entries below configured output/upload roots before generated files or uploaded media are created or resolved
 - project deletion lifecycle, including durable-job serialization, managed-storage cleanup, non-recursive linked-path handling, DB-failure preservation, and mandatory retention of raw transcript snapshots
 - participant/interview-flow project boundaries and delete guards
 - interview-creation scope validation

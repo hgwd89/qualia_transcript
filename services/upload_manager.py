@@ -7,6 +7,7 @@ from uuid import uuid4
 import config
 from models import db
 from models.interview import Interview, MediaFile
+from services.storage_paths import ensure_managed_id_dir, resolve_managed_path
 
 
 @dataclass(frozen=True)
@@ -21,18 +22,7 @@ def _upload_root() -> Path:
 
 
 def _resolve_stored_path(stored_path: str) -> Path:
-    normalized = str(stored_path or "").replace("\\", "/")
-    relative = Path(normalized)
-    if not normalized or relative.is_absolute() or ".." in relative.parts:
-        raise ValueError("stored media path is invalid")
-
-    root = _upload_root()
-    candidate = (root / relative).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("stored media path escapes UPLOAD_DIR") from exc
-    return candidate
+    return resolve_managed_path(config.UPLOAD_DIR, stored_path)
 
 
 def media_extension(original_filename: str) -> str:
@@ -54,9 +44,9 @@ def prepare_media_upload_target(interview_id: int, original_filename: str) -> Me
 
     ext = media_extension(original_filename)
     stored_name = f"{uuid4().hex}{ext}"
+    ensure_managed_id_dir(config.UPLOAD_DIR, interview_id)
     stored_path = f"{interview_id}/{stored_name}"
     full_path = _resolve_stored_path(stored_path)
-    full_path.parent.mkdir(parents=True, exist_ok=True)
     return MediaUploadTarget(
         full_path=str(full_path),
         stored_path=stored_path,
@@ -85,7 +75,8 @@ def save_and_register_media(
     Filesystem and database cannot share one transaction. The function therefore
     removes a partial/saved upload whenever file saving or the DB commit fails.
     The caller's pending Interview row is committed in the same DB transaction as
-    the MediaFile row.
+    the MediaFile row. Interview ID directories must be normal directories rather
+    than symlinks or Windows junction/reparse points.
     """
     if interview.id is None:
         raise ValueError("interview must be flushed before media upload")
@@ -93,7 +84,9 @@ def save_and_register_media(
     target = prepare_media_upload_target(interview.id, original_filename)
     try:
         file_storage.save(target.full_path)
-        full_path = Path(target.full_path)
+        full_path = _resolve_stored_path(target.stored_path)
+        if full_path != Path(target.full_path).resolve():
+            raise ValueError("uploaded media target path changed")
         if not full_path.is_file():
             raise FileNotFoundError("uploaded media file was not created")
 
