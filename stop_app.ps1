@@ -17,15 +17,30 @@ function Get-ProcessInfoById {
     try {
         $startTimeUtcTicks = [long]$proc.StartTime.ToUniversalTime().Ticks
     } catch {
-        $startTimeUtcTicks = $null
+        return $null
     }
+
     $wmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if (-not $wmi) { return $null }
+
+    # Re-read the process after the CIM lookup. If the PID was reused while the
+    # command line was being read, the start time changes and the snapshot is
+    # rejected rather than combining metadata from two process instances.
+    $verifiedProc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $verifiedProc) { return $null }
+    try {
+        $verifiedStartTimeUtcTicks = [long]$verifiedProc.StartTime.ToUniversalTime().Ticks
+    } catch {
+        return $null
+    }
+    if ($verifiedStartTimeUtcTicks -ne $startTimeUtcTicks) { return $null }
 
     [PSCustomObject]@{
         Pid               = $ProcessId
-        Name              = $proc.ProcessName
-        CommandLine       = if ($wmi) { $wmi.CommandLine } else { "" }
-        StartTimeUtcTicks = $startTimeUtcTicks
+        Name              = $verifiedProc.ProcessName
+        CommandLine       = $wmi.CommandLine
+        StartTimeUtcTicks = $verifiedStartTimeUtcTicks
+        ProcessObject     = $verifiedProc
     }
 }
 
@@ -84,7 +99,7 @@ if ($target.CommandLine) {
 # replacement process.
 $preStop = Get-ProcessInfoById -ProcessId $initialPid
 if (-not $preStop) {
-    Write-Host "停止対象は停止操作前に既に終了しました。" -ForegroundColor Green
+    Write-Host "停止対象は停止操作前に既に終了したか、安全に再確認できませんでした。" -ForegroundColor Green
     exit 0
 }
 if (-not (Is-SameQualiaProcessInstance -Candidate $preStop -Initial $target)) {
@@ -93,7 +108,7 @@ if (-not (Is-SameQualiaProcessInstance -Candidate $preStop -Initial $target)) {
 }
 
 Write-Host "Qualia Transcript を停止します (PID: $initialPid)..." -ForegroundColor Cyan
-Stop-Process -Id $initialPid -ErrorAction SilentlyContinue
+Stop-Process -InputObject $preStop.ProcessObject -ErrorAction SilentlyContinue
 
 for ($i = 1; $i -le 10; $i++) {
     Start-Sleep -Seconds 1
@@ -111,7 +126,7 @@ for ($i = 1; $i -le 10; $i++) {
         exit 0
     }
 
-    Stop-Process -Id $initialPid -Force -ErrorAction SilentlyContinue
+    Stop-Process -InputObject $after.ProcessObject -Force -ErrorAction SilentlyContinue
 }
 
 $final = Get-ProcessInfoById -ProcessId $initialPid
