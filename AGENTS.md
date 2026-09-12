@@ -58,6 +58,7 @@ For Windows local launcher work, only edit:
 - `stop_app.ps1`
 - `open_app.ps1`
 - `scripts/runtime_config.ps1`
+- `scripts/check_runtime_config.ps1`
 - `README_LOCAL.md`
 - `.gitignore`
 - `logs/.gitkeep`
