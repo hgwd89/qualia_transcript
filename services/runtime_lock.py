@@ -9,7 +9,7 @@ import config
 
 
 class RuntimeLockError(RuntimeError):
-    """Raised when application and maintenance lifecycles overlap."""
+    """Raised when application/worker and maintenance lifecycles overlap."""
 
 
 _STATE_GUARD = RLock()
@@ -17,32 +17,47 @@ _HELD: dict[str, dict[str, object]] = {}
 
 
 def _default_lock_path() -> Path:
+    configured = getattr(config, "RUNTIME_LOCK_PATH", None)
+    if configured:
+        return Path(configured).resolve()
     instance_dir = Path(
         getattr(config, "INSTANCE_DIR", Path(config.BASE_DIR) / "instance")
     )
     return (instance_dir / "runtime.lock").resolve()
 
 
-def _lock_file(handle) -> None:
+def _role_mode(role: str) -> str:
+    if role in {"app", "worker"}:
+        return "shared"
+    if role == "maintenance":
+        return "exclusive"
+    raise ValueError("runtime lock role must be 'app', 'worker', or 'maintenance'")
+
+
+def _lock_file(handle, mode: str) -> None:
     handle.seek(0)
     if os.name == "nt":
         import msvcrt
 
+        lock_mode = (
+            msvcrt.LK_NBRLCK if mode == "shared" else msvcrt.LK_NBLCK
+        )
         try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt.locking(handle.fileno(), lock_mode, 1)
         except OSError as exc:
             raise RuntimeLockError(
-                "application/maintenance lock is already held; stop the running app or maintenance operation first"
+                "Qualia runtime is busy: application/worker and maintenance operations cannot overlap"
             ) from exc
         return
 
     import fcntl
 
+    flag = fcntl.LOCK_SH if mode == "shared" else fcntl.LOCK_EX
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle.fileno(), flag | fcntl.LOCK_NB)
     except OSError as exc:
         raise RuntimeLockError(
-            "application/maintenance lock is already held; stop the running app or maintenance operation first"
+            "Qualia runtime is busy: application/worker and maintenance operations cannot overlap"
         ) from exc
 
 
@@ -67,27 +82,26 @@ def _unlock_file(handle) -> None:
 
 @contextmanager
 def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
-    """Hold the application/maintenance exclusion lock for one lifecycle.
+    """Hold a process-lifetime runtime lock for one application operation.
 
-    `role` is either ``app`` or ``maintenance``. Re-entry is allowed only for the
-    same role in the same process. This lets applied restore call the normal
-    backup service for its pre-restore safety copy while still preventing backup
-    or restore from running inside a live application process.
+    App and durable-worker processes take a shared lock so they can coexist.
+    Backup/applied-restore maintenance takes an exclusive lock, so it cannot run
+    while either the web app or a detached worker can still write application
+    state. Nested acquisition is allowed only when the requested lock mode matches
+    the mode already held by this process; this lets restore call backup while
+    retaining one exclusive maintenance boundary.
     """
-    if role not in {"app", "maintenance"}:
-        raise ValueError("runtime lock role must be 'app' or 'maintenance'")
-
+    mode = _role_mode(role)
     path = Path(lock_path).resolve() if lock_path else _default_lock_path()
     key = str(path)
-    acquired_new = False
 
     with _STATE_GUARD:
         existing = _HELD.get(key)
         if existing is not None:
-            existing_role = str(existing["role"])
-            if existing_role != role:
+            existing_mode = str(existing["mode"])
+            if existing_mode != mode:
                 raise RuntimeLockError(
-                    f"runtime lock is already held by {existing_role}; cannot start {role}"
+                    f"runtime lock already held in {existing_mode} mode; cannot acquire {mode} mode"
                 )
             existing["count"] = int(existing["count"]) + 1
         else:
@@ -98,12 +112,16 @@ def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
                 if handle.tell() == 0:
                     handle.write(b"\0")
                     handle.flush()
-                _lock_file(handle)
+                _lock_file(handle, mode)
             except Exception:
                 handle.close()
                 raise
-            _HELD[key] = {"role": role, "count": 1, "handle": handle}
-            acquired_new = True
+            _HELD[key] = {
+                "mode": mode,
+                "count": 1,
+                "handle": handle,
+                "roles": {role},
+            }
 
     try:
         yield path
