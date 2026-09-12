@@ -27,13 +27,29 @@ def main() -> int:
         action="store_true",
         help="Required acknowledgement for destructive --apply restore",
     )
+    parser.add_argument(
+        "--allow-unvalidated-pre-restore",
+        action="store_true",
+        help=(
+            "If the current DB is damaged and a verified pre-restore backup cannot be "
+            "created, preserve a raw owner-only copy of that DB and continue restore. "
+            "Requires --apply and --yes."
+        ),
+    )
     args = parser.parse_args()
 
     if args.apply and not args.yes:
         print("[FAIL] restore requires both --apply and --yes")
         return 2
+    if args.allow_unvalidated_pre_restore and not (args.apply and args.yes):
+        print("[FAIL] --allow-unvalidated-pre-restore requires --apply and --yes")
+        return 2
 
-    result = restore_backup(args.archive, apply=args.apply)
+    result = restore_backup(
+        args.archive,
+        apply=args.apply,
+        allow_unvalidated_pre_restore=args.allow_unvalidated_pre_restore,
+    )
     if not args.apply:
         print("[PASS] backup validation succeeded; no files were changed")
         print(f"[INFO] created_at_utc: {result['manifest'].get('created_at_utc')}")
@@ -43,6 +59,11 @@ def main() -> int:
     print("[PASS] restore completed")
     if result.get("pre_restore_backup"):
         print(f"[PASS] pre-restore safety backup: {result['pre_restore_backup']}")
+    if result.get("pre_restore_database_copy"):
+        print(
+            "[WARN] verified pre-restore backup could not be created; "
+            f"damaged DB preserved at: {result['pre_restore_database_copy']}"
+        )
     return 0
 
 
