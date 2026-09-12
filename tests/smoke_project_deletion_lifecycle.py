@@ -284,9 +284,16 @@ def main() -> int:
                 link_detail = ""
                 try:
                     if os.name == "nt":
-                        command = f'mklink /J "{linked_output}" "{protected_target}"'
                         completed = subprocess.run(
-                            ["cmd.exe", "/d", "/c", command],
+                            [
+                                "cmd.exe",
+                                "/d",
+                                "/c",
+                                "mklink",
+                                "/J",
+                                str(linked_output),
+                                str(protected_target),
+                            ],
                             capture_output=True,
                             text=True,
                             encoding="utf-8",
