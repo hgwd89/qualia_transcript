@@ -26,13 +26,13 @@ function Get-ProcessInfoById {
     }
 
     $wmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
-    if (-not $wmi) { return $null }
+    if (-not $wmi -or -not $wmi.CommandLine) { return $null }
 
     # Re-read the process after the CIM lookup. If the PID was reused while the
     # command line was being read, the start time changes and the snapshot is
     # rejected rather than combining metadata from two process instances.
     $verifiedProc = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-    if (-not $verifiedProc) { return $null }
+    if (-not $verifiedProc -or -not $verifiedProc.ProcessName) { return $null }
     try {
         $verifiedStartTimeUtcTicks = [long]$verifiedProc.StartTime.ToUniversalTime().Ticks
     } catch {
@@ -136,12 +136,16 @@ for ($i = 1; $i -le 10; $i++) {
         exit 0
     }
 
-    # A reused PID is a different process instance even when the number matches.
-    # Never force-stop it. Force is allowed only while PID, start time, and exact
-    # repository app.py argument still identify the original process instance.
-    if (-not (Is-SameQualiaProcessInstance -Candidate $after -Initial $target)) {
+    # A different start time proves the original process is gone and this PID was
+    # reused. Missing/mismatched app identity with the same start time is not
+    # treated as success because that means revalidation is inconclusive.
+    if ([long]$after.StartTimeUtcTicks -ne [long]$target.StartTimeUtcTicks) {
         Write-Host "元の Qualia Transcript は終了しました。再利用された PID のプロセスは停止しません。" -ForegroundColor Green
         exit 0
+    }
+    if (-not (Is-SameQualiaProcessInstance -Candidate $after -Initial $target)) {
+        Write-Host "停止後のプロセス identity を安全に再確認できないため強制停止しません。" -ForegroundColor Red
+        exit 1
     }
 
     Stop-Process -InputObject $after.ProcessObject -Force -ErrorAction SilentlyContinue
@@ -156,9 +160,13 @@ if (-not $final) {
     Write-Host "停止成功。" -ForegroundColor Green
     exit 0
 }
-if (-not (Is-SameQualiaProcessInstance -Candidate $final -Initial $target)) {
+if ([long]$final.StartTimeUtcTicks -ne [long]$target.StartTimeUtcTicks) {
     Write-Host "元の Qualia Transcript は終了しました。再利用された PID のプロセスは停止しません。" -ForegroundColor Green
     exit 0
+}
+if (-not (Is-SameQualiaProcessInstance -Candidate $final -Initial $target)) {
+    Write-Host "最終プロセス identity を安全に再確認できないため、停止成功とは判定しません。" -ForegroundColor Red
+    exit 1
 }
 
 Write-Host "停止確認に失敗しました。元の Qualia Transcript プロセスがまだ実行中です。" -ForegroundColor Red
