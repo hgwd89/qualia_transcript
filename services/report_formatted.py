@@ -17,6 +17,7 @@ from models.generated_file import GeneratedFile
 from models.interview import Interview
 from models.project import Project
 from models.segment import Segment, UtteranceMapping
+from models.speaker_assignment import SpeakerAssignment
 from services.file_manager import prepare_output_target, register_generated_file
 
 
@@ -57,6 +58,59 @@ def _is_unclassified(seg: Segment) -> bool:
     return all(um.is_unclassified or um.question_id is None for um in mappings)
 
 
+def _speaker_assignment_maps(interviews: list[Interview]) -> dict[int, dict[str, SpeakerAssignment]]:
+    maps: dict[int, dict[str, SpeakerAssignment]] = {
+        int(iv.id): {} for iv in interviews if iv.id is not None
+    }
+    interview_ids = list(maps)
+    if not interview_ids:
+        return maps
+
+    assignments = (
+        SpeakerAssignment.query
+        .filter(SpeakerAssignment.interview_id.in_(interview_ids))
+        .all()
+    )
+    for assignment in assignments:
+        label = str(assignment.speaker_label or "").strip()
+        if not label:
+            continue
+        maps.setdefault(int(assignment.interview_id), {})[label] = assignment
+    return maps
+
+
+def _effective_speaker_role(
+    seg: Segment,
+    assignment_map: dict[str, SpeakerAssignment] | None = None,
+) -> str:
+    """Return the human-confirmed role when available, else the Segment role."""
+    assignment_map = assignment_map or {}
+    assignment = assignment_map.get(str(seg.speaker_label or ""))
+    if assignment and assignment.speaker_role:
+        return str(assignment.speaker_role)
+    return str(seg.speaker_role or "unknown")
+
+
+def _respondent_mappings(
+    question_id: int,
+    interview_id: int,
+    assignment_map: dict[str, SpeakerAssignment] | None = None,
+) -> list[UtteranceMapping]:
+    mappings = (
+        UtteranceMapping.query
+        .filter_by(question_id=question_id)
+        .join(Segment, UtteranceMapping.segment_id == Segment.id)
+        .filter(Segment.interview_id == interview_id)
+        .order_by(Segment.seq.asc(), UtteranceMapping.id.asc())
+        .all()
+    )
+    return [
+        mapping
+        for mapping in mappings
+        if _effective_speaker_role(mapping.segment, assignment_map) == "respondent"
+    ]
+
+
 def generate_formatted_sheet(project_id: int) -> GeneratedFile:
     project = Project.query.get(project_id)
     if not project:
@@ -68,6 +122,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
         .order_by(Interview.interview_date.asc(), Interview.id.asc())
         .all()
     )
+    assignment_maps = _speaker_assignment_maps(interviews)
 
     flows = sorted(project.interview_flows, key=lambda f: f.id or 0)
     if not flows:
@@ -124,16 +179,11 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
                         ws.cell(row, col).fill = _KEY_FILL
 
                 for i, iv in enumerate(interviews):
-                    mappings = (
-                        UtteranceMapping.query
-                        .filter_by(question_id=q.id)
-                        .join(Segment, UtteranceMapping.segment_id == Segment.id)
-                        .filter(
-                            Segment.interview_id == iv.id,
-                            Segment.speaker_role == "respondent",
-                        )
-                        .order_by(Segment.seq.asc(), UtteranceMapping.id.asc())
-                        .all()
+                    assignment_map = assignment_maps.get(int(iv.id), {})
+                    mappings = _respondent_mappings(
+                        q.id,
+                        iv.id,
+                        assignment_map,
                     )
                     text_col = col_offset + (i * 2)
                     flag_col = text_col + 1
@@ -188,8 +238,12 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
         p = iv.participant
         code = p.participant_code if p and p.participant_code else "?"
         date = iv.interview_date.isoformat() if iv.interview_date else ""
+        assignment_map = assignment_maps.get(int(iv.id), {})
         for seg in sorted(iv.segments, key=lambda s: (s.seq, s.id or 0)):
-            if seg.speaker_role != "respondent" or not _is_unclassified(seg):
+            if (
+                _effective_speaker_role(seg, assignment_map) != "respondent"
+                or not _is_unclassified(seg)
+            ):
                 continue
             flag_map = _segment_flag_map(seg)
             mapping_state = "no_mapping" if not seg.utterance_mappings else "unclassified"
