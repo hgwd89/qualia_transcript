@@ -15,7 +15,7 @@ function Get-QualiaPythonExecutable {
     if ($cmd -and $cmd.Source) {
         return $cmd.Source
     }
-    throw "python 実行ファイルが見つかりません。Python またはプロジェクトの仮想環境を確認してください。"
+    throw "Python executable was not found. Check Python or the project virtual environment."
 }
 
 function Get-QualiaBrowserHost {
@@ -65,7 +65,7 @@ function Get-QualiaRuntimeConfig {
     try {
         $json = & $PythonExe -c "import json, config; print(json.dumps({'host': config.APP_HOST, 'port': config.APP_PORT}))"
         if ($LASTEXITCODE -ne 0 -or -not $json) {
-            throw "config.py から APP_HOST / APP_PORT を取得できませんでした。"
+            throw "Could not load APP_HOST / APP_PORT from config.py."
         }
         $runtime = $json | ConvertFrom-Json
     } finally {
