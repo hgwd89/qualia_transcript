@@ -11,6 +11,43 @@ def check(name: str, ok: bool, detail: str = "") -> int:
     return 0 if ok else 1
 
 
+def start_shared_child(repo_root: Path, lock_path: Path, role: str):
+    child_code = (
+        "import sys,time; "
+        f"sys.path.insert(0, {str(repo_root)!r}); "
+        "from services.runtime_lock import runtime_lock; "
+        f"cm=runtime_lock({role!r}, {str(lock_path)!r}); "
+        "cm.__enter__(); print('LOCKED', flush=True); time.sleep(30)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code],
+        cwd=str(repo_root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    ready = child.stdout.readline().strip() if child.stdout else ""
+    return child, ready
+
+
+def stop_child(child) -> None:
+    child.terminate()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait(timeout=5)
+
+
+def maintenance_blocked(runtime_lock, RuntimeLockError, lock_path: Path) -> bool:
+    try:
+        with runtime_lock("maintenance", lock_path):
+            pass
+    except RuntimeLockError:
+        return True
+    return False
+
+
 def main() -> int:
     failures = 0
     repo_root = Path(__file__).resolve().parents[1]
@@ -33,7 +70,7 @@ def main() -> int:
                 except RuntimeLockError:
                     blocked = True
                 failures += check(
-                    "same-process maintenance reentry allowed but role switch blocked",
+                    "same-process maintenance reentry allowed but shared-mode switch blocked",
                     blocked,
                 )
         except Exception as exc:
@@ -43,73 +80,71 @@ def main() -> int:
                 f"{type(exc).__name__}: {exc}",
             )
 
-        child_code = (
-            "import sys,time; "
-            f"sys.path.insert(0, {str(repo_root)!r}); "
-            "from services.runtime_lock import runtime_lock; "
-            f"cm=runtime_lock('app', {str(lock_path)!r}); "
-            "cm.__enter__(); print('LOCKED', flush=True); time.sleep(30)"
-        )
-        child = subprocess.Popen(
-            [sys.executable, "-c", child_code],
-            cwd=str(repo_root),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        app_child = worker_child = None
         try:
-            ready = child.stdout.readline().strip() if child.stdout else ""
+            app_child, app_ready = start_shared_child(repo_root, lock_path, "app")
             failures += check(
-                "child app process acquired runtime lock",
-                ready == "LOCKED",
-                ready or "no readiness line",
+                "child app process acquired shared runtime lock",
+                app_ready == "LOCKED",
+                app_ready or "no readiness line",
             )
 
-            blocked = False
-            try:
-                with runtime_lock("maintenance", lock_path):
-                    pass
-            except RuntimeLockError:
-                blocked = True
+            worker_child, worker_ready = start_shared_child(repo_root, lock_path, "worker")
             failures += check(
-                "maintenance is refused while app process owns runtime lock",
-                blocked,
+                "detached worker can coexist with app shared lock",
+                worker_ready == "LOCKED",
+                worker_ready or "no readiness line",
             )
-        finally:
-            child.terminate()
-            try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=5)
+            failures += check(
+                "maintenance is refused while app/worker shared locks are active",
+                maintenance_blocked(runtime_lock, RuntimeLockError, lock_path),
+            )
 
-        try:
+            stop_child(app_child)
+            app_child = None
+            failures += check(
+                "maintenance remains refused while detached worker outlives app",
+                maintenance_blocked(runtime_lock, RuntimeLockError, lock_path),
+            )
+
+            stop_child(worker_child)
+            worker_child = None
             with runtime_lock("maintenance", lock_path):
                 pass
             failures += check(
-                "maintenance lock is available after app process exits",
+                "maintenance becomes available only after app and worker exit",
                 True,
             )
         except Exception as exc:
             failures += check(
-                "maintenance lock is available after app process exits",
+                "cross-process shared/exclusive runtime lock contract",
                 False,
                 f"{type(exc).__name__}: {exc}",
             )
+        finally:
+            if app_child is not None:
+                stop_child(app_child)
+            if worker_child is not None:
+                stop_child(worker_child)
 
     app_text = (repo_root / "app.py").read_text(encoding="utf-8")
+    worker_text = (repo_root / "scripts" / "run_processing_job.py").read_text(encoding="utf-8")
     backup_text = (repo_root / "scripts" / "backup_local_data.py").read_text(encoding="utf-8")
     restore_text = (repo_root / "scripts" / "restore_local_data.py").read_text(encoding="utf-8")
     failures += check(
-        "local app lifetime owns app runtime lock",
+        "local app lifetime owns shared runtime lock",
         'with runtime_lock("app")' in app_text,
     )
     failures += check(
-        "backup CLI owns maintenance runtime lock",
+        "detached durable worker lifetime owns shared runtime lock",
+        'with runtime_lock("worker")' in worker_text,
+    )
+    failures += check(
+        "backup CLI owns exclusive maintenance runtime lock",
         'with runtime_lock("maintenance")' in backup_text,
     )
     failures += check(
-        "applied restore CLI owns maintenance runtime lock",
+        "applied restore CLI owns exclusive maintenance runtime lock",
         'with runtime_lock("maintenance")' in restore_text,
     )
 
