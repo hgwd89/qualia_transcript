@@ -61,15 +61,19 @@ Assert-Equal -Name "hostname remains unbracketed" `
 $appScript = Get-QualiaAppScriptPath -ProjectDir $projectRoot
 $exactCommand = "`"C:\Python\python.exe`" `"$appScript`""
 Assert-Bool -Name "exact repository app.py command line is recognized" `
-    -Actual (Test-QualiaProcessCommandLine -CommandLine $exactCommand -ProjectDir $projectRoot) `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine $exactCommand -ProjectDir $projectRoot -ProcessName "python") `
     -Expected $true
 
+Assert-Bool -Name "exact app.py path under a non-Python process is rejected" `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine $exactCommand -ProjectDir $projectRoot -ProcessName "cmd") `
+    -Expected $false
+
 Assert-Bool -Name "generic relative python app.py is not enough for process identity" `
-    -Actual (Test-QualiaProcessCommandLine -CommandLine "python app.py" -ProjectDir $projectRoot) `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine "python app.py" -ProjectDir $projectRoot -ProcessName "python") `
     -Expected $false
 
 Assert-Bool -Name "another repository app.py is rejected" `
-    -Actual (Test-QualiaProcessCommandLine -CommandLine '"C:\Python\python.exe" "C:\other-project\app.py"' -ProjectDir $projectRoot) `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine '"C:\Python\python.exe" "C:\other-project\app.py"' -ProjectDir $projectRoot -ProcessName "python") `
     -Expected $false
 
 Assert-Bool -Name "Qualia settings content requires service identity and marker" `
@@ -83,6 +87,15 @@ Assert-Bool -Name "generic settings page is not accepted as Qualia" `
 Assert-Bool -Name "service name alone is insufficient without a Qualia settings marker" `
     -Actual (Test-QualiaSettingsContent -Content '<title>Qualia Transcript</title>' -ServiceName "Qualia Transcript") `
     -Expected $false
+
+$startScriptText = Get-Content (Join-Path $projectRoot "start_app.ps1") -Raw
+$stopScriptText = Get-Content (Join-Path $projectRoot "stop_app.ps1") -Raw
+Assert-Bool -Name "launcher passes absolute app.py identity to Python" `
+    -Actual ($startScriptText.Contains("Get-QualiaAppScriptPath") -and $startScriptText.Contains('$AppArgument')) `
+    -Expected $true
+Assert-Bool -Name "forced stop is fenced to the original listener PID" `
+    -Actual ($stopScriptText.Contains('$after.Pid -eq $initialPid')) `
+    -Expected $true
 
 if ($failures -gt 0) {
     Write-Host "`nSummary: FAIL ($failures checks failed)"
