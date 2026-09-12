@@ -103,6 +103,82 @@ def main() -> int:
                 f"dir={oct(dir_mode)} archive={oct(archive_mode)}",
             )
 
+        snapshot_source = root / "snapshot-meta-source"
+        snapshot_target = root / "snapshot-meta-target"
+        snapshot_source.mkdir()
+        snapshot_file = snapshot_source / "regular.txt"
+        snapshot_file.write_text("snapshot payload", encoding="utf-8")
+        fixed_ns = 1_700_000_000_000_000_000
+        os.utime(snapshot_source, ns=(fixed_ns, fixed_ns))
+        if os.name != "nt":
+            os.chmod(snapshot_source, 0o700)
+        expected_root = snapshot_source.stat()
+        local_backup._snapshot_tree_no_links(snapshot_source, snapshot_target)
+        copied_root = snapshot_target.stat()
+        failures += check(
+            "rollback snapshot preserves root directory metadata",
+            copied_root.st_mtime_ns == expected_root.st_mtime_ns
+            and (
+                os.name == "nt"
+                or stat.S_IMODE(copied_root.st_mode) == stat.S_IMODE(expected_root.st_mode)
+            ),
+            f"source_mtime={expected_root.st_mtime_ns} copy_mtime={copied_root.st_mtime_ns}",
+        )
+        failures += check(
+            "rollback snapshot copies regular file content",
+            (snapshot_target / "regular.txt").read_text(encoding="utf-8") == "snapshot payload",
+        )
+
+        race_source = root / "snapshot-race-source.txt"
+        race_target = root / "snapshot-race-target.txt"
+        race_source.write_text("original", encoding="utf-8")
+        original_os_open = local_backup.os.open
+        replaced = {"done": False}
+
+        def replace_before_descriptor_open(path, flags, *args, **kwargs):
+            if Path(path) == race_source and not replaced["done"]:
+                race_source.unlink()
+                race_source.write_text("replacement", encoding="utf-8")
+                replaced["done"] = True
+            return original_os_open(path, flags, *args, **kwargs)
+
+        local_backup.os.open = replace_before_descriptor_open
+        identity_change_rejected = False
+        try:
+            local_backup._copy_regular_snapshot_file(race_source, race_target)
+        except ValueError as exc:
+            identity_change_rejected = "changed during snapshot" in str(exc)
+        finally:
+            local_backup.os.open = original_os_open
+        failures += check(
+            "rollback snapshot rejects pathname replacement before descriptor copy",
+            replaced["done"] and identity_change_rejected and not race_target.exists(),
+        )
+
+        if os.name != "nt" and hasattr(os, "mkfifo"):
+            special_source = root / "snapshot-special-source"
+            special_target = root / "snapshot-special-target"
+            special_source.mkdir()
+            os.mkfifo(special_source / "unsupported.fifo")
+            unsupported_rejected = False
+            try:
+                local_backup._snapshot_tree_no_links(special_source, special_target)
+            except ValueError as exc:
+                unsupported_rejected = "unsupported entry type" in str(exc)
+            failures += check(
+                "rollback snapshot rejects unsupported special entries",
+                unsupported_rejected,
+            )
+
+        backup_source = (repo_root / "services" / "local_backup.py").read_text(encoding="utf-8")
+        failures += check(
+            "rollback snapshot uses descriptor identity fencing and no-follow where available",
+            "os.open(source, flags)" in backup_source
+            and "os.fstat(fd)" in backup_source
+            and "O_NOFOLLOW" in backup_source
+            and "unsupported entry type" in backup_source,
+        )
+
         custom_archive = root / "custom-db-path.zip"
         rewrite_database_member(archive, custom_archive, "database/custom.sqlite")
         custom_manifest = local_backup.validate_backup(custom_archive)
@@ -166,6 +242,45 @@ def main() -> int:
             output_dir=outputs,
             label="rollback",
         )
+
+        rollback_guard_target = root / "rollback-guard-current.db"
+        rollback_guard_uploads = root / "rollback-guard-uploads"
+        rollback_guard_outputs = root / "rollback-guard-outputs"
+        create_db(rollback_guard_target, "rollback-current")
+        rollback_guard_uploads.mkdir()
+        rollback_guard_outputs.mkdir()
+        guarded_upload = rollback_guard_uploads / "linked-upload.txt"
+        guarded_output = rollback_guard_outputs / "keep-output.txt"
+        guarded_upload.write_text("keep upload", encoding="utf-8")
+        guarded_output.write_text("keep output", encoding="utf-8")
+
+        saved_link_check = local_backup.is_link_or_reparse
+        local_backup.is_link_or_reparse = lambda path: Path(path).name == "linked-upload.txt"
+        linked_rollback_rejected = False
+        try:
+            local_backup.restore_backup(
+                archive,
+                apply=True,
+                database_uri=f"sqlite:///{rollback_guard_target.as_posix()}",
+                upload_dir=rollback_guard_uploads,
+                output_dir=rollback_guard_outputs,
+                backup_dir=backups,
+                create_pre_restore_backup=False,
+            )
+        except ValueError as exc:
+            linked_rollback_rejected = (
+                "restore rollback" in str(exc) and "linked/reparse" in str(exc)
+            )
+        finally:
+            local_backup.is_link_or_reparse = saved_link_check
+        failures += check(
+            "restore rejects linked rollback trees before mutating live targets",
+            linked_rollback_rejected
+            and read_value(rollback_guard_target) == "rollback-current"
+            and guarded_upload.read_text(encoding="utf-8") == "keep upload"
+            and guarded_output.read_text(encoding="utf-8") == "keep output",
+        )
+
         new_target = root / "new-target.db"
         saved_copy_tree = local_backup._copy_tree_from_stage
 
