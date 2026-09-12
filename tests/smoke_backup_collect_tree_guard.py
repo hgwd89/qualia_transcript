@@ -39,13 +39,16 @@ def main() -> int:
         race_stage = root / "race-stage"
         race_source.mkdir()
         race_file = race_source / "race.txt"
+        retained_original = race_source / "race-original-retained.txt"
         race_file.write_text("original", encoding="utf-8")
         original_os_open = local_backup.os.open
         replaced = {"done": False}
 
         def replace_before_descriptor_open(path, flags, *args, **kwargs):
             if Path(path) == race_file and not replaced["done"]:
-                race_file.unlink()
+                # Keep the original file allocated so the replacement cannot
+                # accidentally reuse the same inode/file-id immediately.
+                race_file.rename(retained_original)
                 race_file.write_text("replacement", encoding="utf-8")
                 replaced["done"] = True
             return original_os_open(path, flags, *args, **kwargs)
@@ -62,6 +65,7 @@ def main() -> int:
             "backup collector rejects pathname replacement before descriptor copy",
             replaced["done"]
             and race_rejected
+            and retained_original.read_text(encoding="utf-8") == "original"
             and not (race_stage / "uploads" / "race.txt").exists(),
         )
 
