@@ -1,3 +1,6 @@
+import os
+import sqlite3
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -28,8 +31,9 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="qualia_project_delete_") as tmp:
         root = Path(tmp)
+        db_path = root / "delete.db"
         config.BASE_DIR = str(root)
-        config.DATABASE_URI = f"sqlite:///{(root / 'delete.db').as_posix()}"
+        config.DATABASE_URI = f"sqlite:///{db_path.as_posix()}"
         config.OUTPUT_DIR = str(root / "outputs")
         config.UPLOAD_DIR = str(root / "uploads")
 
@@ -42,6 +46,7 @@ def main() -> int:
             from models.interview import Interview, MediaFile, Transcription
             from models.processing_job import ProcessingJob
             from models.project import Project
+            from services import project_deletion
             from services.project_deletion import ProjectDeletionBlocked, delete_project
 
             app = create_app()
@@ -123,7 +128,35 @@ def main() -> int:
                 job_log = logs_root / f"processing_job_{job_id}.log"
                 job_log.write_text("worker log", encoding="utf-8")
 
-                result = delete_project(project)
+                original_build_storage_plan = project_deletion._build_storage_plan
+                write_lock_observed = {"value": False, "detail": ""}
+
+                def build_storage_plan_while_probing_lock(current_project, job_ids):
+                    probe = sqlite3.connect(str(db_path), timeout=0)
+                    try:
+                        try:
+                            probe.execute("BEGIN IMMEDIATE")
+                        except sqlite3.OperationalError as exc:
+                            write_lock_observed["value"] = "locked" in str(exc).lower()
+                            write_lock_observed["detail"] = str(exc)
+                        else:
+                            probe.rollback()
+                            write_lock_observed["detail"] = "competing BEGIN IMMEDIATE unexpectedly succeeded"
+                    finally:
+                        probe.close()
+                    return original_build_storage_plan(current_project, job_ids)
+
+                with patch(
+                    "services.project_deletion._build_storage_plan",
+                    side_effect=build_storage_plan_while_probing_lock,
+                ):
+                    result = delete_project(project)
+
+                failures += check(
+                    "project deletion holds SQLite write reservation before delete",
+                    bool(write_lock_observed["value"]),
+                    str(write_lock_observed["detail"]),
+                )
                 failures += check(
                     "project deletion removes DB-owned project graph",
                     db.session.get(Project, project_id) is None
@@ -236,6 +269,83 @@ def main() -> int:
                     and any("cleanup path rejected" in item for item in warning_result.cleanup_errors),
                     f"errors={warning_result.cleanup_errors}",
                 )
+                if warning_marker.exists():
+                    warning_marker.unlink()
+                if warning_dir.exists():
+                    warning_dir.rmdir()
+
+                linked_project = Project(name="Linked output path")
+                db.session.add(linked_project)
+                db.session.commit()
+                linked_project_id = int(linked_project.id)
+                protected_target = root / "must-not-delete-through-link"
+                protected_target.mkdir(parents=True, exist_ok=True)
+                protected_marker = protected_target / "protected.txt"
+                protected_marker.write_text("keep", encoding="utf-8")
+                linked_output = Path(config.OUTPUT_DIR) / str(linked_project_id)
+
+                link_created = False
+                link_detail = ""
+                try:
+                    if os.name == "nt":
+                        completed = subprocess.run(
+                            [
+                                "cmd.exe",
+                                "/d",
+                                "/c",
+                                "mklink",
+                                "/J",
+                                str(linked_output),
+                                str(protected_target),
+                            ],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                        link_created = completed.returncode == 0 and linked_output.exists()
+                        link_detail = (completed.stdout + completed.stderr).strip()
+                    else:
+                        linked_output.symlink_to(protected_target, target_is_directory=True)
+                        link_created = linked_output.is_symlink()
+                        link_detail = "directory symlink created"
+
+                    failures += check(
+                        "linked ID-directory test fixture created",
+                        link_created,
+                        link_detail,
+                    )
+                    if link_created:
+                        linked_result = delete_project(linked_project)
+                        failures += check(
+                            "linked project output entry is detached without traversing target",
+                            db.session.get(Project, linked_project_id) is None
+                            and protected_marker.is_file()
+                            and not linked_output.exists()
+                            and not linked_output.is_symlink()
+                            and not linked_result.cleanup_errors,
+                            f"removed_paths={linked_result.removed_paths} errors={linked_result.cleanup_errors}",
+                        )
+
+                        replacement = Project(name="Replacement after linked deletion")
+                        db.session.add(replacement)
+                        db.session.commit()
+                        failures += check(
+                            "reused project ID does not inherit stale managed link",
+                            int(replacement.id) == linked_project_id
+                            and protected_marker.is_file()
+                            and not linked_output.exists()
+                            and not linked_output.is_symlink(),
+                            f"replacement_id={replacement.id} deleted_id={linked_project_id}",
+                        )
+                finally:
+                    try:
+                        if os.name == "nt" and linked_output.exists():
+                            os.rmdir(linked_output)
+                        elif linked_output.is_symlink():
+                            linked_output.unlink()
+                    except OSError:
+                        pass
 
                 db.session.remove()
                 db.engine.dispose()
