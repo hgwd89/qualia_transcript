@@ -23,6 +23,7 @@ if str(SCRIPTS) not in sys.path:
 
 import audit_production_readiness as base_readiness
 import audit_production_readiness_v2 as readiness_v2
+from services.runtime_lock import RuntimeLockError, runtime_lock
 
 
 _ORIGINAL_SQLITE = sqlite3
@@ -220,18 +221,36 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        report = audit_project(
-            base_readiness._resolve_db_path(args.db),
-            base_readiness._resolve_output_dir(args.output_dir),
-            base_readiness._resolve_backup_dir(args.backup_dir),
-            args.project_id,
-        )
-    except Exception as exc:
+        with runtime_lock("reader"):
+            try:
+                report = audit_project(
+                    base_readiness._resolve_db_path(args.db),
+                    base_readiness._resolve_output_dir(args.output_dir),
+                    base_readiness._resolve_backup_dir(args.backup_dir),
+                    args.project_id,
+                )
+            except Exception as exc:
+                report = {
+                    "blockers": [{"code": "audit_error", "message": f"{type(exc).__name__}: {exc}"}],
+                    "warnings": [],
+                    "info": {"scope": "project", "project_id": args.project_id},
+                }
+    except RuntimeLockError as exc:
         report = {
-            "blockers": [{"code": "audit_error", "message": f"{type(exc).__name__}: {exc}"}],
+            "blockers": [{
+                "code": "maintenance_active",
+                "message": "Project readiness audit refused while backup/restore maintenance is active",
+                "context": {"error": str(exc)},
+            }],
             "warnings": [],
             "info": {"scope": "project", "project_id": args.project_id},
         }
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"Scope: project_id={args.project_id}")
+            base_readiness._print_report(report)
+        return 3
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))

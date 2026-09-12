@@ -63,6 +63,41 @@ def main() -> int:
                     f"exit={launcher.returncode} stdout={launcher.stdout.strip()}",
                 )
 
+                direct_readiness_commands = [
+                    (
+                        "base readiness direct execution refuses maintenance",
+                        [sys.executable, "scripts/audit_production_readiness.py", "--json"],
+                    ),
+                    (
+                        "hardened readiness direct execution refuses maintenance",
+                        [sys.executable, "scripts/audit_production_readiness_v2.py", "--json"],
+                    ),
+                    (
+                        "project readiness direct execution refuses maintenance",
+                        [
+                            sys.executable,
+                            "scripts/audit_production_readiness_project.py",
+                            "--project-id",
+                            "1",
+                            "--json",
+                        ],
+                    ),
+                ]
+                for name, command in direct_readiness_commands:
+                    result = subprocess.run(
+                        command,
+                        cwd=str(repo_root),
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    failures += check(
+                        name,
+                        result.returncode == 3 and "maintenance_active" in result.stdout,
+                        f"exit={result.returncode} stdout={result.stdout.strip()}",
+                    )
+
                 sys.argv = ["recover_processing_job.py", "--job-id", "1"]
                 recovery_exit = recover_processing_job.main()
                 failures += check(
