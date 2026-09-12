@@ -5,6 +5,7 @@ import shutil
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from sqlalchemy import text
 
@@ -25,11 +26,23 @@ class ProjectDeletionBlocked(RuntimeError):
         )
 
 
+class ProjectDeletionStorageBlocked(RuntimeError):
+    """Raised when managed storage cannot be bound safely before DB deletion."""
+
+
 @dataclass(frozen=True)
 class ProjectStoragePlan:
     project_id: int
     interview_ids: tuple[int, ...]
     processing_job_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class QuarantinedManagedEntry:
+    original_path: Path
+    quarantine_path: Path
+    label: str
+    entry_kind: str
 
 
 @dataclass(frozen=True)
@@ -48,6 +61,11 @@ def _is_link_or_reparse(path: Path) -> bool:
     attributes = int(getattr(info, "st_file_attributes", 0) or 0)
     reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
     return path.is_symlink() or bool(attributes & reparse_flag)
+
+
+def _entry_exists(path: Path) -> bool:
+    """Check the directory entry itself, including broken symlinks."""
+    return os.path.lexists(os.fspath(path))
 
 
 def _safe_id_dir(root: Path, value: int) -> Path:
@@ -126,28 +144,177 @@ def _resolve_cleanup_root(value: str | Path, label: str, errors: list[str]) -> P
         return None
 
 
-def cleanup_project_storage(plan: ProjectStoragePlan) -> ProjectDeletionResult:
+def _resolve_required_root(value: str | Path, label: str) -> Path:
+    try:
+        return Path(value).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ProjectDeletionStorageBlocked(
+            f"{label} managed-storage root cannot be resolved: {exc}"
+        ) from exc
+
+
+def _quarantine_managed_entry(path: Path, label: str) -> QuarantinedManagedEntry | None:
+    """Rename one existing managed entry inside its root without following links."""
+    if not _entry_exists(path):
+        return None
+
+    try:
+        is_link = _is_link_or_reparse(path)
+        entry_kind = "link" if is_link else ("dir" if path.is_dir() else "file")
+    except (OSError, RuntimeError) as exc:
+        raise ProjectDeletionStorageBlocked(
+            f"{label} managed-storage entry cannot be inspected: {path}: {exc}"
+        ) from exc
+
+    quarantine_path = path.parent / (
+        f".qualia-delete-quarantine-{path.name}-{uuid4().hex}"
+    )
+    try:
+        os.replace(path, quarantine_path)
+    except OSError as exc:
+        raise ProjectDeletionStorageBlocked(
+            f"{label} managed-storage entry cannot be quarantined: {path}: {exc}"
+        ) from exc
+
+    return QuarantinedManagedEntry(
+        original_path=path,
+        quarantine_path=quarantine_path,
+        label=label,
+        entry_kind=entry_kind,
+    )
+
+
+def _restore_quarantined_entries(
+    quarantined: tuple[QuarantinedManagedEntry, ...] | list[QuarantinedManagedEntry],
+) -> list[str]:
+    errors: list[str] = []
+    for entry in reversed(tuple(quarantined)):
+        if not _entry_exists(entry.quarantine_path):
+            errors.append(
+                f"{entry.label} quarantine entry disappeared before rollback: "
+                f"{entry.quarantine_path}"
+            )
+            continue
+        if _entry_exists(entry.original_path):
+            errors.append(
+                f"{entry.label} original path reappeared before rollback: "
+                f"{entry.original_path}"
+            )
+            continue
+        try:
+            os.replace(entry.quarantine_path, entry.original_path)
+        except OSError as exc:
+            errors.append(
+                f"{entry.label} quarantine rollback failed: "
+                f"{entry.quarantine_path} -> {entry.original_path}: {exc}"
+            )
+    return errors
+
+
+def _prepare_managed_storage_quarantine(
+    plan: ProjectStoragePlan,
+) -> tuple[QuarantinedManagedEntry, ...]:
+    """Bind pre-existing numeric ID storage to this deletion before DB commit.
+
+    SQLite may reuse a deleted highest integer primary key. Renaming existing
+    project/interview ID directories to unique non-numeric quarantine names before
+    commit prevents post-commit cleanup from deleting storage later created for a
+    reused ID. A failed staging operation restores entries already moved and blocks
+    the database deletion.
+    """
+    output_root = _resolve_required_root(config.OUTPUT_DIR, "output")
+    upload_root = _resolve_required_root(config.UPLOAD_DIR, "upload")
+    quarantined: list[QuarantinedManagedEntry] = []
+
+    try:
+        project_entry = _quarantine_managed_entry(
+            _safe_id_dir(output_root, plan.project_id),
+            "project output",
+        )
+        if project_entry is not None:
+            quarantined.append(project_entry)
+
+        for interview_id in plan.interview_ids:
+            interview_entry = _quarantine_managed_entry(
+                _safe_id_dir(upload_root, interview_id),
+                "interview upload",
+            )
+            if interview_entry is not None:
+                quarantined.append(interview_entry)
+    except Exception as exc:
+        restore_errors = _restore_quarantined_entries(quarantined)
+        if restore_errors:
+            raise ProjectDeletionStorageBlocked(
+                "managed-storage quarantine failed and rollback was incomplete: "
+                + " | ".join(restore_errors)
+            ) from exc
+        raise
+
+    return tuple(quarantined)
+
+
+def _remove_quarantined_entry(
+    entry: QuarantinedManagedEntry,
+    errors: list[str],
+) -> int:
+    if not _entry_exists(entry.quarantine_path):
+        return 0
+    if entry.entry_kind == "link":
+        return _remove_link_only(entry.quarantine_path, errors)
+    if entry.entry_kind == "dir":
+        return _remove_dir(entry.quarantine_path, errors)
+    return _remove_file(entry.quarantine_path, errors)
+
+
+def _warn_if_id_path_reappeared(
+    root: Path | None,
+    value: int,
+    label: str,
+    errors: list[str],
+) -> None:
+    if root is None:
+        return
+    try:
+        path = _safe_id_dir(root, value)
+        if _entry_exists(path):
+            errors.append(
+                f"{label} path appeared after deletion staging and was left untouched: {path}"
+            )
+    except (OSError, RuntimeError, ValueError) as exc:
+        errors.append(f"{label} post-delete path check failed: id={int(value)}: {exc}")
+
+
+def cleanup_project_storage(
+    plan: ProjectStoragePlan,
+    quarantined: tuple[QuarantinedManagedEntry, ...] = (),
+) -> ProjectDeletionResult:
     """Best-effort cleanup after the database deletion has committed.
 
-    Project-scoped generated outputs, interview upload directories, and processing
-    job logs are cleaned after commit. Raw transcript snapshots are deliberately
-    excluded: repository policy treats them as high-sensitivity source snapshots
-    that must not be deleted unless the user explicitly requests that operation.
+    Project output/interview upload entries that existed before deletion are first
+    renamed to unique quarantine paths before the DB commit. Cleanup acts on those
+    bound entries rather than numeric ID paths, so SQLite ID reuse cannot make this
+    deletion remove storage owned by a replacement record. Processing-job logs are
+    still cleaned by captured job IDs. Raw transcript snapshots are deliberately
+    excluded and require a separate explicit user-requested purge.
     """
     removed = 0
     errors: list[str] = []
+
+    for entry in quarantined:
+        removed += _remove_quarantined_entry(entry, errors)
 
     output_root = _resolve_cleanup_root(config.OUTPUT_DIR, "output", errors)
     upload_root = _resolve_cleanup_root(config.UPLOAD_DIR, "upload", errors)
     base_root = _resolve_cleanup_root(config.BASE_DIR, "base", errors)
 
-    if output_root is not None:
-        removed += _remove_safe_id_dir(
-            output_root, plan.project_id, "project output", errors
-        )
+    # Never remove a numeric ID path after the DB commit. It may have appeared
+    # after staging and may already belong to a newly reused SQLite integer ID.
+    _warn_if_id_path_reappeared(
+        output_root, plan.project_id, "project output", errors
+    )
     if upload_root is not None:
         for interview_id in plan.interview_ids:
-            removed += _remove_safe_id_dir(
+            _warn_if_id_path_reappeared(
                 upload_root, interview_id, "interview upload", errors
             )
 
@@ -196,9 +363,10 @@ def _begin_project_deletion_transaction(project_id: int) -> Project:
 
 
 def delete_project(project: Project) -> ProjectDeletionResult:
-    """Delete one project without racing durable-job admission or workers."""
+    """Delete one project without racing durable-job admission or ID reuse."""
     project_id = int(project.id)
     recover_stale_jobs(project_id=project_id)
+    quarantined: tuple[QuarantinedManagedEntry, ...] = ()
 
     try:
         project = _begin_project_deletion_transaction(project_id)
@@ -221,6 +389,7 @@ def delete_project(project: Project) -> ProjectDeletionResult:
             )
         ]
         plan = _build_storage_plan(project, job_ids)
+        quarantined = _prepare_managed_storage_quarantine(plan)
 
         (
             ProcessingJob.query
@@ -229,8 +398,14 @@ def delete_project(project: Project) -> ProjectDeletionResult:
         )
         db.session.delete(project)
         db.session.commit()
-    except Exception:
+    except Exception as exc:
         db.session.rollback()
+        restore_errors = _restore_quarantined_entries(quarantined)
+        if restore_errors:
+            raise ProjectDeletionStorageBlocked(
+                "project deletion rolled back but managed-storage restoration was incomplete: "
+                + " | ".join(restore_errors)
+            ) from exc
         raise
 
-    return cleanup_project_storage(plan)
+    return cleanup_project_storage(plan, quarantined)
