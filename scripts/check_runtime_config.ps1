@@ -141,10 +141,10 @@ Assert-Bool -Name "stop requires exact repository process identity" `
     -Actual ($stopScriptText.Contains("Is-QualiaFlaskProcess") -and -not $stopScriptText.Contains("Test-QualiaAppEndpoint")) `
     -Expected $true
 Assert-Bool -Name "normal stop revalidates the original process instance immediately before termination" `
-    -Actual ($stopScriptText.Contains('$preStop = Get-ProcessInfoById') -and $stopScriptText.Contains('Is-SameQualiaProcessInstance -Candidate $preStop -Initial $target')) `
+    -Actual ($stopScriptText.Contains('$preStop = Get-ProcessInfoById') -and $stopScriptText.Contains('Is-SameQualiaProcessInstance -Candidate $preStop -Initial $target') -and $stopScriptText.Contains('Stop-Process -InputObject $preStop.ProcessObject')) `
     -Expected $true
 Assert-Bool -Name "forced stop remains fenced to PID start-time and exact app identity" `
-    -Actual ($stopScriptText.Contains('Is-SameQualiaProcessInstance -Candidate $after -Initial $target') -and $stopScriptText.Contains('StartTimeUtcTicks')) `
+    -Actual ($stopScriptText.Contains('Is-SameQualiaProcessInstance -Candidate $after -Initial $target') -and $stopScriptText.Contains('StartTimeUtcTicks') -and $stopScriptText.Contains('Stop-Process -InputObject $after.ProcessObject -Force')) `
     -Expected $true
 
 if ($failures -gt 0) {
