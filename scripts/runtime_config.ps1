@@ -83,6 +83,19 @@ function Get-QualiaAppUrl {
     return "http://${urlHost}:${Port}/"
 }
 
+function Test-QualiaSettingsContent {
+    param(
+        [string]$Content,
+        [string]$ServiceName
+    )
+
+    if (-not $Content -or -not $ServiceName) { return $false }
+    return (
+        $Content.Contains($ServiceName) -and
+        ($Content -match "OpenAI APIキー|Whisperモデル")
+    )
+}
+
 function Test-QualiaAppEndpoint {
     param(
         [string]$RootUrl,
@@ -99,11 +112,9 @@ function Test-QualiaAppEndpoint {
         $settings = Invoke-WebRequest -Uri $settingsUrl -UseBasicParsing -TimeoutSec $TimeoutSec
         if ([int]$settings.StatusCode -ne 200) { return $false }
 
-        $content = "$($settings.Content)"
-        return (
-            $content.Contains($ServiceName) -and
-            ($content -match "OpenAI APIキー|Whisperモデル")
-        )
+        return Test-QualiaSettingsContent `
+            -Content "$($settings.Content)" `
+            -ServiceName $ServiceName
     } catch {
         return $false
     }
