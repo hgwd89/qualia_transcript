@@ -173,13 +173,13 @@ def main() -> int:
         create_db(rollback_guard_target, "rollback-current")
         rollback_guard_uploads.mkdir()
         rollback_guard_outputs.mkdir()
-        guarded_upload = rollback_guard_uploads / "keep.txt"
-        guarded_output = rollback_guard_outputs / "keep.txt"
+        guarded_upload = rollback_guard_uploads / "linked-upload.txt"
+        guarded_output = rollback_guard_outputs / "keep-output.txt"
         guarded_upload.write_text("keep upload", encoding="utf-8")
         guarded_output.write_text("keep output", encoding="utf-8")
 
         saved_link_check = local_backup.is_link_or_reparse
-        local_backup.is_link_or_reparse = lambda path: Path(path) == guarded_upload
+        local_backup.is_link_or_reparse = lambda path: Path(path).name == "linked-upload.txt"
         linked_rollback_rejected = False
         try:
             local_backup.restore_backup(
