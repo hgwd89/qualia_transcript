@@ -10,6 +10,8 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 `OPENAI_API_KEY=...`
 3. `.env` は Git 管理しない（このリポジトリでは `.gitignore` に設定済み）
 
+必要に応じて `.env` の `APP_HOST` / `APP_PORT` で bind 先を変更できます。`start_app.ps1`、`open_app.ps1`、`stop_app.ps1` はすべて `config.py` から同じ host/port 設定を読みます。
+
 ## 起動方法
 
 `start_app.ps1` をダブルクリック、または PowerShell で実行します。
@@ -20,14 +22,21 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 
 動作:
 - プロジェクトディレクトリに移動
-- ポート `5000` の使用状況を確認
-- ポート使用中の場合は `http://127.0.0.1:5000/` の HTTP 200 応答を確認
+- `config.py` / `.env` の `APP_HOST` / `APP_PORT` を取得
+- 設定ポートの使用状況を確認
+- ポート使用中の場合は、bind host から生成したブラウザ到達用URLの HTTP 200 応答を確認
 - HTTP 200 なら「既に起動中」として二重起動せずブラウザだけ開く
 - HTTP 200 でなければ起動せず、ログを表示して終了
 - 未使用なら Flask をバックグラウンド起動
 - `logs/flask_out.log` / `logs/flask_err.log` にログ保存
 - 最大30秒、1秒ごとに HTTP 200 を確認
-- HTTP 200 到達後、`http://127.0.0.1:5000/` を既定ブラウザで開く
+- HTTP 200 到達後、同じブラウザ到達用URLを既定ブラウザで開く
+
+ブラウザURL生成ルール:
+- `APP_HOST=0.0.0.0` の場合は `127.0.0.1` へアクセス
+- `APP_HOST=::` の場合は IPv6 loopback `::1` へアクセス
+- IPv6 literal は URL 内で `http://[::1]:5000/` のように角括弧で囲む
+- `APP_PORT` を変更した場合、起動・停止・ブラウザ表示のすべてが同じポートを使用する
 
 ## 既に起動中のアプリを開く
 
@@ -42,7 +51,7 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 ```
 
 動作:
-- ポート `5000` を使用しているプロセスを確認
+- 設定ポートを使用しているプロセスを確認
 - Qualia Transcript の Flask プロセスと判定できる場合のみ停止
 - 無関係なプロセスは停止しない
 
@@ -51,8 +60,8 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 - アプリが開かない  
 `logs/flask_err.log` を確認してください。
 - 起動はしたが画面が表示されない  
-`http://127.0.0.1:5000/` に手動アクセスして確認してください。
-- ポート `5000` が埋まっている  
+`start_app.ps1` が表示する URL を手動アクセスして確認してください。
+- 設定ポートが埋まっている  
 `start_app.ps1` が使用中プロセスを表示します。HTTP 200 でなければ `logs/flask_err.log` を確認し、必要なら競合プロセスを停止して再実行してください。
 - PowerShell の実行ポリシーで拒否される  
 管理者権限 PowerShell で `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` を設定後に再実行してください。
@@ -67,6 +76,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
 
 - Safe Smoke Check は無料・非破壊（外部API呼び出しなし）です。
+- launcher の host/port URL 生成も `scripts/check_runtime_config.ps1` で検証し、IPv4/IPv6 の回帰を required safe gate で防ぎます。
 
 ## Segment Flag Smoke Check（外部APIなし・可逆DB更新あり）
 
