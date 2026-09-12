@@ -1,4 +1,6 @@
+import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -10,6 +12,24 @@ def check(name: str, ok: bool, detail: str = "") -> int:
     suffix = f": {detail}" if detail else ""
     print(f"[{status}] {name}{suffix}")
     return 0 if ok else 1
+
+
+def create_directory_link(link_path: Path, target_path: Path) -> tuple[bool, str]:
+    """Create a real directory link/junction for the required cleanup regression."""
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link_path), str(target_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        detail = (result.stdout or result.stderr or "").strip()
+        return result.returncode == 0, detail
+    try:
+        link_path.symlink_to(target_path, target_is_directory=True)
+        return True, ""
+    except OSError as exc:
+        return False, str(exc)
 
 
 def main() -> int:
@@ -120,8 +140,10 @@ def main() -> int:
                 raw_dir.mkdir(parents=True, exist_ok=True)
                 raw_snapshot = raw_dir / f"transcription_{transcription_id}_20260912T000000Z.json"
                 raw_manifest = raw_dir / f"transcription_{transcription_id}_manifest_20260912T000000Z.json"
-                raw_snapshot.write_text("{}", encoding="utf-8")
-                raw_manifest.write_text("{}", encoding="utf-8")
+                raw_snapshot.write_bytes(b'{"kind":"raw","text":"immutable source"}\n')
+                raw_manifest.write_bytes(b'{"kind":"manifest","chunks":["immutable"]}\n')
+                raw_snapshot_before = raw_snapshot.read_bytes()
+                raw_manifest_before = raw_manifest.read_bytes()
 
                 logs_dir = Path(config.BASE_DIR) / "logs"
                 logs_dir.mkdir(parents=True, exist_ok=True)
@@ -164,8 +186,11 @@ def main() -> int:
                     and db.session.get(ProcessingJob, job_id) is None,
                 )
                 failures += check(
-                    "project deletion preserves raw transcript snapshots",
-                    raw_snapshot.is_file() and raw_manifest.is_file(),
+                    "project deletion preserves raw transcript snapshot bytes",
+                    raw_snapshot.is_file()
+                    and raw_manifest.is_file()
+                    and raw_snapshot.read_bytes() == raw_snapshot_before
+                    and raw_manifest.read_bytes() == raw_manifest_before,
                 )
                 failures += check(
                     "project deletion cleans quarantined managed storage",
@@ -179,19 +204,29 @@ def main() -> int:
                     f"removed_paths={result.removed_paths} errors={result.cleanup_errors}",
                 )
 
-                errors: list[str] = []
-                with patch(
-                    "services.project_deletion._is_link_or_reparse",
-                    return_value=True,
-                ), patch(
-                    "services.project_deletion._remove_link_only",
-                    return_value=1,
-                ) as remove_link:
-                    removed = project_deletion._remove_dir(root / "linked-entry", errors)
+                link_target = root / "linked-target"
+                link_target.mkdir(parents=True, exist_ok=True)
+                target_marker = link_target / "target-must-survive.txt"
+                target_marker.write_text("keep-target", encoding="utf-8")
+                linked_entry = root / "linked-entry"
+                link_created, link_detail = create_directory_link(linked_entry, link_target)
                 failures += check(
-                    "linked managed path uses non-recursive cleanup",
-                    removed == 1 and remove_link.called and not errors,
+                    "real linked-directory fixture created",
+                    link_created,
+                    link_detail,
                 )
+                if link_created:
+                    link_errors: list[str] = []
+                    removed = project_deletion._remove_dir(linked_entry, link_errors)
+                    failures += check(
+                        "real linked managed path is detached without traversing target",
+                        removed == 1
+                        and not os.path.lexists(linked_entry)
+                        and target_marker.is_file()
+                        and target_marker.read_text(encoding="utf-8") == "keep-target"
+                        and not link_errors,
+                        f"removed={removed} errors={link_errors}",
+                    )
 
                 blocked = Project(name="Deletion blocked")
                 db.session.add(blocked)
