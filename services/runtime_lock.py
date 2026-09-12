@@ -14,6 +14,7 @@ class RuntimeLockError(RuntimeError):
 
 _STATE_GUARD = RLock()
 _HELD: dict[str, dict[str, object]] = {}
+_RUNTIME_SLOTS = 128
 
 
 def _default_lock_path() -> Path:
@@ -28,46 +29,52 @@ def _default_lock_path() -> Path:
 
 def _role_mode(role: str) -> str:
     if role in {"app", "worker"}:
-        return "shared"
+        return "runtime"
     if role == "maintenance":
-        return "exclusive"
+        return "maintenance"
     raise ValueError("runtime lock role must be 'app', 'worker', or 'maintenance'")
 
 
-def _lock_file(handle, mode: str) -> None:
-    handle.seek(0)
+def _ensure_lock_file_size(handle) -> None:
+    handle.seek(0, os.SEEK_END)
+    if handle.tell() < _RUNTIME_SLOTS:
+        handle.write(b"\0" * (_RUNTIME_SLOTS - handle.tell()))
+        handle.flush()
+
+
+def _try_lock_range(handle, offset: int, length: int) -> bool:
+    handle.seek(offset)
     if os.name == "nt":
         import msvcrt
 
-        lock_mode = (
-            msvcrt.LK_NBRLCK if mode == "shared" else msvcrt.LK_NBLCK
-        )
         try:
-            msvcrt.locking(handle.fileno(), lock_mode, 1)
-        except OSError as exc:
-            raise RuntimeLockError(
-                "Qualia runtime is busy: application/worker and maintenance operations cannot overlap"
-            ) from exc
-        return
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, length)
+            return True
+        except OSError:
+            return False
 
     import fcntl
 
-    flag = fcntl.LOCK_SH if mode == "shared" else fcntl.LOCK_EX
     try:
-        fcntl.flock(handle.fileno(), flag | fcntl.LOCK_NB)
-    except OSError as exc:
-        raise RuntimeLockError(
-            "Qualia runtime is busy: application/worker and maintenance operations cannot overlap"
-        ) from exc
+        fcntl.lockf(
+            handle.fileno(),
+            fcntl.LOCK_EX | fcntl.LOCK_NB,
+            length,
+            offset,
+            os.SEEK_SET,
+        )
+        return True
+    except OSError:
+        return False
 
 
-def _unlock_file(handle) -> None:
-    handle.seek(0)
+def _unlock_range(handle, offset: int, length: int) -> None:
+    handle.seek(offset)
     if os.name == "nt":
         import msvcrt
 
         try:
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, length)
         except OSError:
             pass
         return
@@ -75,21 +82,45 @@ def _unlock_file(handle) -> None:
     import fcntl
 
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        fcntl.lockf(
+            handle.fileno(),
+            fcntl.LOCK_UN,
+            length,
+            offset,
+            os.SEEK_SET,
+        )
     except OSError:
         pass
 
 
+def _acquire_range(handle, mode: str) -> tuple[int, int]:
+    if mode == "maintenance":
+        if _try_lock_range(handle, 0, _RUNTIME_SLOTS):
+            return 0, _RUNTIME_SLOTS
+        raise RuntimeLockError(
+            "Qualia runtime is busy: stop the application and all durable workers before maintenance"
+        )
+
+    for offset in range(_RUNTIME_SLOTS):
+        if _try_lock_range(handle, offset, 1):
+            return offset, 1
+    raise RuntimeLockError(
+        "Qualia runtime has no free process lock slots or maintenance is active"
+    )
+
+
 @contextmanager
 def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
-    """Hold a process-lifetime runtime lock for one application operation.
+    """Hold the runtime/maintenance exclusion lock for one process lifecycle.
 
-    App and durable-worker processes take a shared lock so they can coexist.
-    Backup/applied-restore maintenance takes an exclusive lock, so it cannot run
-    while either the web app or a detached worker can still write application
-    state. Nested acquisition is allowed only when the requested lock mode matches
-    the mode already held by this process; this lets restore call backup while
-    retaining one exclusive maintenance boundary.
+    App and detached worker processes each reserve one byte-range slot, allowing
+    many runtime writers to coexist. Backup and applied restore lock the complete
+    slot range, so maintenance cannot start while any app/worker process remains,
+    and no app/worker can start while maintenance owns the range.
+
+    Nested acquisition is allowed only for the same lock mode in the same process.
+    This lets applied restore invoke a pre-restore backup while retaining one
+    exclusive maintenance boundary.
     """
     mode = _role_mode(role)
     path = Path(lock_path).resolve() if lock_path else _default_lock_path()
@@ -108,11 +139,8 @@ def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
             path.parent.mkdir(parents=True, exist_ok=True)
             handle = path.open("a+b")
             try:
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() == 0:
-                    handle.write(b"\0")
-                    handle.flush()
-                _lock_file(handle, mode)
+                _ensure_lock_file_size(handle)
+                offset, length = _acquire_range(handle, mode)
             except Exception:
                 handle.close()
                 raise
@@ -120,7 +148,8 @@ def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
                 "mode": mode,
                 "count": 1,
                 "handle": handle,
-                "roles": {role},
+                "offset": offset,
+                "length": length,
             }
 
     try:
@@ -134,6 +163,8 @@ def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
             if int(current["count"]) > 0:
                 return
             handle = current["handle"]
+            offset = int(current["offset"])
+            length = int(current["length"])
             _HELD.pop(key, None)
-            _unlock_file(handle)
+            _unlock_range(handle, offset, length)
             handle.close()
