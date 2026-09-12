@@ -19,7 +19,7 @@ Safe checks use temporary fixtures where data or storage is needed. They must no
 The required `safe-smoke` gate currently covers:
 
 - baseline application/model/route initialization
-- launcher runtime configuration, including `0.0.0.0 -> 127.0.0.1`, IPv6 unspecified `:: -> ::1`, RFC-compliant bracketed IPv6 URLs, and unchanged hostname/IPv4 URL behavior
+- launcher runtime configuration and identity, including `0.0.0.0 -> 127.0.0.1`, IPv6 unspecified `:: -> ::1`, RFC-compliant bracketed IPv6 URLs, unchanged hostname/IPv4 URL behavior, exact-repository `app.py` process recognition, rejection of generic/other-project `python app.py` identities, Qualia-specific settings-page endpoint markers, and force-stop fencing to the originally identified listener PID
 - generated-file integrity, including project-scoped path enforcement, UUID-isolated internal storage for same-name outputs, rollback isolation, bounded storage basenames for long display filenames, and rejection of linked/reparse project storage paths
 - media-upload integrity, including rejection of linked/reparse interview storage paths
 - managed-storage path guards that reject symlinks and Windows junction/reparse entries below configured output/upload roots before generated files or uploaded media are created or resolved
@@ -36,6 +36,8 @@ The required `safe-smoke` gate currently covers:
 - project-scoped readiness isolation: `--project-id` excludes another project's workflow/content defects while keeping shared database integrity and recovery-set checks global, and the source SQLite file remains byte-for-byte unchanged
 - resumed project-analysis UI recovery: the shared job script must wrap `pollAnalysisJob` before the page's resume handler runs and must re-enable the associated analysis button before propagating a polling error
 - Windows DPAPI secret-store behavior
+
+The launcher identity regression is pure PowerShell/static validation; it does not start or stop a real process. A listener is considered safely attributable to this repository only when its Python command line contains this repository's resolved absolute `app.py` path or its HTTP endpoint positively identifies Qualia Transcript. Generic `python app.py` and generic HTTP 200 responses are deliberately insufficient. The forced-stop path is additionally restricted to the original listener PID so a replacement process that acquires the same port is never killed by the retry loop.
 
 The backup service-boundary regression uses only temporary database/upload/output/backup/lock paths. It proves that direct `services.local_backup.create_backup()` and applied `restore_backup()` calls cannot bypass an active runtime holder when pointed at the configured live recovery set, that a refused restore leaves the live database unchanged, and that a linked/reparse entry in a managed backup tree is rejected before it can be copied into an archive. Custom all-temporary fixture targets remain available without acquiring the live maintenance lock.
 
