@@ -52,17 +52,13 @@ def _is_link_or_reparse(path: Path) -> bool:
 
 
 def _safe_id_dir(root: Path, value: int) -> Path:
-    root = root.resolve()
-    candidate = root / str(int(value))
-    if _is_link_or_reparse(candidate):
-        raise ValueError("managed ID directory is a symlink or reparse point")
-    resolved = candidate.resolve()
+    """Return the lexical managed root/<integer-id> path without following it."""
+    resolved_root = root.resolve()
+    candidate = resolved_root / str(int(value))
     try:
-        resolved.relative_to(root)
+        candidate.relative_to(resolved_root)
     except ValueError as exc:
         raise ValueError("managed storage path escapes root") from exc
-    # Return the original root/id path, not the resolved target. This prevents a
-    # linked ID directory from being converted into a recursive-delete target.
     return candidate
 
 
@@ -83,11 +79,28 @@ def _build_storage_plan(project: Project, job_ids: list[int]) -> ProjectStorageP
     )
 
 
+def _remove_link_only(path: Path, errors: list[str]) -> int:
+    """Remove only the directory entry for a link/reparse point, never its target."""
+    try:
+        if path.is_symlink():
+            path.unlink()
+        else:
+            # Windows junctions/reparse directories are not always reported by
+            # pathlib as symlinks. rmdir removes the reparse entry itself and does
+            # not recurse into its target.
+            os.rmdir(path)
+        return 1
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        errors.append(f"linked directory cleanup failed: {path}: {exc}")
+        return 0
+
+
 def _remove_dir(path: Path, errors: list[str]) -> int:
     try:
         if _is_link_or_reparse(path):
-            errors.append(f"directory cleanup rejected linked path: {path}")
-            return 0
+            return _remove_link_only(path, errors)
         if not path.exists():
             return 0
         shutil.rmtree(path)
