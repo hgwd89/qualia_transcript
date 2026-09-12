@@ -4,9 +4,11 @@ $ProjectDir = $PSScriptRoot
 . (Join-Path $ProjectDir "scripts\runtime_config.ps1")
 
 $pythonExe = Get-QualiaPythonExecutable -ProjectDir $ProjectDir
+$AppScript = Get-QualiaAppScriptPath -ProjectDir $ProjectDir
 $runtime = Get-QualiaRuntimeConfig -ProjectDir $ProjectDir -PythonExe $pythonExe
 $Port = $runtime.Port
 $AppUrl = $runtime.Url
+$ServiceName = $runtime.ServiceName
 $LogsDir = Join-Path $ProjectDir "logs"
 $OutLog = Join-Path $LogsDir "flask_out.log"
 $ErrLog = Join-Path $LogsDir "flask_err.log"
@@ -29,28 +31,15 @@ function Get-PortProcessInfo {
     }
 }
 
-function Test-AppHttp200 {
-    param(
-        [string]$Url,
-        [int]$TimeoutSec = 2
-    )
-
-    try {
-        $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec
-        return ([int]$resp.StatusCode -eq 200)
-    } catch {
-        return $false
-    }
-}
-
 function Wait-AppReady {
     param(
         [string]$Url,
+        [string]$ExpectedServiceName,
         [int]$MaxSeconds
     )
 
     for ($i = 1; $i -le $MaxSeconds; $i++) {
-        if (Test-AppHttp200 -Url $Url -TimeoutSec 2) {
+        if (Test-QualiaAppEndpoint -RootUrl $Url -ServiceName $ExpectedServiceName -TimeoutSec 2) {
             return $true
         }
         Start-Sleep -Seconds 1
@@ -62,7 +51,7 @@ Set-Location $ProjectDir
 New-Item -Path $LogsDir -ItemType Directory -Force | Out-Null
 
 $existing = Get-PortProcessInfo -LocalPort $Port
-$httpAlreadyOk = Test-AppHttp200 -Url $AppUrl -TimeoutSec 2
+$qualiaAlreadyOk = Test-QualiaAppEndpoint -RootUrl $AppUrl -ServiceName $ServiceName -TimeoutSec 2
 if ($existing) {
     Write-Host "ポート $Port は使用中です。既存プロセスを確認します..." -ForegroundColor Yellow
     Write-Host "PID: $($existing.Pid), Name: $($existing.Name)" -ForegroundColor Yellow
@@ -70,14 +59,14 @@ if ($existing) {
         Write-Host "CommandLine: $($existing.CommandLine)" -ForegroundColor DarkYellow
     }
 
-    if ($httpAlreadyOk) {
-        Write-Host "既に起動中です（HTTP 200 応答）。二重起動は行いません。" -ForegroundColor Green
+    if ($qualiaAlreadyOk) {
+        Write-Host "Qualia Transcript は既に起動中です。二重起動は行いません。" -ForegroundColor Green
         Start-Process $AppUrl
         Write-Host "ブラウザで $AppUrl を開きました。" -ForegroundColor Green
         exit 0
     }
 
-    Write-Host "ポート $Port は使用中ですが、HTTP 200 が返りません。起動を中止します。" -ForegroundColor Red
+    Write-Host "ポート $Port は使用中ですが、Qualia Transcript と確認できないため起動を中止します。" -ForegroundColor Red
     if (Test-Path $ErrLog) {
         Write-Host "---- tail: $ErrLog ----" -ForegroundColor DarkYellow
         Get-Content $ErrLog -Tail 20
@@ -85,8 +74,8 @@ if ($existing) {
     exit 1
 }
 
-if ($httpAlreadyOk) {
-    Write-Host "HTTP 200 応答を確認しました。既に起動中として扱い、二重起動しません。" -ForegroundColor Green
+if ($qualiaAlreadyOk) {
+    Write-Host "Qualia Transcript の応答を確認しました。既に起動中として扱い、二重起動しません。" -ForegroundColor Green
     Start-Process $AppUrl
     Write-Host "ブラウザで $AppUrl を開きました。" -ForegroundColor Green
     exit 0
@@ -95,17 +84,19 @@ if ($httpAlreadyOk) {
 Write-Host "Qualia Transcript を起動します..." -ForegroundColor Cyan
 Write-Host "Project: $ProjectDir" -ForegroundColor DarkGray
 Write-Host "Python: $pythonExe" -ForegroundColor DarkGray
+Write-Host "App: $AppScript" -ForegroundColor DarkGray
 Write-Host "URL: $AppUrl" -ForegroundColor DarkGray
-$launched = Start-Process -FilePath $pythonExe -ArgumentList "app.py" -WorkingDirectory $ProjectDir -WindowStyle Hidden -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -PassThru
+$AppArgument = '"' + $AppScript + '"'
+$launched = Start-Process -FilePath $pythonExe -ArgumentList $AppArgument -WorkingDirectory $ProjectDir -WindowStyle Hidden -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -PassThru
 
-$ready = Wait-AppReady -Url $AppUrl -MaxSeconds $MaxWaitSeconds
+$ready = Wait-AppReady -Url $AppUrl -ExpectedServiceName $ServiceName -MaxSeconds $MaxWaitSeconds
 $started = Get-PortProcessInfo -LocalPort $Port
 
 if ($ready) {
     if ($started) {
-        Write-Host "起動成功 (PID: $($started.Pid), HTTP 200)" -ForegroundColor Green
+        Write-Host "起動成功 (PID: $($started.Pid), Qualia endpoint verified)" -ForegroundColor Green
     } else {
-        Write-Host "起動成功 (HTTP 200)" -ForegroundColor Green
+        Write-Host "起動成功 (Qualia endpoint verified)" -ForegroundColor Green
     }
     Write-Host "ログ: $OutLog / $ErrLog" -ForegroundColor Green
     Start-Process $AppUrl
@@ -113,7 +104,7 @@ if ($ready) {
     exit 0
 }
 
-Write-Host "起動に失敗しました（${MaxWaitSeconds}秒以内に HTTP 200 になりませんでした）。" -ForegroundColor Red
+Write-Host "起動に失敗しました（${MaxWaitSeconds}秒以内に Qualia Transcript endpoint を確認できませんでした）。" -ForegroundColor Red
 if (Test-Path $ErrLog) {
     Write-Host "---- tail: $ErrLog ----" -ForegroundColor DarkYellow
     Get-Content $ErrLog -Tail 20
