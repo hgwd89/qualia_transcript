@@ -29,8 +29,8 @@ from routes.analysis_view import bp as analysis_view_bp
 
 def _run_migrations(app):
     """
-    既存 SQLite DB への後付けカラム追加。
-    inspect でカラム存在を確認してから ALTER TABLE を実行するため冪等。
+    既存 SQLite DB への後付けカラム・制約追加。
+    inspect で既存スキーマを確認し、必要な変更だけを実行する。
     """
     from sqlalchemy import text, inspect as sa_inspect
     with app.app_context():
@@ -111,12 +111,15 @@ def _run_migrations(app):
         inspector = sa_inspect(db.engine)
         existing_tables = set(inspector.get_table_names())
         if "processing_jobs" in existing_tables:
-            job_cols = {c["name"] for c in inspector.get_columns("processing_jobs")}
-            if "question_id" not in job_cols:
-                db.session.execute(text(
-                    "ALTER TABLE processing_jobs ADD COLUMN question_id INTEGER"
-                ))
-                db.session.commit()
+            from services.schema_migrations import ensure_processing_job_question_fk
+
+            migration = ensure_processing_job_question_fk(db.engine)
+            if migration.rebuilt:
+                app.logger.info(
+                    "rebuilt legacy processing_jobs question FK: rows=%s existing_violations=%s",
+                    migration.preserved_rows,
+                    migration.existing_violation_count,
+                )
 
 
 def create_app():
