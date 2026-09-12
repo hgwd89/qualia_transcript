@@ -232,7 +232,12 @@ def audit(
             LEFT JOIN interview_flow_questions q ON q.id=um.question_id
             LEFT JOIN interview_flow_sections sec ON sec.id=q.section_id
             WHERE um.question_id IS NOT NULL
-              AND (q.id IS NULL OR (i.flow_id IS NOT NULL AND sec.flow_id<>i.flow_id))
+              AND (
+                  q.id IS NULL
+                  OR i.flow_id IS NULL
+                  OR sec.flow_id IS NULL
+                  OR sec.flow_id<>i.flow_id
+              )
             """
         ).fetchall()
         if wrong_flow_mappings:
@@ -299,7 +304,7 @@ def audit(
                 if not quote or not isinstance(source_ids, list) or not source_ids:
                     _issue(blockers, "approved_finding_missing_evidence", "Approved finding lacks evidence_quote/source_segment_ids", analysis_id=aid, finding_no=idx)
                     continue
-                matched_quote = False
+                matched_source_count = 0
                 for raw_sid in source_ids:
                     try:
                         sid = int(raw_sid)
@@ -324,9 +329,21 @@ def audit(
                     if row["interview_id"] is not None and int(seg["interview_id"]) != int(row["interview_id"]):
                         _issue(blockers, "approved_source_interview_mismatch", "Interview-scoped analysis references another interview", analysis_id=aid, finding_no=idx, segment_id=sid)
                     source_text = _normalize_text(seg["text"])
-                    if quote == source_text or (len(quote) >= 8 and (quote in source_text or source_text in quote)):
-                        matched_quote = True
-                if not matched_quote:
+                    source_matches_quote = quote == source_text or (
+                        len(quote) >= 8 and (quote in source_text or source_text in quote)
+                    )
+                    if source_matches_quote:
+                        matched_source_count += 1
+                    else:
+                        _issue(
+                            blockers,
+                            "approved_source_quote_mismatch",
+                            "Approved source segment does not match the finding evidence_quote",
+                            analysis_id=aid,
+                            finding_no=idx,
+                            segment_id=sid,
+                        )
+                if matched_source_count == 0:
                     _issue(blockers, "approved_quote_not_in_sources", "Approved evidence_quote does not match referenced source segments", analysis_id=aid, finding_no=idx)
 
         output_root = output_dir.resolve()
