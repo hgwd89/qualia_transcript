@@ -39,6 +39,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] linked managed-storage guard smoke checks passed."
 
+Write-Host "[INFO] Running backup/restore integrity hardening smoke check..."
+python tests/smoke_backup_integrity_hardening.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] backup/restore integrity hardening smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] backup/restore integrity hardening smoke checks passed."
+
 Write-Host "[INFO] Running project deletion lifecycle smoke check..."
 python tests/smoke_project_deletion_lifecycle.py
 if ($LASTEXITCODE -ne 0) {
