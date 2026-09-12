@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import tempfile
 import uuid
 import zipfile
@@ -159,6 +160,53 @@ def _collect_tree(source_dir: Path, archive_prefix: str, staging_root: Path) -> 
     return entries
 
 
+def _stat_identity(info: os.stat_result) -> tuple[int, int]:
+    return int(info.st_dev), int(info.st_ino)
+
+
+def _apply_snapshot_metadata(target: Path, info: os.stat_result) -> None:
+    if os.name != "nt":
+        os.chmod(target, stat.S_IMODE(info.st_mode))
+    os.utime(target, ns=(int(info.st_atime_ns), int(info.st_mtime_ns)))
+
+
+def _copy_regular_snapshot_file(source: Path, target: Path) -> None:
+    """Copy one regular file through a descriptor fenced to the checked entry."""
+    try:
+        before = source.lstat()
+    except OSError as exc:
+        raise ValueError(f"managed restore rollback file is unreadable: {source}") from exc
+    if is_link_or_reparse(source) or not stat.S_ISREG(before.st_mode):
+        raise ValueError(f"managed restore rollback file is not a regular file: {source}")
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | int(getattr(os, "O_NOFOLLOW", 0))
+    try:
+        fd = os.open(source, flags)
+    except OSError as exc:
+        raise ValueError(f"managed restore rollback file could not be opened safely: {source}") from exc
+
+    try:
+        opened = os.fstat(fd)
+        try:
+            after = source.lstat()
+        except OSError as exc:
+            raise ValueError(f"managed restore rollback file changed during snapshot: {source}") from exc
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or is_link_or_reparse(source)
+            or _stat_identity(before) != _stat_identity(opened)
+            or _stat_identity(after) != _stat_identity(opened)
+        ):
+            raise ValueError(f"managed restore rollback file changed during snapshot: {source}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with os.fdopen(os.dup(fd), "rb") as src, target.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        _apply_snapshot_metadata(target, opened)
+    finally:
+        os.close(fd)
+
+
 def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
     """Copy a managed tree for rollback without following linked/reparse entries."""
     if not source_dir.exists():
@@ -167,16 +215,40 @@ def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
         raise ValueError(f"expected directory: {source_dir}")
 
     root = source_dir.resolve()
+    try:
+        root_info = root.lstat()
+    except OSError as exc:
+        raise ValueError(f"managed restore rollback root is unreadable: {source_dir}") from exc
+    if not stat.S_ISDIR(root_info.st_mode):
+        raise ValueError(f"managed restore rollback root is not a directory: {source_dir}")
+
     destination.mkdir(parents=True, exist_ok=True)
+    directory_metadata: list[tuple[Path, os.stat_result]] = [(destination, root_info)]
     pending = [root]
     while pending:
         current = pending.pop()
+        if current != root:
+            try:
+                current_info = current.lstat()
+                if is_link_or_reparse(current) or not stat.S_ISDIR(current_info.st_mode):
+                    raise ValueError(
+                        f"managed restore rollback directory changed during snapshot: {current}"
+                    )
+                current.resolve().relative_to(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                if isinstance(exc, ValueError) and "managed restore rollback directory" in str(exc):
+                    raise
+                raise ValueError(
+                    f"managed restore rollback directory is unsafe: {current}"
+                ) from exc
+
         for source in sorted(current.iterdir(), key=lambda path: path.name):
             if is_link_or_reparse(source):
                 raise ValueError(
                     f"managed restore rollback tree contains linked/reparse entry: {source}"
                 )
             try:
+                info = source.lstat()
                 resolved = source.resolve()
                 resolved.relative_to(root)
             except (OSError, RuntimeError, ValueError) as exc:
@@ -186,19 +258,23 @@ def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
 
             relative = source.relative_to(root)
             target = destination / relative
-            if source.is_dir():
+            if stat.S_ISDIR(info.st_mode):
                 target.mkdir(parents=True, exist_ok=True)
+                directory_metadata.append((target, info))
                 pending.append(source)
-                continue
-            if not source.is_file():
-                continue
-
-            if is_link_or_reparse(source):
+            elif stat.S_ISREG(info.st_mode):
+                _copy_regular_snapshot_file(source, target)
+            else:
                 raise ValueError(
-                    f"managed restore rollback file became linked/reparse: {source}"
+                    f"managed restore rollback tree contains unsupported entry type: {source}"
                 )
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
+
+    for target, info in sorted(
+        directory_metadata,
+        key=lambda pair: len(pair[0].parts),
+        reverse=True,
+    ):
+        _apply_snapshot_metadata(target, info)
 
 
 def _create_backup_unlocked(
