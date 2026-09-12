@@ -28,6 +28,7 @@ def main() -> int:
             from models.project import Project
             from models.participant import Participant
             from models.interview import Interview
+            from models.processing_job import ProcessingJob
             from models.interview_flow import InterviewFlow, InterviewFlowSection, InterviewFlowQuestion
 
             app = create_app()
@@ -56,25 +57,45 @@ def main() -> int:
                 unused_participant_id = int(unused_participant.id)
 
                 used_flow = InterviewFlow(project_id=p1_id, title="Used flow")
+                job_flow = InterviewFlow(project_id=p1_id, title="Job flow")
                 unused_flow = InterviewFlow(project_id=p1_id, title="Unused flow")
                 other_flow = InterviewFlow(project_id=p1_id, title="Other flow")
-                db.session.add_all([used_flow, unused_flow, other_flow])
+                db.session.add_all([used_flow, job_flow, unused_flow, other_flow])
                 db.session.flush()
                 used_flow_id = int(used_flow.id)
+                job_flow_id = int(job_flow.id)
                 unused_flow_id = int(unused_flow.id)
                 other_flow_id = int(other_flow.id)
 
                 section = InterviewFlowSection(flow_id=used_flow_id, title="Used section", seq=1)
+                job_section = InterviewFlowSection(flow_id=job_flow_id, title="Job section", seq=1)
                 other_section = InterviewFlowSection(flow_id=other_flow_id, title="Other section", seq=1)
-                db.session.add_all([section, other_section])
+                db.session.add_all([section, job_section, other_section])
                 db.session.flush()
                 section_id = int(section.id)
+                job_section_id = int(job_section.id)
                 other_section_id = int(other_section.id)
+
                 db.session.add(InterviewFlowQuestion(
                     section_id=section_id,
                     question_code="Q1",
                     question_text="Question",
                     seq=1,
+                ))
+                job_question = InterviewFlowQuestion(
+                    section_id=job_section_id,
+                    question_code="QJ1",
+                    question_text="Queued analysis question",
+                    seq=1,
+                )
+                db.session.add(job_question)
+                db.session.flush()
+
+                db.session.add(ProcessingJob(
+                    project_id=p1_id,
+                    question_id=int(job_question.id),
+                    job_type="analyze_question",
+                    status="succeeded",
                 ))
 
                 interview = Interview(
@@ -142,6 +163,15 @@ def main() -> int:
                     "used flow deletion is blocked",
                     flow_delete.status_code == 302
                     and db.session.get(InterviewFlow, used_flow_id) is not None,
+                )
+
+                job_flow_delete = client.post(
+                    f"/projects/{p1_id}/flows/{job_flow_id}/delete"
+                )
+                failures += check(
+                    "flow referenced only by terminal processing job is blocked",
+                    job_flow_delete.status_code == 302
+                    and db.session.get(InterviewFlow, job_flow_id) is not None,
                 )
 
                 unused_participant_delete = client.post(

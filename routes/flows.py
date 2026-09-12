@@ -3,6 +3,7 @@ from models import db
 from models.project import Project
 from models.interview import Interview
 from models.analysis import AIAnalysis
+from models.processing_job import ProcessingJob
 from models.segment import UtteranceMapping
 from models.interview_flow import InterviewFlow, InterviewFlowSection, InterviewFlowQuestion
 
@@ -40,10 +41,18 @@ def _flow_usage_counts(flow_id: int) -> dict[str, int]:
         .filter(InterviewFlowSection.flow_id == flow_id)
         .count()
     )
+    processing_job_count = (
+        ProcessingJob.query
+        .join(InterviewFlowQuestion, ProcessingJob.question_id == InterviewFlowQuestion.id)
+        .join(InterviewFlowSection, InterviewFlowQuestion.section_id == InterviewFlowSection.id)
+        .filter(InterviewFlowSection.flow_id == flow_id)
+        .count()
+    )
     return {
         "interviews": Interview.query.filter_by(flow_id=flow_id).count(),
         "mappings": mapping_count,
         "analyses": analysis_count,
+        "processing_jobs": processing_job_count,
     }
 
 
@@ -122,7 +131,7 @@ def delete(project_id, flow_id):
     usage = _flow_usage_counts(flow.id)
     if any(usage.values()):
         flash(
-            "このインタビューフローはインタビュー／マッピング／分析で使用されているため削除できません",
+            "このインタビューフローはインタビュー／マッピング／分析／処理ジョブで使用されているため削除できません",
             "error",
         )
         return redirect(url_for("flows.index", project_id=project_id))
