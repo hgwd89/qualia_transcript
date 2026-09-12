@@ -45,7 +45,11 @@ def main() -> int:
             from models.processing_job import ProcessingJob
             from models.project import Project
             from services import project_deletion
-            from services.project_deletion import ProjectDeletionBlocked, delete_project
+            from services.project_deletion import (
+                ProjectDeletionBlocked,
+                ProjectDeletionStorageBlocked,
+                delete_project,
+            )
 
             app = create_app()
             app.config["TESTING"] = True
@@ -164,11 +168,13 @@ def main() -> int:
                     raw_snapshot.is_file() and raw_manifest.is_file(),
                 )
                 failures += check(
-                    "project deletion cleans disposable managed storage",
+                    "project deletion cleans quarantined managed storage",
                     not project_output_dir.exists()
                     and not upload_dir.exists()
                     and not job_log.exists()
-                    and not result.cleanup_errors,
+                    and not result.cleanup_errors
+                    and not list(Path(config.OUTPUT_DIR).glob(".qualia-delete-quarantine-*"))
+                    and not list(Path(config.UPLOAD_DIR).glob(".qualia-delete-quarantine-*")),
                     f"removed_paths={result.removed_paths} errors={result.cleanup_errors}",
                 )
 
@@ -212,6 +218,32 @@ def main() -> int:
                     and db.session.get(ProcessingJob, active_id) is not None,
                 )
 
+                quarantine_blocked = Project(name="Quarantine blocked")
+                db.session.add(quarantine_blocked)
+                db.session.commit()
+                quarantine_blocked_id = int(quarantine_blocked.id)
+                blocked_dir = Path(config.OUTPUT_DIR) / str(quarantine_blocked_id)
+                blocked_dir.mkdir(parents=True, exist_ok=True)
+                blocked_marker = blocked_dir / "must-stay.txt"
+                blocked_marker.write_text("keep", encoding="utf-8")
+
+                storage_blocked = False
+                with patch(
+                    "services.project_deletion.os.replace",
+                    side_effect=PermissionError("simulated quarantine rename failure"),
+                ):
+                    try:
+                        delete_project(quarantine_blocked)
+                    except ProjectDeletionStorageBlocked:
+                        storage_blocked = True
+
+                failures += check(
+                    "quarantine failure blocks DB deletion and preserves numeric path",
+                    storage_blocked
+                    and db.session.get(Project, quarantine_blocked_id) is not None
+                    and blocked_marker.is_file(),
+                )
+
                 commit_fail_project = Project(name="Commit failure")
                 db.session.add(commit_fail_project)
                 db.session.commit()
@@ -237,10 +269,66 @@ def main() -> int:
                         event.remove(session, "before_commit", fail_before_commit)
 
                 failures += check(
-                    "DB commit failure preserves project and files",
+                    "DB commit failure restores quarantined project storage",
                     commit_failed
                     and db.session.get(Project, commit_fail_id) is not None
-                    and marker.is_file(),
+                    and marker.is_file()
+                    and not list(Path(config.OUTPUT_DIR).glob(
+                        f".qualia-delete-quarantine-{commit_fail_id}-*"
+                    )),
+                )
+
+                cleanup_fail_project = Project(name="Cleanup failure")
+                db.session.add(cleanup_fail_project)
+                db.session.commit()
+                cleanup_fail_id = int(cleanup_fail_project.id)
+                cleanup_fail_dir = Path(config.OUTPUT_DIR) / str(cleanup_fail_id)
+                cleanup_fail_dir.mkdir(parents=True, exist_ok=True)
+                old_marker = cleanup_fail_dir / "old-owner.txt"
+                old_marker.write_text("old", encoding="utf-8")
+
+                def fail_quarantine_cleanup(entry, cleanup_errors):
+                    cleanup_errors.append(
+                        f"simulated quarantine cleanup failure: {entry.quarantine_path}"
+                    )
+                    return 0
+
+                with patch(
+                    "services.project_deletion._remove_quarantined_entry",
+                    side_effect=fail_quarantine_cleanup,
+                ):
+                    cleanup_fail_result = delete_project(cleanup_fail_project)
+
+                quarantines = list(Path(config.OUTPUT_DIR).glob(
+                    f".qualia-delete-quarantine-{cleanup_fail_id}-*"
+                ))
+                failures += check(
+                    "post-commit quarantine cleanup failure leaves only nonnumeric stale storage",
+                    db.session.get(Project, cleanup_fail_id) is None
+                    and not cleanup_fail_dir.exists()
+                    and bool(cleanup_fail_result.cleanup_errors)
+                    and len(quarantines) == 1
+                    and (quarantines[0] / "old-owner.txt").is_file(),
+                    f"errors={cleanup_fail_result.cleanup_errors} quarantines={quarantines}",
+                )
+
+                replacement = Project(name="Replacement after cleanup failure")
+                db.session.add(replacement)
+                db.session.commit()
+                replacement_id = int(replacement.id)
+                replacement_dir = Path(config.OUTPUT_DIR) / str(replacement_id)
+                replacement_dir.mkdir(parents=True, exist_ok=True)
+                replacement_marker = replacement_dir / "new-owner.txt"
+                replacement_marker.write_text("new", encoding="utf-8")
+
+                failures += check(
+                    "reused project ID cannot inherit or lose quarantined predecessor storage",
+                    replacement_id == cleanup_fail_id
+                    and replacement_marker.is_file()
+                    and not (replacement_dir / "old-owner.txt").exists()
+                    and len(quarantines) == 1
+                    and (quarantines[0] / "old-owner.txt").is_file(),
+                    f"old_id={cleanup_fail_id} replacement_id={replacement_id}",
                 )
 
                 db.session.remove()
