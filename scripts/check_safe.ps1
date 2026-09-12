@@ -87,6 +87,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] readiness traceability smoke checks passed."
 
+Write-Host "[INFO] Running project-scoped readiness smoke check..."
+python tests/smoke_readiness_project_scope.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] project-scoped readiness smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] project-scoped readiness smoke checks passed."
+
 Write-Host "[INFO] Running resumed analysis UI smoke check..."
 python tests/smoke_analysis_resume_ui.py
 if ($LASTEXITCODE -ne 0) {

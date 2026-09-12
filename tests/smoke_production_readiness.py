@@ -93,6 +93,7 @@ def create_fixture(db_path: Path, output_dir: Path) -> None:
                 id INTEGER PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 interview_id INTEGER,
+                question_id INTEGER REFERENCES interview_flow_questions(id),
                 job_type TEXT NOT NULL,
                 status TEXT NOT NULL,
                 progress_json TEXT,
