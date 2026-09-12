@@ -122,6 +122,19 @@ def _collect_tree(source_dir: Path, archive_prefix: str, staging_root: Path) -> 
     pending = [root]
     while pending:
         current = pending.pop()
+        if current != root:
+            try:
+                current_info = current.lstat()
+                if is_link_or_reparse(current) or not stat.S_ISDIR(current_info.st_mode):
+                    raise ValueError(
+                        f"managed backup directory changed during collection: {current}"
+                    )
+                current.resolve().relative_to(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                if isinstance(exc, ValueError) and "managed backup directory changed" in str(exc):
+                    raise
+                raise ValueError(f"managed backup directory is unsafe: {current}") from exc
+
         for source in sorted(current.iterdir(), key=lambda path: path.name):
             if is_link_or_reparse(source):
                 raise ValueError(
