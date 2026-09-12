@@ -21,7 +21,7 @@ The required `safe-smoke` gate currently covers:
 - baseline application/model/route initialization
 - generated-file integrity, including project-scoped path enforcement, UUID-isolated internal storage for same-name outputs, rollback isolation, and bounded storage basenames for long display filenames
 - media-upload integrity
-- project deletion lifecycle
+- project deletion lifecycle, including durable-job serialization, managed-storage cleanup, non-recursive linked-path handling, DB-failure preservation, and mandatory retention of raw transcript snapshots
 - participant/interview-flow project boundaries and delete guards
 - interview-creation scope validation
 - SQLite foreign-key enforcement

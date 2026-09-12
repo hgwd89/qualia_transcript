@@ -124,6 +124,8 @@ Terminal `ProcessingJob` rows and the ORM-owned project graph are deleted in the
 
 Managed project/interview ID directories are never recursively removed through a symlink, Windows junction, or other reparse point. When an ID path is linked, cleanup removes only the link/reparse entry itself and never traverses its target. This also prevents a deleted project's stale linked path from being inherited if SQLite later reuses the same integer ID.
 
+Raw transcript snapshots under `outputs/raw_transcripts/` are immutable source snapshots and are outside generic project-deletion cleanup. Deleting a project does not enumerate, unlink, rewrite, or otherwise mutate those snapshots, even after the corresponding transcription rows are removed. Any raw-snapshot purge must be a separate, explicit user-requested operation rather than an implicit side effect of project deletion.
+
 ## Checks and Tests
 
 Smoke tests live in `tests/smoke_*.py`. PowerShell wrappers live in `scripts/check_*.ps1`.
