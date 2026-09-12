@@ -57,6 +57,7 @@ For Windows local launcher work, only edit:
 - `start_app.ps1`
 - `stop_app.ps1`
 - `open_app.ps1`
+- `scripts/runtime_config.ps1`
 - `README_LOCAL.md`
 - `.gitignore`
 - `logs/.gitkeep`
@@ -65,21 +66,26 @@ For Windows local launcher work, only edit:
 ### Requirements
 
 - `start_app.ps1` must start `python app.py` in the background.
+- It must read `APP_HOST` / `APP_PORT` through `scripts/runtime_config.ps1` rather than hard-code port 5000.
 - It must log to `logs/flask_out.log` and `logs/flask_err.log`.
-- It must avoid double-starting if port 5000 is already serving HTTP 200.
+- It must avoid double-starting if the configured app URL is already serving HTTP 200.
 - It must wait for readiness with a retry loop: max 30 seconds, 1-second interval, success on HTTP 200.
 - It must not kill unrelated processes.
-- `stop_app.ps1` may stop only the Qualia Transcript Flask process using port 5000.
-- `open_app.ps1` should only open `http://127.0.0.1:5000/`.
+- `stop_app.ps1` may stop only the Qualia Transcript Flask process using the configured `APP_PORT`, after identifying the process/endpoint as Qualia Transcript.
+- `open_app.ps1` must open the runtime-config URL. Browser URLs normalize wildcard bind hosts (`0.0.0.0` → `127.0.0.1`, `::` → `::1`) and bracket IPv6 literals.
 
 ## Lightweight verification
 
 For launcher-only changes, run only:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_runtime_config.ps1
 .\start_app.ps1
-Invoke-WebRequest http://127.0.0.1:5000/ -UseBasicParsing
-Invoke-WebRequest http://127.0.0.1:5000/settings -UseBasicParsing
+. (Join-Path $PWD "scripts\runtime_config.ps1")
+$pythonExe = Get-QualiaPythonExecutable -ProjectDir $PWD
+$runtime = Get-QualiaRuntimeConfig -ProjectDir $PWD -PythonExe $pythonExe
+Invoke-WebRequest $runtime.Url -UseBasicParsing
+Invoke-WebRequest "$($runtime.Url)settings" -UseBasicParsing
 .\open_app.ps1
 .\stop_app.ps1
 git status
