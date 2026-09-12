@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 import config
 from services.job_recovery import worker_pid_liveness
+from services.runtime_lock import RuntimeLockError, runtime_lock
 
 
 def _db_path() -> Path:
@@ -128,18 +129,26 @@ def _apply_recovery(job_id: int) -> int:
     from models.processing_job import ProcessingJob
     from services.job_recovery import mark_job_failed
 
-    app = create_app()
-    with app.app_context():
-        job = db.session.get(ProcessingJob, job_id)
-        if not job:
-            print(f"job_id={job_id} not found")
-            return 1
-        if job.status not in {"pending", "running"}:
-            print(f"No change: job is already terminal ({job.status}).")
-            return 0
-        mark_job_failed(job, "operator explicitly recovered active job")
-        print(f"job_id={job.id} marked failed; retry is now available")
-        return 0
+    # Explicit recovery is a live-database write and create_app() may itself run
+    # idempotent migrations. Share the runtime lock with the app/workers so an
+    # applied backup/restore maintenance operation cannot overlap this mutation.
+    try:
+        with runtime_lock("worker"):
+            app = create_app()
+            with app.app_context():
+                job = db.session.get(ProcessingJob, job_id)
+                if not job:
+                    print(f"job_id={job_id} not found")
+                    return 1
+                if job.status not in {"pending", "running"}:
+                    print(f"No change: job is already terminal ({job.status}).")
+                    return 0
+                mark_job_failed(job, "operator explicitly recovered active job")
+                print(f"job_id={job.id} marked failed; retry is now available")
+                return 0
+    except RuntimeLockError as exc:
+        print(f"Refusing recovery write while maintenance is active: {exc}")
+        return 3
 
 
 def main() -> int:
