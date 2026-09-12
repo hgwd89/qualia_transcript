@@ -117,7 +117,16 @@ if (Test-Path $ErrLog) {
     Write-Host "---- tail: $ErrLog ----" -ForegroundColor DarkYellow
     Get-Content $ErrLog -Tail 20
 }
-if ($launched -and -not $launched.HasExited) {
-    Stop-Process -Id $launched.Id -ErrorAction SilentlyContinue
+if ($launched) {
+    try {
+        $launched.Refresh()
+        if (-not $launched.HasExited) {
+            # Use the process object returned by Start-Process rather than resolving
+            # its numeric PID again; a reused PID must never be terminated here.
+            Stop-Process -InputObject $launched -ErrorAction SilentlyContinue
+        }
+    } catch {
+        Write-Host "起動失敗後の launcher process cleanup を安全に確認できませんでした。" -ForegroundColor Yellow
+    }
 }
 exit 1
