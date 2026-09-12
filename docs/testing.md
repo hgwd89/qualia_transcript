@@ -24,7 +24,7 @@ The required `safe-smoke` gate currently covers:
 - media-upload integrity, including rejection of linked/reparse interview storage paths
 - managed-storage path guards that reject symlinks and Windows junction/reparse entries below configured output/upload roots before generated files or uploaded media are created or resolved
 - backup/restore integrity hardening: the backup tool resolves the same SQLite file as Flask, validates and restores the same staged archive bytes, honors the manifest-declared database member, removes a newly created DB when restore rolls back, preserves a raw damaged DB copy only under explicit recovery acknowledgement, and keeps backup files owner-only on POSIX
-- runtime maintenance exclusion: the local Flask process and detached durable workers hold shared runtime file locks for their full lifetimes; backup and applied restore hold the exclusive maintenance lock for the whole operation; app and worker locks can coexist, but maintenance is rejected while either remains alive, including when a worker outlives the Flask process; cross-process behavior is exercised on Windows CI and POSIX-compatible locking is implemented
+- runtime maintenance exclusion: the local Flask process, detached durable workers, semantic-analysis CLI (including dry-run startup because `create_app()` may migrate local state), and explicit processing-job recovery writes hold shared runtime file locks; backup and applied restore hold the exclusive maintenance lock for the whole operation; maintenance is rejected while any live writer remains, while read-only recovery inspection stays lock-free
 - project deletion lifecycle, including durable-job serialization, pre-commit quarantine of existing output/upload numeric ID entries and captured processing-job logs, deletion refusal when quarantine cannot be established, quarantine restoration on DB rollback, non-recursive linked-path handling, immediate SQLite Project/ProcessingJob ID-reuse safety after post-commit cleanup failure, and mandatory retention of raw transcript snapshots
 - participant/interview-flow project boundaries and delete guards
 - interview-creation scope validation
@@ -123,7 +123,7 @@ Start with dry-run/no-AI:
 python scripts/run_semantic_analysis.py --interview-id <id> --dry-run --no-ai
 ```
 
-`Segment.text` and raw snapshots must remain unchanged. Fragmentation and normalization are derived data. Provider-backed semantic execution must use the application's protected settings boundary.
+`Segment.text` and raw snapshots must remain unchanged. Fragmentation and normalization are derived data. Provider-backed semantic execution must use the application's protected settings boundary. The semantic CLI holds the shared runtime lock even for dry-run because application initialization may perform idempotent schema/secret migration; it therefore refuses to start while backup/applied-restore maintenance owns the exclusive lock.
 
 ## PR preflight
 
