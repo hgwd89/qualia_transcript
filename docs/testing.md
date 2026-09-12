@@ -27,6 +27,7 @@ The required `safe-smoke` gate currently covers:
 - SQLite foreign-key enforcement
 - legacy `processing_jobs.question_id` compatibility guards: insert/update triggers must reject orphan question references even when `PRAGMA foreign_keys=OFF`
 - readiness detection of declared SQLite FK violations and explicit `ProcessingJob.question_id` orphans
+- resumed project-analysis UI recovery: the shared job script must wrap `pollAnalysisJob` before the page's resume handler runs and must re-enable the associated analysis button before propagating a polling error
 - Windows DPAPI secret-store behavior
 
 The Windows-only DPAPI regression reports a skip/pass on non-Windows systems. On Windows it validates local protection/migration behavior, verifies that covered application consumers receive decrypted usable settings without contacting an external service, and verifies settings-form atomicity: if a later secret field cannot be protected, earlier secret and non-secret field changes from the same POST are rolled back together rather than partially committed.
