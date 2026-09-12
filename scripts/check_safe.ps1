@@ -15,6 +15,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] safe smoke checks passed."
 
+Write-Host "[INFO] Running launcher runtime-config smoke check..."
+powershell -ExecutionPolicy Bypass -File tests/smoke_runtime_config.ps1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] launcher runtime-config smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] launcher runtime-config smoke checks passed."
+
 Write-Host "[INFO] Running generated-file integrity smoke check..."
 python tests/smoke_generated_file_integrity.py
 if ($LASTEXITCODE -ne 0) {
