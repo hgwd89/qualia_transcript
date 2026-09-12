@@ -57,6 +57,7 @@ For Windows local launcher work, only edit:
 - `start_app.ps1`
 - `stop_app.ps1`
 - `open_app.ps1`
+- `scripts/runtime_config.ps1`
 - `README_LOCAL.md`
 - `.gitignore`
 - `logs/.gitkeep`
@@ -65,21 +66,26 @@ For Windows local launcher work, only edit:
 ### Requirements
 
 - `start_app.ps1` must start `python app.py` in the background.
+- It must read `APP_HOST` / `APP_PORT` through `scripts/runtime_config.ps1` rather than hard-code port 5000.
 - It must log to `logs/flask_out.log` and `logs/flask_err.log`.
-- It must avoid double-starting if port 5000 is already serving HTTP 200.
+- It must avoid double-starting if the configured app URL is already serving HTTP 200.
 - It must wait for readiness with a retry loop: max 30 seconds, 1-second interval, success on HTTP 200.
 - It must not kill unrelated processes.
-- `stop_app.ps1` may stop only the Qualia Transcript Flask process using port 5000.
-- `open_app.ps1` should only open `http://127.0.0.1:5000/`.
+- `stop_app.ps1` may stop only the Qualia Transcript Flask process using the configured `APP_PORT`, after identifying the process/endpoint as Qualia Transcript.
+- `open_app.ps1` must open the runtime-config URL. Browser URLs normalize wildcard bind hosts (`0.0.0.0` → `127.0.0.1`, `::` → `::1`) and bracket IPv6 literals.
 
 ## Lightweight verification
 
 For launcher-only changes, run only:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File scripts/check_runtime_config.ps1
 .\start_app.ps1
-Invoke-WebRequest http://127.0.0.1:5000/ -UseBasicParsing
-Invoke-WebRequest http://127.0.0.1:5000/settings -UseBasicParsing
+. (Join-Path $PWD "scripts\runtime_config.ps1")
+$pythonExe = Get-QualiaPythonExecutable -ProjectDir $PWD
+$runtime = Get-QualiaRuntimeConfig -ProjectDir $PWD -PythonExe $pythonExe
+Invoke-WebRequest $runtime.Url -UseBasicParsing
+Invoke-WebRequest "$($runtime.Url)settings" -UseBasicParsing
 .\open_app.ps1
 .\stop_app.ps1
 git status
@@ -112,19 +118,19 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 
 `scripts/check_outputs_flags.ps1` / `tests/smoke_outputs_flags.py` are output-flag reflection checks.
 - OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes on `segment_id=257` flags (create/delete/restore).
-- They verify Word marker (`★引用候補`) and Excel flag columns/values.
-- Keep them out of default safe checks; run only when needed.
+- They create their own temporary SQLite database plus temporary upload/output directories; do not rewrite them to depend on a fixed real-data Segment ID.
+- They verify Word marker (`★引用候補`) and Excel flag columns/values while preserving fixture `Segment.text`.
+- They generate temporary Word/Excel artifacts, so keep them out of the default safe gate; run them through the relevant local/output check when needed.
 
 `scripts/check_flags.ps1` / `tests/smoke_flags.py` are segment-flag checks.
 - OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes (create/delete/restore flags), so they are not fully read-only.
-- Keep them out of default safe checks; run only when needed.
+- They use a self-contained temporary database and temporary runtime directories; they must not mutate the existing research database.
+- Keep them out of the default safe gate; run them through the broader local checks when relevant.
 
 `scripts/check_speaker_assignments.ps1` / `tests/smoke_speaker_assignments.py` are speaker-assignment checks.
 - OpenAI/Rakuten/Whisper APIs must not be called.
-- They perform reversible DB writes (upsert/restore speaker assignments).
-- Keep them out of default safe checks; run only when needed.
+- They use a self-contained temporary database and temporary runtime directories; they must not mutate the existing research database.
+- Keep them out of the default safe gate; run them through the broader local checks when relevant.
 
 `scripts/check_all.ps1` is a runner.
 - Default: safe check only.
