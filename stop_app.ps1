@@ -7,6 +7,11 @@ $pythonExe = Get-QualiaPythonExecutable -ProjectDir $ProjectDir
 $runtime = Get-QualiaRuntimeConfig -ProjectDir $ProjectDir -PythonExe $pythonExe
 $Port = $runtime.Port
 
+function Test-ProcessExistsById {
+    param([int]$ProcessId)
+    return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+}
+
 function Get-ProcessInfoById {
     param([int]$ProcessId)
 
@@ -74,7 +79,7 @@ function Is-SameQualiaProcessInstance {
 
 $target = Get-PortProcessInfo -LocalPort $Port
 if (-not $target) {
-    Write-Host "ポート $Port を使用中のプロセスはありません。停止対象なし。" -ForegroundColor Yellow
+    Write-Host "ポート $Port の停止対象を安全に確認できませんでした。" -ForegroundColor Yellow
     exit 0
 }
 
@@ -99,7 +104,11 @@ if ($target.CommandLine) {
 # replacement process.
 $preStop = Get-ProcessInfoById -ProcessId $initialPid
 if (-not $preStop) {
-    Write-Host "停止対象は停止操作前に既に終了したか、安全に再確認できませんでした。" -ForegroundColor Green
+    if (Test-ProcessExistsById -ProcessId $initialPid) {
+        Write-Host "停止操作前にプロセス identity を安全に再確認できなかったため停止しません。" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "停止対象は停止操作前に既に終了しました。" -ForegroundColor Green
     exit 0
 }
 if (-not (Is-SameQualiaProcessInstance -Candidate $preStop -Initial $target)) {
@@ -114,6 +123,10 @@ for ($i = 1; $i -le 10; $i++) {
     Start-Sleep -Seconds 1
     $after = Get-ProcessInfoById -ProcessId $initialPid
     if (-not $after) {
+        if (Test-ProcessExistsById -ProcessId $initialPid) {
+            Write-Host "停止後のプロセス identity を安全に再確認できないため強制停止しません。" -ForegroundColor Red
+            exit 1
+        }
         Write-Host "停止成功。" -ForegroundColor Green
         exit 0
     }
@@ -130,8 +143,16 @@ for ($i = 1; $i -le 10; $i++) {
 }
 
 $final = Get-ProcessInfoById -ProcessId $initialPid
-if (-not $final -or -not (Is-SameQualiaProcessInstance -Candidate $final -Initial $target)) {
+if (-not $final) {
+    if (Test-ProcessExistsById -ProcessId $initialPid) {
+        Write-Host "最終プロセス identity を安全に再確認できないため、停止成功とは判定しません。" -ForegroundColor Red
+        exit 1
+    }
     Write-Host "停止成功。" -ForegroundColor Green
+    exit 0
+}
+if (-not (Is-SameQualiaProcessInstance -Candidate $final -Initial $target)) {
+    Write-Host "元の Qualia Transcript は終了しました。再利用された PID のプロセスは停止しません。" -ForegroundColor Green
     exit 0
 }
 
