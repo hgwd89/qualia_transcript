@@ -166,6 +166,45 @@ def main() -> int:
             output_dir=outputs,
             label="rollback",
         )
+
+        rollback_guard_target = root / "rollback-guard-current.db"
+        rollback_guard_uploads = root / "rollback-guard-uploads"
+        rollback_guard_outputs = root / "rollback-guard-outputs"
+        create_db(rollback_guard_target, "rollback-current")
+        rollback_guard_uploads.mkdir()
+        rollback_guard_outputs.mkdir()
+        guarded_upload = rollback_guard_uploads / "keep.txt"
+        guarded_output = rollback_guard_outputs / "keep.txt"
+        guarded_upload.write_text("keep upload", encoding="utf-8")
+        guarded_output.write_text("keep output", encoding="utf-8")
+
+        saved_link_check = local_backup.is_link_or_reparse
+        local_backup.is_link_or_reparse = lambda path: Path(path) == guarded_upload
+        linked_rollback_rejected = False
+        try:
+            local_backup.restore_backup(
+                archive,
+                apply=True,
+                database_uri=f"sqlite:///{rollback_guard_target.as_posix()}",
+                upload_dir=rollback_guard_uploads,
+                output_dir=rollback_guard_outputs,
+                backup_dir=backups,
+                create_pre_restore_backup=False,
+            )
+        except ValueError as exc:
+            linked_rollback_rejected = (
+                "restore rollback" in str(exc) and "linked/reparse" in str(exc)
+            )
+        finally:
+            local_backup.is_link_or_reparse = saved_link_check
+        failures += check(
+            "restore rejects linked rollback trees before mutating live targets",
+            linked_rollback_rejected
+            and read_value(rollback_guard_target) == "rollback-current"
+            and guarded_upload.read_text(encoding="utf-8") == "keep upload"
+            and guarded_output.read_text(encoding="utf-8") == "keep output",
+        )
+
         new_target = root / "new-target.db"
         saved_copy_tree = local_backup._copy_tree_from_stage
 
