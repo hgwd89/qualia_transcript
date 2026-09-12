@@ -49,14 +49,6 @@ function Get-ProcessInfoById {
     }
 }
 
-function Get-PortProcessInfo {
-    param([int]$LocalPort)
-
-    $conn = Get-NetTCPConnection -State Listen -LocalPort $LocalPort -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $conn) { return $null }
-    return Get-ProcessInfoById -ProcessId ([int]$conn.OwningProcess)
-}
-
 function Is-QualiaFlaskProcess {
     param([object]$ProcessInfo)
     if (-not $ProcessInfo) { return $false }
@@ -77,10 +69,23 @@ function Is-SameQualiaProcessInstance {
         -ProjectDir $ProjectDir
 }
 
-$target = Get-PortProcessInfo -LocalPort $Port
-if (-not $target) {
-    Write-Host "ポート $Port の停止対象を安全に確認できませんでした。" -ForegroundColor Yellow
+$listeners = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
+if ($listeners.Count -eq 0) {
+    Write-Host "ポート $Port を使用中のプロセスはありません。停止対象なし。" -ForegroundColor Yellow
     exit 0
+}
+
+$ownerPids = @($listeners | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)
+if ($ownerPids.Count -ne 1) {
+    Write-Host "ポート $Port に複数の listener PID があり停止対象を一意に特定できないため停止しません。" -ForegroundColor Red
+    Write-Host "PIDs: $($ownerPids -join ', ')" -ForegroundColor Red
+    exit 1
+}
+
+$target = Get-ProcessInfoById -ProcessId ([int]$ownerPids[0])
+if (-not $target) {
+    Write-Host "ポート $Port の listener process identity を安全に取得できないため停止しません。" -ForegroundColor Red
+    exit 1
 }
 
 if (-not (Is-QualiaFlaskProcess -ProcessInfo $target) -or $null -eq $target.StartTimeUtcTicks) {
