@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$projectRoot = (Resolve-Path (Join-Path $scriptDir "..")).Path
 . (Join-Path $scriptDir "runtime_config.ps1")
 
 $failures = 0
@@ -10,6 +11,20 @@ function Assert-Equal {
         [string]$Name,
         [string]$Actual,
         [string]$Expected
+    )
+    if ($Actual -eq $Expected) {
+        Write-Host "[PASS] $Name"
+    } else {
+        Write-Host "[FAIL] $Name`: expected=$Expected actual=$Actual"
+        $script:failures += 1
+    }
+}
+
+function Assert-Bool {
+    param(
+        [string]$Name,
+        [bool]$Actual,
+        [bool]$Expected
     )
     if ($Actual -eq $Expected) {
         Write-Host "[PASS] $Name"
@@ -42,6 +57,32 @@ Assert-Equal -Name "already bracketed IPv6 is normalized once" `
 Assert-Equal -Name "hostname remains unbracketed" `
     -Actual (Get-QualiaAppUrl -HostAddress "localhost" -Port 5003) `
     -Expected "http://localhost:5003/"
+
+$appScript = Get-QualiaAppScriptPath -ProjectDir $projectRoot
+$exactCommand = "`"C:\Python\python.exe`" `"$appScript`""
+Assert-Bool -Name "exact repository app.py command line is recognized" `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine $exactCommand -ProjectDir $projectRoot) `
+    -Expected $true
+
+Assert-Bool -Name "generic relative python app.py is not enough for process identity" `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine "python app.py" -ProjectDir $projectRoot) `
+    -Expected $false
+
+Assert-Bool -Name "another repository app.py is rejected" `
+    -Actual (Test-QualiaProcessCommandLine -CommandLine '"C:\Python\python.exe" "C:\other-project\app.py"' -ProjectDir $projectRoot) `
+    -Expected $false
+
+Assert-Bool -Name "Qualia settings content requires service identity and marker" `
+    -Actual (Test-QualiaSettingsContent -Content '<title>設定 | Qualia Transcript</title><div>Whisperモデル</div>' -ServiceName "Qualia Transcript") `
+    -Expected $true
+
+Assert-Bool -Name "generic settings page is not accepted as Qualia" `
+    -Actual (Test-QualiaSettingsContent -Content '<title>設定</title><div>Whisperモデル</div>' -ServiceName "Qualia Transcript") `
+    -Expected $false
+
+Assert-Bool -Name "service name alone is insufficient without a Qualia settings marker" `
+    -Actual (Test-QualiaSettingsContent -Content '<title>Qualia Transcript</title>' -ServiceName "Qualia Transcript") `
+    -Expected $false
 
 if ($failures -gt 0) {
     Write-Host "`nSummary: FAIL ($failures checks failed)"
