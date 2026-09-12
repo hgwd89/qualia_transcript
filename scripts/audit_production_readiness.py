@@ -443,18 +443,40 @@ def main() -> int:
     parser.add_argument("--strict", action="store_true", help="treat warnings as a failing exit status")
     args = parser.parse_args()
 
+    root = _root()
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from services.runtime_lock import RuntimeLockError, runtime_lock
+
     try:
-        report = audit(
-            _resolve_db_path(args.db),
-            _resolve_output_dir(args.output_dir),
-            _resolve_backup_dir(args.backup_dir),
-        )
-    except Exception as exc:
+        with runtime_lock("reader"):
+            try:
+                report = audit(
+                    _resolve_db_path(args.db),
+                    _resolve_output_dir(args.output_dir),
+                    _resolve_backup_dir(args.backup_dir),
+                )
+            except Exception as exc:
+                report = {
+                    "blockers": [{"code": "audit_error", "message": f"{type(exc).__name__}: {exc}"}],
+                    "warnings": [],
+                    "info": {},
+                }
+    except RuntimeLockError as exc:
         report = {
-            "blockers": [{"code": "audit_error", "message": f"{type(exc).__name__}: {exc}"}],
+            "blockers": [{
+                "code": "maintenance_active",
+                "message": "Readiness audit refused while backup/restore maintenance is active",
+                "context": {"error": str(exc)},
+            }],
             "warnings": [],
             "info": {},
         }
+        if args.json:
+            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_report(report)
+        return 3
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
