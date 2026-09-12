@@ -1,4 +1,6 @@
+import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -10,6 +12,24 @@ def check(name: str, ok: bool, detail: str = "") -> int:
     suffix = f": {detail}" if detail else ""
     print(f"[{status}] {name}{suffix}")
     return 0 if ok else 1
+
+
+def create_directory_link(link_path: Path, target_path: Path) -> tuple[bool, str]:
+    """Create a real directory link/junction for the required cleanup regression."""
+    if os.name == "nt":
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link_path), str(target_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        detail = (result.stdout or result.stderr or "").strip()
+        return result.returncode == 0, detail
+    try:
+        link_path.symlink_to(target_path, target_is_directory=True)
+        return True, ""
+    except OSError as exc:
+        return False, str(exc)
 
 
 def main() -> int:
@@ -45,7 +65,11 @@ def main() -> int:
             from models.processing_job import ProcessingJob
             from models.project import Project
             from services import project_deletion
-            from services.project_deletion import ProjectDeletionBlocked, delete_project
+            from services.project_deletion import (
+                ProjectDeletionBlocked,
+                ProjectDeletionStorageBlocked,
+                delete_project,
+            )
 
             app = create_app()
             app.config["TESTING"] = True
@@ -116,8 +140,10 @@ def main() -> int:
                 raw_dir.mkdir(parents=True, exist_ok=True)
                 raw_snapshot = raw_dir / f"transcription_{transcription_id}_20260912T000000Z.json"
                 raw_manifest = raw_dir / f"transcription_{transcription_id}_manifest_20260912T000000Z.json"
-                raw_snapshot.write_text("{}", encoding="utf-8")
-                raw_manifest.write_text("{}", encoding="utf-8")
+                raw_snapshot.write_bytes(b'{"kind":"raw","text":"immutable source"}\n')
+                raw_manifest.write_bytes(b'{"kind":"manifest","chunks":["immutable"]}\n')
+                raw_snapshot_before = raw_snapshot.read_bytes()
+                raw_manifest_before = raw_manifest.read_bytes()
 
                 logs_dir = Path(config.BASE_DIR) / "logs"
                 logs_dir.mkdir(parents=True, exist_ok=True)
@@ -160,31 +186,47 @@ def main() -> int:
                     and db.session.get(ProcessingJob, job_id) is None,
                 )
                 failures += check(
-                    "project deletion preserves raw transcript snapshots",
-                    raw_snapshot.is_file() and raw_manifest.is_file(),
+                    "project deletion preserves raw transcript snapshot bytes",
+                    raw_snapshot.is_file()
+                    and raw_manifest.is_file()
+                    and raw_snapshot.read_bytes() == raw_snapshot_before
+                    and raw_manifest.read_bytes() == raw_manifest_before,
                 )
                 failures += check(
-                    "project deletion cleans disposable managed storage",
+                    "project deletion cleans quarantined managed storage",
                     not project_output_dir.exists()
                     and not upload_dir.exists()
                     and not job_log.exists()
-                    and not result.cleanup_errors,
+                    and not result.cleanup_errors
+                    and not list(Path(config.OUTPUT_DIR).glob(".qualia-delete-quarantine-*"))
+                    and not list(Path(config.UPLOAD_DIR).glob(".qualia-delete-quarantine-*"))
+                    and not list(logs_dir.glob(".qualia-delete-quarantine-*")),
                     f"removed_paths={result.removed_paths} errors={result.cleanup_errors}",
                 )
 
-                errors: list[str] = []
-                with patch(
-                    "services.project_deletion._is_link_or_reparse",
-                    return_value=True,
-                ), patch(
-                    "services.project_deletion._remove_link_only",
-                    return_value=1,
-                ) as remove_link:
-                    removed = project_deletion._remove_dir(root / "linked-entry", errors)
+                link_target = root / "linked-target"
+                link_target.mkdir(parents=True, exist_ok=True)
+                target_marker = link_target / "target-must-survive.txt"
+                target_marker.write_text("keep-target", encoding="utf-8")
+                linked_entry = root / "linked-entry"
+                link_created, link_detail = create_directory_link(linked_entry, link_target)
                 failures += check(
-                    "linked managed path uses non-recursive cleanup",
-                    removed == 1 and remove_link.called and not errors,
+                    "real linked-directory fixture created",
+                    link_created,
+                    link_detail,
                 )
+                if link_created:
+                    link_errors: list[str] = []
+                    removed = project_deletion._remove_dir(linked_entry, link_errors)
+                    failures += check(
+                        "real linked managed path is detached without traversing target",
+                        removed == 1
+                        and not os.path.lexists(linked_entry)
+                        and target_marker.is_file()
+                        and target_marker.read_text(encoding="utf-8") == "keep-target"
+                        and not link_errors,
+                        f"removed={removed} errors={link_errors}",
+                    )
 
                 blocked = Project(name="Deletion blocked")
                 db.session.add(blocked)
@@ -212,6 +254,32 @@ def main() -> int:
                     and db.session.get(ProcessingJob, active_id) is not None,
                 )
 
+                quarantine_blocked = Project(name="Quarantine blocked")
+                db.session.add(quarantine_blocked)
+                db.session.commit()
+                quarantine_blocked_id = int(quarantine_blocked.id)
+                blocked_dir = Path(config.OUTPUT_DIR) / str(quarantine_blocked_id)
+                blocked_dir.mkdir(parents=True, exist_ok=True)
+                blocked_marker = blocked_dir / "must-stay.txt"
+                blocked_marker.write_text("keep", encoding="utf-8")
+
+                storage_blocked = False
+                with patch(
+                    "services.project_deletion.os.replace",
+                    side_effect=PermissionError("simulated quarantine rename failure"),
+                ):
+                    try:
+                        delete_project(quarantine_blocked)
+                    except ProjectDeletionStorageBlocked:
+                        storage_blocked = True
+
+                failures += check(
+                    "quarantine failure blocks DB deletion and preserves numeric path",
+                    storage_blocked
+                    and db.session.get(Project, quarantine_blocked_id) is not None
+                    and blocked_marker.is_file(),
+                )
+
                 commit_fail_project = Project(name="Commit failure")
                 db.session.add(commit_fail_project)
                 db.session.commit()
@@ -237,10 +305,105 @@ def main() -> int:
                         event.remove(session, "before_commit", fail_before_commit)
 
                 failures += check(
-                    "DB commit failure preserves project and files",
+                    "DB commit failure restores quarantined project storage",
                     commit_failed
                     and db.session.get(Project, commit_fail_id) is not None
-                    and marker.is_file(),
+                    and marker.is_file()
+                    and not list(Path(config.OUTPUT_DIR).glob(
+                        f".qualia-delete-quarantine-{commit_fail_id}-*"
+                    )),
+                )
+
+                cleanup_fail_project = Project(name="Cleanup failure")
+                db.session.add(cleanup_fail_project)
+                db.session.flush()
+                cleanup_fail_id = int(cleanup_fail_project.id)
+                cleanup_fail_job = ProcessingJob(
+                    project_id=cleanup_fail_id,
+                    job_type="analyze",
+                    status="succeeded",
+                )
+                db.session.add(cleanup_fail_job)
+                db.session.commit()
+                cleanup_fail_job_id = int(cleanup_fail_job.id)
+
+                cleanup_fail_dir = Path(config.OUTPUT_DIR) / str(cleanup_fail_id)
+                cleanup_fail_dir.mkdir(parents=True, exist_ok=True)
+                old_marker = cleanup_fail_dir / "old-owner.txt"
+                old_marker.write_text("old", encoding="utf-8")
+                old_job_log = logs_dir / f"processing_job_{cleanup_fail_job_id}.log"
+                old_job_log.write_text("old-job", encoding="utf-8")
+
+                def fail_quarantine_cleanup(entry, cleanup_errors):
+                    cleanup_errors.append(
+                        f"simulated quarantine cleanup failure: {entry.quarantine_path}"
+                    )
+                    return 0
+
+                with patch(
+                    "services.project_deletion._remove_quarantined_entry",
+                    side_effect=fail_quarantine_cleanup,
+                ):
+                    cleanup_fail_result = delete_project(cleanup_fail_project)
+
+                quarantines = list(Path(config.OUTPUT_DIR).glob(
+                    f".qualia-delete-quarantine-{cleanup_fail_id}-*"
+                ))
+                log_quarantines = list(logs_dir.glob(
+                    f".qualia-delete-quarantine-processing_job_{cleanup_fail_job_id}.log-*"
+                ))
+                failures += check(
+                    "post-commit cleanup failure leaves only nonreusable quarantine names",
+                    db.session.get(Project, cleanup_fail_id) is None
+                    and db.session.get(ProcessingJob, cleanup_fail_job_id) is None
+                    and not cleanup_fail_dir.exists()
+                    and not old_job_log.exists()
+                    and bool(cleanup_fail_result.cleanup_errors)
+                    and len(quarantines) == 1
+                    and len(log_quarantines) == 1
+                    and (quarantines[0] / "old-owner.txt").is_file()
+                    and log_quarantines[0].read_text(encoding="utf-8") == "old-job",
+                    (
+                        f"errors={cleanup_fail_result.cleanup_errors} "
+                        f"storage_quarantines={quarantines} log_quarantines={log_quarantines}"
+                    ),
+                )
+
+                replacement = Project(name="Replacement after cleanup failure")
+                db.session.add(replacement)
+                db.session.flush()
+                replacement_id = int(replacement.id)
+                replacement_job = ProcessingJob(
+                    project_id=replacement_id,
+                    job_type="analyze",
+                    status="succeeded",
+                )
+                db.session.add(replacement_job)
+                db.session.commit()
+                replacement_job_id = int(replacement_job.id)
+
+                replacement_dir = Path(config.OUTPUT_DIR) / str(replacement_id)
+                replacement_dir.mkdir(parents=True, exist_ok=True)
+                replacement_marker = replacement_dir / "new-owner.txt"
+                replacement_marker.write_text("new", encoding="utf-8")
+                replacement_job_log = logs_dir / f"processing_job_{replacement_job_id}.log"
+                replacement_job_log.write_text("new-job", encoding="utf-8")
+
+                failures += check(
+                    "reused project/job IDs cannot inherit or lose predecessor storage",
+                    replacement_id == cleanup_fail_id
+                    and replacement_job_id == cleanup_fail_job_id
+                    and replacement_marker.is_file()
+                    and not (replacement_dir / "old-owner.txt").exists()
+                    and replacement_job_log.read_text(encoding="utf-8") == "new-job"
+                    and len(quarantines) == 1
+                    and len(log_quarantines) == 1
+                    and (quarantines[0] / "old-owner.txt").is_file()
+                    and log_quarantines[0].read_text(encoding="utf-8") == "old-job",
+                    (
+                        f"project={cleanup_fail_id}->{replacement_id} "
+                        f"job={cleanup_fail_job_id}->{replacement_job_id}"
+                    ),
                 )
 
                 db.session.remove()
