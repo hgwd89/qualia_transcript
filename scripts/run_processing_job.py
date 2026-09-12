@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from app import create_app
 from services.processing_jobs import execute_job
+from services.runtime_lock import runtime_lock
 
 
 def main() -> int:
@@ -19,13 +20,17 @@ def main() -> int:
     parser.add_argument("--job-id", type=int, required=True)
     args = parser.parse_args()
 
-    app = create_app()
-    with app.app_context():
-        job = execute_job(args.job_id, worker_pid=os.getpid())
-        print(f"job_id={job.id} status={job.status}")
-        if job.error_message:
-            print(job.error_message)
-        return 0 if job.status == "succeeded" else 1
+    # Detached workers can outlive the Flask process. Keep a shared runtime lock
+    # for the worker lifetime so backup/applied restore cannot start while this
+    # process can still write database, upload, output, or raw-snapshot state.
+    with runtime_lock("worker"):
+        app = create_app()
+        with app.app_context():
+            job = execute_job(args.job_id, worker_pid=os.getpid())
+            print(f"job_id={job.id} status={job.status}")
+            if job.error_message:
+                print(job.error_message)
+            return 0 if job.status == "succeeded" else 1
 
 
 if __name__ == "__main__":
