@@ -137,6 +137,9 @@ Assert-Bool -Name "launcher passes absolute app.py identity to Python" `
 Assert-Bool -Name "readiness loop uses one wall-clock UTC deadline" `
     -Actual ($startScriptText.Contains('[DateTime]::UtcNow.AddSeconds($MaxSeconds)') -and $startScriptText.Contains('-DeadlineUtc $deadlineUtc')) `
     -Expected $true
+Assert-Bool -Name "failed startup cleanup terminates through the Start-Process object" `
+    -Actual ($startScriptText.Contains('Stop-Process -InputObject $launched') -and -not $startScriptText.Contains('Stop-Process -Id $launched.Id')) `
+    -Expected $true
 Assert-Bool -Name "stop requires exact repository process identity" `
     -Actual ($stopScriptText.Contains("Is-QualiaFlaskProcess") -and -not $stopScriptText.Contains("Test-QualiaAppEndpoint")) `
     -Expected $true
