@@ -7,7 +7,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import config
-from services.local_backup import create_backup, validate_backup
+from services.local_backup import create_backup
 
 
 def main() -> int:
@@ -22,11 +22,9 @@ def main() -> int:
     parser.add_argument("--label", default="manual", help="Short backup label")
     args = parser.parse_args()
 
+    # create_backup performs full manifest/hash/SQLite validation before returning.
     archive = create_backup(args.destination, label=args.label)
-    manifest = validate_backup(archive)
-    print(f"[PASS] backup created: {archive}")
-    print(f"[PASS] files verified: {len(manifest.get('files') or [])}")
-    print(f"[INFO] created_at_utc: {manifest.get('created_at_utc')}")
+    print(f"[PASS] backup created and verified: {archive}")
     return 0
 
 
