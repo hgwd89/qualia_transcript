@@ -84,6 +84,31 @@ Assert-Bool -Name "app.py path mentioned inside another argument is rejected" `
     -Actual (Test-QualiaProcessCommandLine -CommandLine ("python -c `"print('$appScript')`"") -ProjectDir $projectRoot -ProcessName "python") `
     -Expected $false
 
+$initialProcess = [PSCustomObject]@{
+    Pid = 4242
+    Name = "python"
+    CommandLine = $exactCommand
+    StartTimeUtcTicks = 1000000
+}
+$sameProcess = [PSCustomObject]@{
+    Pid = 4242
+    Name = "python"
+    CommandLine = $exactCommand
+    StartTimeUtcTicks = 1000000
+}
+$reusedPid = [PSCustomObject]@{
+    Pid = 4242
+    Name = "python"
+    CommandLine = $exactCommand
+    StartTimeUtcTicks = 2000000
+}
+Assert-Bool -Name "same PID start-time and app identity is the same process instance" `
+    -Actual (Test-QualiaSameProcessInstance -Candidate $sameProcess -Initial $initialProcess -ProjectDir $projectRoot) `
+    -Expected $true
+Assert-Bool -Name "reused PID with a different start time is rejected" `
+    -Actual (Test-QualiaSameProcessInstance -Candidate $reusedPid -Initial $initialProcess -ProjectDir $projectRoot) `
+    -Expected $false
+
 Assert-Bool -Name "Qualia settings content requires service identity and marker" `
     -Actual (Test-QualiaSettingsContent -Content '<title>設定 | Qualia Transcript</title><div>Whisperモデル</div>' -ServiceName "Qualia Transcript") `
     -Expected $true
@@ -115,8 +140,11 @@ Assert-Bool -Name "readiness loop uses one wall-clock UTC deadline" `
 Assert-Bool -Name "stop requires exact repository process identity" `
     -Actual ($stopScriptText.Contains("Is-QualiaFlaskProcess") -and -not $stopScriptText.Contains("Test-QualiaAppEndpoint")) `
     -Expected $true
-Assert-Bool -Name "forced stop is fenced to the original listener PID" `
-    -Actual ($stopScriptText.Contains('$after.Pid -eq $initialPid')) `
+Assert-Bool -Name "normal stop revalidates the original process instance immediately before termination" `
+    -Actual ($stopScriptText.Contains('$preStop = Get-ProcessInfoById') -and $stopScriptText.Contains('Is-SameQualiaProcessInstance -Candidate $preStop -Initial $target')) `
+    -Expected $true
+Assert-Bool -Name "forced stop remains fenced to PID start-time and exact app identity" `
+    -Actual ($stopScriptText.Contains('Is-SameQualiaProcessInstance -Candidate $after -Initial $target') -and $stopScriptText.Contains('StartTimeUtcTicks')) `
     -Expected $true
 
 if ($failures -gt 0) {
