@@ -34,6 +34,7 @@ def main() -> int:
             from app import create_app
             from models import db
             from models.interview import Interview
+            from models.participant import Participant
             from models.project import Project
             from models.segment import Segment
             from services.transcription import auto_assign_speaker_roles
@@ -46,11 +47,23 @@ def main() -> int:
                 project = Project(name="Role normalization smoke")
                 db.session.add(project)
                 db.session.flush()
-                interview = Interview(project_id=project.id, status="transcribed")
+                participant = Participant(
+                    project_id=project.id,
+                    participant_code="P01",
+                    display_name="Participant 1",
+                )
+                db.session.add(participant)
+                db.session.flush()
+                interview = Interview(
+                    project_id=project.id,
+                    participant_id=participant.id,
+                    status="transcribed",
+                )
                 db.session.add(interview)
                 db.session.flush()
                 segment = Segment(
                     interview_id=interview.id,
+                    participant_id=participant.id,
                     seq=1,
                     speaker_label="SPEAKER_00",
                     speaker_role="moderator",
@@ -80,6 +93,7 @@ def main() -> int:
                 db.session.commit()
                 interview_id = interview.id
                 segment_id = segment.id
+                participant_id = participant.id
                 auto_interview_id = auto_interview.id
 
                 auto_assign_speaker_roles(auto_interview_id)
@@ -111,6 +125,49 @@ def main() -> int:
                 str(status_data),
             )
 
+            malformed = client.post(
+                f"/interviews/{interview_id}/segments/{segment_id}/role",
+                data="{",
+                content_type="application/json",
+            )
+            with app.app_context():
+                from models.segment import Segment
+                current = db.session.get(Segment, segment_id)
+                failures += check(
+                    "malformed role JSON is rejected without mutation",
+                    malformed.status_code == 400
+                    and current.speaker_role == "moderator"
+                    and current.participant_id == participant_id,
+                    f"status={malformed.status_code} role={current.speaker_role} participant={current.participant_id}",
+                )
+
+            empty = client.post(
+                f"/interviews/{interview_id}/segments/{segment_id}/role",
+                json={},
+            )
+            with app.app_context():
+                current = db.session.get(Segment, segment_id)
+                failures += check(
+                    "empty role JSON is rejected without mutation",
+                    empty.status_code == 400
+                    and current.speaker_role == "moderator"
+                    and current.participant_id == participant_id,
+                    f"status={empty.status_code} role={current.speaker_role} participant={current.participant_id}",
+                )
+
+            partial = client.post(
+                f"/interviews/{interview_id}/segments/{segment_id}/role",
+                json={"speaker_role": "respondent"},
+            )
+            partial_data = partial.get_json() or {}
+            failures += check(
+                "partial role update preserves existing participant",
+                partial.status_code == 200
+                and partial_data.get("speaker_role") == "respondent"
+                and partial_data.get("participant_id") == participant_id,
+                str(partial_data),
+            )
+
             update_response = client.post(
                 f"/interviews/{interview_id}/segments/{segment_id}/role",
                 json={"speaker_role": "moderator", "participant_id": None},
@@ -119,7 +176,8 @@ def main() -> int:
             failures += check(
                 "canonical moderator role is accepted by backend",
                 update_response.status_code == 200
-                and update_data.get("speaker_role") == "moderator",
+                and update_data.get("speaker_role") == "moderator"
+                and update_data.get("participant_id") is None,
                 str(update_data),
             )
 
