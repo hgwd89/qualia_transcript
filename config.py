@@ -26,6 +26,10 @@ DATABASE_PATH = os.path.join(INSTANCE_DIR, f"{SERVICE_SLUG}.db")
 # Use the equivalent absolute path explicitly so backup/readiness/restore tooling
 # and the application always refer to the exact same database file.
 DATABASE_URI = f"sqlite:///{Path(DATABASE_PATH).as_posix()}"
+RUNTIME_LOCK_PATH = os.getenv(
+    "QUALIA_RUNTIME_LOCK_PATH",
+    os.path.join(INSTANCE_DIR, "runtime.lock"),
+)
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 BACKUP_DIR = os.path.join(BASE_DIR, "backups")

@@ -7,13 +7,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.local_backup import restore_backup
+from services.runtime_lock import RuntimeLockError, runtime_lock
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Validate or restore a Qualia Transcript backup. "
-            "Default behavior is validation-only. Stop the app before --apply."
+            "Validation-only is safe while the app is running; applied restore is not."
         )
     )
     parser.add_argument("archive", help="Backup ZIP path")
@@ -45,11 +46,20 @@ def main() -> int:
         print("[FAIL] --allow-unvalidated-pre-restore requires --apply and --yes")
         return 2
 
-    result = restore_backup(
-        args.archive,
-        apply=args.apply,
-        allow_unvalidated_pre_restore=args.allow_unvalidated_pre_restore,
-    )
+    try:
+        if args.apply:
+            with runtime_lock("maintenance"):
+                result = restore_backup(
+                    args.archive,
+                    apply=True,
+                    allow_unvalidated_pre_restore=args.allow_unvalidated_pre_restore,
+                )
+        else:
+            result = restore_backup(args.archive, apply=False)
+    except RuntimeLockError as exc:
+        print(f"[FAIL] applied restore refused while Qualia Transcript or maintenance is active: {exc}")
+        return 3
+
     if not args.apply:
         print("[PASS] backup validation succeeded; no files were changed")
         print(f"[INFO] created_at_utc: {result['manifest'].get('created_at_utc')}")

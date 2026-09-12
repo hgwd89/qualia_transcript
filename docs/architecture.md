@@ -105,6 +105,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/processing_result_guard.py`: crash-window reuse and canonical result-write cleanup/fencing helpers.
 - `services/storage_paths.py`: shared output/upload path validation, including symlink and Windows reparse/junction rejection below managed roots.
 - `services/local_backup.py`: verified local backup/restore boundary for the application SQLite database, uploads, outputs, manifest/hash validation, staged restore, and rollback.
+- `services/runtime_lock.py`: cross-platform shared/exclusive process-lifetime lock; app and detached workers are shared readers, while backup/applied restore use exclusive maintenance mode.
 - `services/project_deletion.py`: serialized project deletion plus post-commit managed-storage cleanup.
 - `services/report_verbatim.py`: Word verbatim report generation.
 - `services/report_formatted.py`: Excel formatted sheet generation.
@@ -153,7 +154,9 @@ Applied restore is deliberately staged. The source ZIP is first copied into a pr
 
 Restore snapshots the pre-existing database/uploads/outputs for rollback before replacement. If the target database did not exist before restore and a later step fails, the newly created database is removed rather than left as a partial recovery. When the existing database is damaged enough that a normal verified pre-restore backup cannot be produced, recovery requires an explicit acknowledgement and preserves the original database bytes as a separate unvalidated owner-only copy before replacement.
 
-Application/backup mutual exclusion is a separate lifecycle requirement: backup and applied restore must not race with live application writes. Until process-lifetime locking is implemented, the current busy check remains advisory and operators must stop the application before applied restore.
+The local Flask process and detached durable workers share `instance/runtime.lock` in shared mode for their complete process lifetimes. This is necessary because workers are separate processes and can continue writing the database, outputs, uploads, or immutable raw snapshots after the Flask process exits. Backup and applied restore acquire the same lock in exclusive `maintenance` mode before reading or replacing the live recovery set and hold it until the full operation completes. Shared app/worker holders can coexist, but an exclusive maintenance holder cannot overlap with either; conversely, app or worker startup fails while maintenance owns the lock. OS lock release on process exit/crash prevents stale lock-file contents from blocking future work.
+
+The lock is non-blocking and uses `msvcrt.locking` on Windows and `fcntl.flock` on POSIX. Validation-only restore does not mutate the local recovery set and therefore does not require exclusive maintenance mode. The SQLite `BEGIN EXCLUSIVE` probe during applied restore remains a secondary defense; the process-lifetime runtime lock is the lifecycle boundary that prevents database/file-tree snapshots or replacements from racing with live writers.
 
 ## Managed Storage Path Contract
 
