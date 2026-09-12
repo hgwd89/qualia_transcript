@@ -20,6 +20,7 @@ The required `safe-smoke` gate currently covers:
 
 - baseline application/model/route initialization
 - launcher runtime configuration, including `0.0.0.0 -> 127.0.0.1`, IPv6 unspecified `:: -> ::1`, RFC-compliant bracketed IPv6 URLs, and unchanged hostname/IPv4 URL behavior
+- role/assignment integrity: malformed, empty, or incomplete Segment-role payloads are rejected before mutation; human-confirmed `SpeakerAssignment` roles override raw Segment roles when deciding respondent eligibility for formatted output
 - generated-file integrity, including project-scoped path enforcement, UUID-isolated internal storage for same-name outputs, rollback isolation, bounded storage basenames for long display filenames, and rejection of linked/reparse project storage paths
 - media-upload integrity, including rejection of linked/reparse interview storage paths
 - managed-storage path guards that reject symlinks and Windows junction/reparse entries below configured output/upload roots before generated files or uploaded media are created or resolved
