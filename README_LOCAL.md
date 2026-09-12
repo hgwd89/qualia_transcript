@@ -53,8 +53,8 @@ PowerShell から毎回 `python app.py` を手動実行しなくても、スク�
 
 動作:
 - 設定ポートを使用しているプロセスを確認
-- このリポジトリの絶対 `app.py` パスを含む Python command line、または Qualia Transcript 固有の endpoint 応答で対象を識別
-- generic な `python app.py` だけでは停止対象と判定しない
+- 停止対象として認めるのは、このリポジトリの絶対 `app.py` パスを command line に含む Python process だけ
+- generic な `python app.py`、別 checkout の `app.py`、endpoint 応答だけでは停止対象と判定しない
 - 通常停止後に listener が残る場合も、強制停止できるのは最初に識別した同一 PID かつ、このリポジトリの絶対 `app.py` identity が維持されている場合だけ
 - 停止待ち中に同じポートを別プロセスが取得しても、その新しいプロセスは停止しない
 
@@ -79,7 +79,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
 
 - Safe Smoke Check は無料・非破壊（外部API呼び出しなし）です。
-- launcher の host/port URL 生成、絶対 `app.py` process identity、Qualia 固有 endpoint 判定、force-stop PID fence を `scripts/check_runtime_config.ps1` で検証します。
+- launcher の host/port URL 生成、絶対 `app.py` process identity、Qualia 固有 endpoint 判定、exact-process-only stop、force-stop PID fence を `scripts/check_runtime_config.ps1` で検証します。
 
 ## Segment Flag Smoke Check（外部APIなし・可逆DB更新あり）
 
