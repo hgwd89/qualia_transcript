@@ -87,6 +87,7 @@ def main() -> int:
 
         active_root = temp_root / "active"
         active_root.mkdir()
+        (active_root / "instance").mkdir()
         active_lock = active_root / "runtime.lock"
         child = None
         try:
