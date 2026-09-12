@@ -20,12 +20,12 @@ import config
 from models import db
 from models.analysis import AIAnalysis
 from models.interview import Interview
-from models.setting import AppSetting
 from services.ai_client import MODEL as CHAT_MODEL, call_structured
 from services.fragmentation import (
     build_analysis_fragments,
     collect_candidate_segments,
 )
+from services.secret_store import get_secret_setting
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 _QUESTION_END_RE = re.compile(r"[？?]\s*$")
@@ -44,7 +44,7 @@ _MODERATOR_LIKE_PHRASES = (
 
 
 def _client() -> openai.OpenAI:
-    api_key = AppSetting.get("openai_api_key") or config.OPENAI_API_KEY
+    api_key = get_secret_setting("openai_api_key", config.OPENAI_API_KEY)
     return openai.OpenAI(api_key=api_key)
 
 
