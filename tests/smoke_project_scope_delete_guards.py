@@ -18,10 +18,16 @@ def main() -> int:
 
     import config
 
-    original_uri = config.DATABASE_URI
+    original = {
+        "DATABASE_URI": config.DATABASE_URI,
+        "UPLOAD_DIR": config.UPLOAD_DIR,
+        "OUTPUT_DIR": config.OUTPUT_DIR,
+    }
     with tempfile.TemporaryDirectory(prefix="qualia_scope_guard_") as tmp:
         root = Path(tmp)
         config.DATABASE_URI = f"sqlite:///{(root / 'scope.db').as_posix()}"
+        config.UPLOAD_DIR = str(root / "uploads")
+        config.OUTPUT_DIR = str(root / "outputs")
         try:
             from app import create_app
             from models import db
@@ -195,7 +201,9 @@ def main() -> int:
                 db.session.remove()
                 db.engine.dispose()
         finally:
-            config.DATABASE_URI = original_uri
+            config.DATABASE_URI = original["DATABASE_URI"]
+            config.UPLOAD_DIR = original["UPLOAD_DIR"]
+            config.OUTPUT_DIR = original["OUTPUT_DIR"]
 
     if failures:
         print(f"\nSummary: FAIL ({failures} checks failed)")
