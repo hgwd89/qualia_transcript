@@ -65,13 +65,13 @@ For Windows local launcher work, only edit:
 
 ### Requirements
 
-- `start_app.ps1` must start `python app.py` in the background.
+- `start_app.ps1` must start the repository's `app.py` with Python in the background and pass the resolved absolute script path to the child process.
 - It must read `APP_HOST` / `APP_PORT` through `scripts/runtime_config.ps1` rather than hard-code port 5000.
 - It must log to `logs/flask_out.log` and `logs/flask_err.log`.
-- It must avoid double-starting if the configured app URL is already serving HTTP 200.
-- It must wait for readiness with a retry loop: max 30 seconds, 1-second interval, success on HTTP 200.
+- It may treat an existing listener as Qualia Transcript only when the endpoint positively identifies the configured service; a generic HTTP 200 is insufficient.
+- It must wait for readiness with a retry loop: max 30 seconds, 1-second interval, success only when the Qualia endpoint identity check passes.
 - It must not kill unrelated processes.
-- `stop_app.ps1` may stop only the Qualia Transcript Flask process using the configured `APP_PORT`, after identifying the process/endpoint as Qualia Transcript.
+- `stop_app.ps1` may stop only the Python process using the configured `APP_PORT` whose command line contains this repository's resolved absolute `app.py` path. Generic `python app.py` or endpoint identity alone is insufficient. Any force-stop retry must remain fenced to the originally identified PID and exact repository process identity.
 - `open_app.ps1` must open the runtime-config URL. Browser URLs normalize wildcard bind hosts (`0.0.0.0` → `127.0.0.1`, `::` → `::1`) and bracket IPv6 literals.
 
 ## Lightweight verification

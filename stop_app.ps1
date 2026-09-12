@@ -6,8 +6,6 @@ $ProjectDir = $PSScriptRoot
 $pythonExe = Get-QualiaPythonExecutable -ProjectDir $ProjectDir
 $runtime = Get-QualiaRuntimeConfig -ProjectDir $ProjectDir -PythonExe $pythonExe
 $Port = $runtime.Port
-$RootUrl = $runtime.Url
-$SettingsUrl = "${RootUrl}settings"
 
 function Get-PortProcessInfo {
     param([int]$LocalPort)
@@ -29,23 +27,10 @@ function Get-PortProcessInfo {
 function Is-QualiaFlaskProcess {
     param([object]$ProcessInfo)
     if (-not $ProcessInfo) { return $false }
-    $line = "$($ProcessInfo.CommandLine)".ToLowerInvariant()
-    return ($line -like "*python*" -and $line -like "*app.py*")
-}
-
-function Test-QualiaAppEndpoint {
-    try {
-        $root = Invoke-WebRequest -Uri $RootUrl -UseBasicParsing -TimeoutSec 2
-        if ([int]$root.StatusCode -ne 200) { return $false }
-
-        $settings = Invoke-WebRequest -Uri $SettingsUrl -UseBasicParsing -TimeoutSec 2
-        if ([int]$settings.StatusCode -ne 200) { return $false }
-
-        $content = "$($settings.Content)"
-        return ($content -match "OpenAI APIキー|Whisperモデル|設定")
-    } catch {
-        return $false
-    }
+    return Test-QualiaProcessCommandLine `
+        -CommandLine "$($ProcessInfo.CommandLine)" `
+        -ProjectDir $ProjectDir `
+        -ProcessName "$($ProcessInfo.Name)"
 }
 
 $target = Get-PortProcessInfo -LocalPort $Port
@@ -54,11 +39,8 @@ if (-not $target) {
     exit 0
 }
 
-$looksLikeQualiaProcess = Is-QualiaFlaskProcess -ProcessInfo $target
-$looksLikeQualiaEndpoint = Test-QualiaAppEndpoint
-
-if (-not ($looksLikeQualiaProcess -or $looksLikeQualiaEndpoint)) {
-    Write-Host "ポート $Port は使用中ですが、Qualia Transcript の Flask ではないため停止しません。" -ForegroundColor Red
+if (-not (Is-QualiaFlaskProcess -ProcessInfo $target)) {
+    Write-Host "ポート $Port は使用中ですが、このリポジトリの Qualia Transcript プロセスと確認できないため停止しません。" -ForegroundColor Red
     Write-Host "PID: $($target.Pid), Name: $($target.Name)" -ForegroundColor Red
     if ($target.CommandLine) {
         Write-Host "CommandLine: $($target.CommandLine)" -ForegroundColor Red
@@ -66,14 +48,15 @@ if (-not ($looksLikeQualiaProcess -or $looksLikeQualiaEndpoint)) {
     exit 1
 }
 
+$initialPid = [int]$target.Pid
 Write-Host "停止対象:" -ForegroundColor Yellow
-Write-Host "PID: $($target.Pid), Name: $($target.Name)" -ForegroundColor Yellow
+Write-Host "PID: $initialPid, Name: $($target.Name)" -ForegroundColor Yellow
 if ($target.CommandLine) {
     Write-Host "CommandLine: $($target.CommandLine)" -ForegroundColor DarkYellow
 }
 
-Write-Host "Qualia Transcript を停止します (PID: $($target.Pid))..." -ForegroundColor Cyan
-Stop-Process -Id $target.Pid -ErrorAction SilentlyContinue
+Write-Host "Qualia Transcript を停止します (PID: $initialPid)..." -ForegroundColor Cyan
+Stop-Process -Id $initialPid -ErrorAction SilentlyContinue
 
 for ($i = 1; $i -le 10; $i++) {
     Start-Sleep -Seconds 1
@@ -83,7 +66,9 @@ for ($i = 1; $i -le 10; $i++) {
         exit 0
     }
 
-    if (Is-QualiaFlaskProcess -ProcessInfo $after) {
+    # Force only the same listener we originally identified, and only when its
+    # command line still points at this repository's absolute app.py path.
+    if ([int]$after.Pid -eq $initialPid -and (Is-QualiaFlaskProcess -ProcessInfo $after)) {
         Stop-Process -Id $after.Pid -Force -ErrorAction SilentlyContinue
     }
 }
