@@ -38,11 +38,19 @@ function Wait-AppReady {
         [int]$MaxSeconds
     )
 
-    for ($i = 1; $i -le $MaxSeconds; $i++) {
-        if (Test-QualiaAppEndpoint -RootUrl $Url -ServiceName $ExpectedServiceName -TimeoutSec 2) {
+    $deadlineUtc = [DateTime]::UtcNow.AddSeconds($MaxSeconds)
+    while ([DateTime]::UtcNow -lt $deadlineUtc) {
+        if (Test-QualiaAppEndpoint `
+            -RootUrl $Url `
+            -ServiceName $ExpectedServiceName `
+            -TimeoutSec 2 `
+            -DeadlineUtc $deadlineUtc) {
             return $true
         }
-        Start-Sleep -Seconds 1
+
+        $remainingMs = [int][Math]::Floor(($deadlineUtc - [DateTime]::UtcNow).TotalMilliseconds)
+        if ($remainingMs -le 0) { break }
+        Start-Sleep -Milliseconds ([Math]::Min(1000, $remainingMs))
     }
     return $false
 }
