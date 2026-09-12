@@ -63,6 +63,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] runtime maintenance exclusion smoke checks passed."
 
+Write-Host "[INFO] Running admin CLI maintenance exclusion smoke check..."
+python tests/smoke_admin_cli_maintenance_lock.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] admin CLI maintenance exclusion smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] admin CLI maintenance exclusion smoke checks passed."
+
 Write-Host "[INFO] Running project deletion lifecycle smoke check..."
 python tests/smoke_project_deletion_lifecycle.py
 if ($LASTEXITCODE -ne 0) {
