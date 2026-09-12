@@ -116,6 +116,14 @@ Environment values remain the fallback when no database secret is configured. Ex
 
 The settings UI exposes only configured/not-configured state for password fields; decrypted secret values are not rendered back into HTML.
 
+## Legacy ProcessingJob Question Integrity Contract
+
+New SQLite databases receive the model-declared foreign key from `processing_jobs.question_id` to `interview_flow_questions.id`. Older installations are different: `question_id` was historically added with `ALTER TABLE`, and SQLite cannot attach a foreign-key constraint to that existing column in place.
+
+The compatibility strategy is deliberately non-destructive. Startup keeps the existing durable `processing_jobs` table and rows unchanged, ensures the `question_id` column exists, and installs two SQLite triggers for inserts and question-ID updates. Those triggers reject a non-null `question_id` when the referenced interview-flow question does not exist. They remain effective even if `PRAGMA foreign_keys` is disabled, so legacy tables receive a database-level guard without a table rebuild or history rewrite.
+
+Existing orphan values are never silently repaired, nulled, or deleted. `audit_production_readiness_v2.py` explicitly checks `ProcessingJob.question_id` rows in addition to normal `PRAGMA foreign_key_check`. Professional readiness is blocked when the column is missing, when a legacy table has neither a declared FK nor both compatibility triggers, or when historical jobs still reference missing questions. This separates forward enforcement from historical-data remediation.
+
 ## Project Deletion Contract
 
 Project deletion is coordinated with durable processing jobs. After stale-job recovery, `services/project_deletion.py` starts a serialized database write transaction before checking active jobs. On SQLite it uses `BEGIN IMMEDIATE`, matching job admission's write reservation, so a new job cannot pass admission between the active-job check and the project deletion commit. Active `pending` or `running` jobs block deletion.
@@ -160,7 +168,7 @@ Human AI-analysis review, source-evidence resolution, approved-analysis export, 
 
 ## Unconfirmed Items
 
-- The exact production database lifecycle is not documented here beyond the local Flask/SQLAlchemy behavior observed in `app.py`.
+- The migration framework remains intentionally lightweight and SQLite-specific rather than a general schema-migration system.
 - The behavior of every semantic-analysis mode with respect to OpenAI embeddings must be checked before running it outside `--dry-run --no-ai`.
 - Large media performance, long-running transcription behavior, and bulk output-generation limits are not validated by the safe checks.
 - Evidence resolution currently depends on textual quote matching plus available participant/question scope; it is conservative and may require manual correction when an AI quote paraphrases rather than reproduces the source text.

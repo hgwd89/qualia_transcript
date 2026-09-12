@@ -65,16 +65,30 @@ def main() -> int:
                 project = Project(name="FK readiness fixture")
                 db.session.add(project)
                 db.session.commit()
+                project_id = int(project.id)
                 db.session.remove()
                 db.engine.dispose()
 
-            # Simulate legacy corruption produced before FK enforcement existed.
+            # Simulate corruption that predates enforcement. Trigger removal is
+            # confined to this disposable fixture so an orphan ProcessingJob can
+            # also exercise the explicit compatibility audit.
             con = sqlite3.connect(db_path)
             try:
                 con.execute("PRAGMA foreign_keys=OFF")
+                con.execute("DROP TRIGGER IF EXISTS trg_processing_jobs_question_insert")
+                con.execute("DROP TRIGGER IF EXISTS trg_processing_jobs_question_update")
                 con.execute(
                     "INSERT INTO participants(project_id, participant_code) VALUES (?, ?)",
                     (999999, "ORPHAN"),
+                )
+                con.execute(
+                    """
+                    INSERT INTO processing_jobs(
+                        project_id, interview_id, question_id, job_type, status,
+                        attempt_count, created_at
+                    ) VALUES (?, NULL, ?, 'analyze_question', 'succeeded', 0, ?)
+                    """,
+                    (project_id, 999999999, "2026-09-12 00:00:00"),
                 )
                 con.commit()
             finally:
@@ -95,6 +109,12 @@ def main() -> int:
                 "readiness audit reports FK violation count",
                 int(report.get("info", {}).get("foreign_key_violation_count", 0)) >= 1,
                 str(report.get("info", {})),
+            )
+            failures += check(
+                "readiness audit explicitly blocks processing-job question orphans",
+                "processing_job_question_orphans" in blocker_codes
+                and int(report.get("info", {}).get("processing_job_question_orphan_count", 0)) == 1,
+                str(blocker_codes),
             )
             failures += check(
                 "readiness FK audit remains read-only",

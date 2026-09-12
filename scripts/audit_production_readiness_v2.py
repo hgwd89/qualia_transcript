@@ -32,6 +32,12 @@ from services.readiness_validation import (
 )
 
 
+QUESTION_GUARD_TRIGGERS = {
+    "trg_processing_jobs_question_insert",
+    "trg_processing_jobs_question_update",
+}
+
+
 def _issue(bucket: list[dict], code: str, message: str, **context) -> None:
     item = {"code": code, "message": message}
     if context:
@@ -62,10 +68,6 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
         }
 
-        # Enabling PRAGMA foreign_keys for future writes does not retroactively
-        # repair rows created while enforcement was disabled. Treat any existing
-        # FK orphan as a professional-use blocker and expose enough detail for
-        # targeted repair without modifying the database.
         fk_rows = con.execute("PRAGMA foreign_key_check").fetchall()
         info["foreign_key_violation_count"] = len(fk_rows)
         if fk_rows:
@@ -93,6 +95,60 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 "Durable processing_jobs table is missing; start the upgraded app once before professional use",
             )
         else:
+            job_columns = {
+                str(row["name"])
+                for row in con.execute("PRAGMA table_info(processing_jobs)").fetchall()
+            }
+            if "question_id" not in job_columns:
+                _issue(
+                    blockers,
+                    "processing_job_question_column_missing",
+                    "processing_jobs.question_id is missing; start the upgraded app once before professional use",
+                )
+            else:
+                declared_fk = any(
+                    str(row["table"]) == "interview_flow_questions"
+                    and str(row["from"]) == "question_id"
+                    and str(row["to"]) == "id"
+                    for row in con.execute("PRAGMA foreign_key_list(processing_jobs)").fetchall()
+                )
+                trigger_names = {
+                    str(row["name"])
+                    for row in con.execute(
+                        "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='processing_jobs'"
+                    ).fetchall()
+                }
+                trigger_guard = QUESTION_GUARD_TRIGGERS.issubset(trigger_names)
+                info["processing_job_question_guard"] = {
+                    "declared_fk": declared_fk,
+                    "trigger_guard": trigger_guard,
+                }
+                if not declared_fk and not trigger_guard:
+                    _issue(
+                        blockers,
+                        "processing_job_question_guard_missing",
+                        "Legacy processing_jobs.question_id has no FK or compatibility trigger guard; start the upgraded app once before professional use",
+                    )
+
+                orphan_jobs = con.execute(
+                    """
+                    SELECT pj.id, pj.project_id, pj.interview_id, pj.question_id, pj.job_type, pj.status
+                    FROM processing_jobs pj
+                    LEFT JOIN interview_flow_questions q ON q.id=pj.question_id
+                    WHERE pj.question_id IS NOT NULL AND q.id IS NULL
+                    ORDER BY pj.id
+                    """
+                ).fetchall()
+                info["processing_job_question_orphan_count"] = len(orphan_jobs)
+                if orphan_jobs:
+                    _issue(
+                        blockers,
+                        "processing_job_question_orphans",
+                        "ProcessingJob rows reference missing interview-flow questions",
+                        jobs=[dict(row) for row in orphan_jobs[:200]],
+                        count=len(orphan_jobs),
+                    )
+
             active_jobs = con.execute(
                 """
                 SELECT id, project_id, interview_id, job_type, status, progress_json, created_at, started_at
