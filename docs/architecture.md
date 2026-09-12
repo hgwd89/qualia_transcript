@@ -105,6 +105,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/processing_result_guard.py`: crash-window reuse and canonical result-write cleanup/fencing helpers.
 - `services/storage_paths.py`: shared output/upload path validation, including symlink and Windows reparse/junction rejection below managed roots.
 - `services/local_backup.py`: verified local backup/restore boundary for the application SQLite database, uploads, outputs, manifest/hash validation, staged restore, and rollback.
+- `services/runtime_lock.py`: cross-platform process-lifetime exclusion between the local application and backup/applied-restore maintenance operations.
 - `services/project_deletion.py`: serialized project deletion plus post-commit managed-storage cleanup.
 - `services/report_verbatim.py`: Word verbatim report generation.
 - `services/report_formatted.py`: Excel formatted sheet generation.
@@ -153,7 +154,9 @@ Applied restore is deliberately staged. The source ZIP is first copied into a pr
 
 Restore snapshots the pre-existing database/uploads/outputs for rollback before replacement. If the target database did not exist before restore and a later step fails, the newly created database is removed rather than left as a partial recovery. When the existing database is damaged enough that a normal verified pre-restore backup cannot be produced, recovery requires an explicit acknowledgement and preserves the original database bytes as a separate unvalidated owner-only copy before replacement.
 
-Application/backup mutual exclusion is a separate lifecycle requirement: backup and applied restore must not race with live application writes. Until process-lifetime locking is implemented, the current busy check remains advisory and operators must stop the application before applied restore.
+The local app, backup CLI, and applied restore CLI share `instance/runtime.lock`. `python app.py` holds the `app` role for the entire Flask process lifetime. Backup and applied restore acquire the mutually exclusive `maintenance` role before reading or replacing the live recovery set. Lock acquisition is non-blocking: if another process owns the lock, the requested operation fails rather than waiting behind an unknown live writer. Nested maintenance acquisition inside one maintenance lifecycle is allowed, but an `app` holder cannot switch into maintenance in the same process. The lock uses `msvcrt.locking` on Windows and `fcntl.flock` on POSIX. Validation-only restore does not mutate local state and therefore does not require the maintenance lock.
+
+The SQLite `BEGIN EXCLUSIVE` probe in restore remains a secondary defense rather than the lifecycle boundary. Operational mutual exclusion is owned by the process-lifetime runtime lock.
 
 ## Managed Storage Path Contract
 
