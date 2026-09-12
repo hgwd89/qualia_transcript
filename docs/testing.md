@@ -19,7 +19,7 @@ Safe checks use temporary fixtures where data or storage is needed. They must no
 The required `safe-smoke` gate currently covers:
 
 - baseline application/model/route initialization
-- generated-file integrity
+- generated-file integrity, including project-scoped path enforcement, UUID-isolated internal storage for same-name outputs, rollback isolation, and bounded storage basenames for long display filenames
 - media-upload integrity
 - project deletion lifecycle
 - participant/interview-flow project boundaries and delete guards
