@@ -2,6 +2,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -32,7 +33,7 @@ config.RUNTIME_LOCK_PATH = str(root / 'runtime.lock')
 
 from app import create_app
 create_app()
-print('READY', flush=True)
+(root / 'factory.ready').write_text('READY', encoding='utf-8')
 time.sleep(30)
 """
 
@@ -48,11 +49,23 @@ def _start_factory_child(repo_root: Path, root: Path):
         stderr=subprocess.PIPE,
         text=True,
     )
-    ready = child.stdout.readline().strip() if child.stdout else ""
-    return child, ready
+
+    ready_path = root / "factory.ready"
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if ready_path.is_file():
+            return child, ready_path.read_text(encoding="utf-8").strip()
+        if child.poll() is not None:
+            stdout, stderr = child.communicate(timeout=2)
+            detail = (stdout or "") + (stderr or "")
+            return child, f"EXIT {child.returncode}: {detail.strip()}"
+        time.sleep(0.1)
+    return child, "TIMEOUT waiting for factory.ready"
 
 
 def _stop_child(child) -> None:
+    if child.poll() is not None:
+        return
     child.terminate()
     try:
         child.wait(timeout=5)
@@ -81,7 +94,7 @@ def main() -> int:
             failures += check(
                 "canonical create_app factory acquired process-lifetime runtime lock",
                 ready == "READY",
-                ready or "no readiness line",
+                ready,
             )
 
             maintenance_blocked = False
