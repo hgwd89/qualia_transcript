@@ -83,6 +83,32 @@ function Get-QualiaAppUrl {
     return "http://${urlHost}:${Port}/"
 }
 
+function Test-QualiaAppEndpoint {
+    param(
+        [string]$RootUrl,
+        [string]$ServiceName,
+        [int]$TimeoutSec = 2
+    )
+
+    if (-not $RootUrl -or -not $ServiceName) { return $false }
+    try {
+        $root = Invoke-WebRequest -Uri $RootUrl -UseBasicParsing -TimeoutSec $TimeoutSec
+        if ([int]$root.StatusCode -ne 200) { return $false }
+
+        $settingsUrl = "${RootUrl}settings"
+        $settings = Invoke-WebRequest -Uri $settingsUrl -UseBasicParsing -TimeoutSec $TimeoutSec
+        if ([int]$settings.StatusCode -ne 200) { return $false }
+
+        $content = "$($settings.Content)"
+        return (
+            $content.Contains($ServiceName) -and
+            ($content -match "OpenAI APIキー|Whisperモデル")
+        )
+    } catch {
+        return $false
+    }
+}
+
 function Get-QualiaRuntimeConfig {
     param(
         [string]$ProjectDir,
