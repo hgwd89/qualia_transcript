@@ -18,6 +18,43 @@ function Get-QualiaPythonExecutable {
     throw "python 実行ファイルが見つかりません。Python またはプロジェクトの仮想環境を確認してください。"
 }
 
+function Get-QualiaBrowserHost {
+    param([string]$HostAddress)
+
+    $value = "$HostAddress".Trim()
+    if ($value.StartsWith("[") -and $value.EndsWith("]") -and $value.Length -ge 2) {
+        $value = $value.Substring(1, $value.Length - 2)
+    }
+
+    if ($value -eq "0.0.0.0") {
+        return "127.0.0.1"
+    }
+    if ($value -eq "::" -or $value -eq "0:0:0:0:0:0:0:0") {
+        return "::1"
+    }
+    return $value
+}
+
+function Format-QualiaUrlHost {
+    param([string]$HostAddress)
+
+    $browserHost = Get-QualiaBrowserHost -HostAddress $HostAddress
+    if ($browserHost.Contains(":")) {
+        return "[$browserHost]"
+    }
+    return $browserHost
+}
+
+function Get-QualiaAppUrl {
+    param(
+        [string]$HostAddress,
+        [int]$Port
+    )
+
+    $urlHost = Format-QualiaUrlHost -HostAddress $HostAddress
+    return "http://${urlHost}:${Port}/"
+}
+
 function Get-QualiaRuntimeConfig {
     param(
         [string]$ProjectDir,
@@ -37,12 +74,12 @@ function Get-QualiaRuntimeConfig {
 
     $hostAddress = "$($runtime.host)"
     $port = [int]$runtime.port
-    $browserHost = if ($hostAddress -eq "0.0.0.0") { "127.0.0.1" } else { $hostAddress }
+    $browserHost = Get-QualiaBrowserHost -HostAddress $hostAddress
 
     return [PSCustomObject]@{
-        Host       = $hostAddress
-        Port       = $port
+        Host        = $hostAddress
+        Port        = $port
         BrowserHost = $browserHost
-        Url        = "http://${browserHost}:${port}/"
+        Url         = Get-QualiaAppUrl -HostAddress $hostAddress -Port $port
     }
 }
