@@ -127,15 +127,6 @@ def _remove_file(path: Path, errors: list[str]) -> int:
         return 0
 
 
-def _remove_safe_id_dir(root: Path, value: int, label: str, errors: list[str]) -> int:
-    try:
-        path = _safe_id_dir(root, value)
-    except (OSError, RuntimeError, ValueError) as exc:
-        errors.append(f"{label} cleanup path rejected: id={int(value)}: {exc}")
-        return 0
-    return _remove_dir(path, errors)
-
-
 def _resolve_cleanup_root(value: str | Path, label: str, errors: list[str]) -> Path | None:
     try:
         return Path(value).resolve()
@@ -150,6 +141,23 @@ def _resolve_required_root(value: str | Path, label: str) -> Path:
     except (OSError, RuntimeError) as exc:
         raise ProjectDeletionStorageBlocked(
             f"{label} managed-storage root cannot be resolved: {exc}"
+        ) from exc
+
+
+def _resolve_required_logs_root() -> Path | None:
+    base_root = _resolve_required_root(config.BASE_DIR, "base")
+    logs_candidate = base_root / "logs"
+    if not _entry_exists(logs_candidate):
+        return None
+    try:
+        if _is_link_or_reparse(logs_candidate):
+            raise ValueError("processing log directory is linked")
+        logs_root = logs_candidate.resolve()
+        logs_root.relative_to(base_root)
+        return logs_root
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ProjectDeletionStorageBlocked(
+            f"processing log root cannot be bound safely: {exc}"
         ) from exc
 
 
@@ -214,16 +222,17 @@ def _restore_quarantined_entries(
 def _prepare_managed_storage_quarantine(
     plan: ProjectStoragePlan,
 ) -> tuple[QuarantinedManagedEntry, ...]:
-    """Bind pre-existing numeric ID storage to this deletion before DB commit.
+    """Bind pre-existing ID-scoped storage to this deletion before DB commit.
 
-    SQLite may reuse a deleted highest integer primary key. Renaming existing
-    project/interview ID directories to unique non-numeric quarantine names before
-    commit prevents post-commit cleanup from deleting storage later created for a
-    reused ID. A failed staging operation restores entries already moved and blocks
-    the database deletion.
+    SQLite may reuse deleted highest integer primary keys. Renaming existing
+    project/interview ID directories and processing-job logs to unique non-numeric
+    quarantine names before commit prevents post-commit cleanup from deleting
+    storage later created for reused IDs. A failed staging operation restores
+    entries already moved and blocks the database deletion.
     """
     output_root = _resolve_required_root(config.OUTPUT_DIR, "output")
     upload_root = _resolve_required_root(config.UPLOAD_DIR, "upload")
+    logs_root = _resolve_required_logs_root() if plan.processing_job_ids else None
     quarantined: list[QuarantinedManagedEntry] = []
 
     try:
@@ -241,6 +250,15 @@ def _prepare_managed_storage_quarantine(
             )
             if interview_entry is not None:
                 quarantined.append(interview_entry)
+
+        if logs_root is not None:
+            for job_id in plan.processing_job_ids:
+                log_entry = _quarantine_managed_entry(
+                    logs_root / f"processing_job_{int(job_id)}.log",
+                    "processing job log",
+                )
+                if log_entry is not None:
+                    quarantined.append(log_entry)
     except Exception as exc:
         restore_errors = _restore_quarantined_entries(quarantined)
         if restore_errors:
@@ -284,18 +302,39 @@ def _warn_if_id_path_reappeared(
         errors.append(f"{label} post-delete path check failed: id={int(value)}: {exc}")
 
 
+def _warn_if_job_log_reappeared(
+    base_root: Path | None,
+    job_id: int,
+    errors: list[str],
+) -> None:
+    if base_root is None:
+        return
+    logs_candidate = base_root / "logs"
+    try:
+        if _is_link_or_reparse(logs_candidate):
+            raise ValueError("processing log directory is linked")
+        logs_root = logs_candidate.resolve()
+        logs_root.relative_to(base_root)
+        path = logs_root / f"processing_job_{int(job_id)}.log"
+        if _entry_exists(path):
+            errors.append(
+                f"processing job log appeared after deletion staging and was left untouched: {path}"
+            )
+    except (OSError, RuntimeError, ValueError) as exc:
+        errors.append(f"processing log post-delete path check failed: job_id={int(job_id)}: {exc}")
+
+
 def cleanup_project_storage(
     plan: ProjectStoragePlan,
     quarantined: tuple[QuarantinedManagedEntry, ...] = (),
 ) -> ProjectDeletionResult:
     """Best-effort cleanup after the database deletion has committed.
 
-    Project output/interview upload entries that existed before deletion are first
-    renamed to unique quarantine paths before the DB commit. Cleanup acts on those
-    bound entries rather than numeric ID paths, so SQLite ID reuse cannot make this
-    deletion remove storage owned by a replacement record. Processing-job logs are
-    still cleaned by captured job IDs. Raw transcript snapshots are deliberately
-    excluded and require a separate explicit user-requested purge.
+    Project output/interview upload entries and captured processing-job logs that
+    existed before deletion are first renamed to unique quarantine paths before the
+    DB commit. Cleanup acts on those bound entries rather than reusable numeric ID
+    paths. Raw transcript snapshots are deliberately excluded and require a
+    separate explicit user-requested purge.
     """
     removed = 0
     errors: list[str] = []
@@ -307,8 +346,8 @@ def cleanup_project_storage(
     upload_root = _resolve_cleanup_root(config.UPLOAD_DIR, "upload", errors)
     base_root = _resolve_cleanup_root(config.BASE_DIR, "base", errors)
 
-    # Never remove a numeric ID path after the DB commit. It may have appeared
-    # after staging and may already belong to a newly reused SQLite integer ID.
+    # Never remove reusable ID paths after the DB commit. They may already belong
+    # to replacement rows created after the serialized deletion transaction ended.
     _warn_if_id_path_reappeared(
         output_root, plan.project_id, "project output", errors
     )
@@ -317,21 +356,8 @@ def cleanup_project_storage(
             _warn_if_id_path_reappeared(
                 upload_root, interview_id, "interview upload", errors
             )
-
-    if base_root is not None:
-        logs_candidate = base_root / "logs"
-        try:
-            if _is_link_or_reparse(logs_candidate):
-                raise ValueError("processing log directory is linked")
-            logs_root = logs_candidate.resolve()
-            logs_root.relative_to(base_root)
-        except (OSError, RuntimeError, ValueError) as exc:
-            errors.append(f"processing log cleanup path rejected: {exc}")
-        else:
-            for job_id in plan.processing_job_ids:
-                removed += _remove_file(
-                    logs_root / f"processing_job_{int(job_id)}.log", errors
-                )
+    for job_id in plan.processing_job_ids:
+        _warn_if_job_log_reappeared(base_root, job_id, errors)
 
     return ProjectDeletionResult(
         project_id=plan.project_id,
