@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+from sqlalchemy import text
 
 import config
 from models import db
@@ -36,11 +40,23 @@ class ProjectDeletionResult:
     cleanup_errors: tuple[str, ...]
 
 
-def _safe_id_dir(root: Path, value: int) -> Path:
-    root = root.resolve()
-    candidate = (root / str(int(value))).resolve()
+def _is_link_or_reparse(path: Path) -> bool:
+    """Return True for symlinks and Windows reparse-point directories/junctions."""
     try:
-        candidate.relative_to(root)
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    attributes = int(getattr(info, "st_file_attributes", 0) or 0)
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return path.is_symlink() or bool(attributes & reparse_flag)
+
+
+def _safe_id_dir(root: Path, value: int) -> Path:
+    """Return the lexical managed root/<integer-id> path without following it."""
+    resolved_root = root.resolve()
+    candidate = resolved_root / str(int(value))
+    try:
+        candidate.relative_to(resolved_root)
     except ValueError as exc:
         raise ValueError("managed storage path escapes root") from exc
     return candidate
@@ -63,10 +79,30 @@ def _build_storage_plan(project: Project, job_ids: list[int]) -> ProjectStorageP
     )
 
 
-def _remove_dir(path: Path, errors: list[str]) -> int:
-    if not path.exists():
-        return 0
+def _remove_link_only(path: Path, errors: list[str]) -> int:
+    """Remove only the directory entry for a link/reparse point, never its target."""
     try:
+        if path.is_symlink():
+            path.unlink()
+        else:
+            # Windows junctions/reparse directories are not always reported by
+            # pathlib as symlinks. rmdir removes the reparse entry itself and does
+            # not recurse into its target.
+            os.rmdir(path)
+        return 1
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        errors.append(f"linked directory cleanup failed: {path}: {exc}")
+        return 0
+
+
+def _remove_dir(path: Path, errors: list[str]) -> int:
+    try:
+        if _is_link_or_reparse(path):
+            return _remove_link_only(path, errors)
+        if not path.exists():
+            return 0
         shutil.rmtree(path)
         return 1
     except OSError as exc:
@@ -75,7 +111,7 @@ def _remove_dir(path: Path, errors: list[str]) -> int:
 
 
 def _remove_file(path: Path, errors: list[str]) -> int:
-    if not path.exists():
+    if not path.exists() and not path.is_symlink():
         return 0
     try:
         path.unlink()
@@ -88,10 +124,18 @@ def _remove_file(path: Path, errors: list[str]) -> int:
 def _remove_safe_id_dir(root: Path, value: int, label: str, errors: list[str]) -> int:
     try:
         path = _safe_id_dir(root, value)
-    except (OSError, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         errors.append(f"{label} cleanup path rejected: id={int(value)}: {exc}")
         return 0
     return _remove_dir(path, errors)
+
+
+def _resolve_cleanup_root(value: str | Path, label: str, errors: list[str]) -> Path | None:
+    try:
+        return Path(value).resolve()
+    except (OSError, RuntimeError) as exc:
+        errors.append(f"{label} cleanup root rejected: {exc}")
+        return None
 
 
 def cleanup_project_storage(plan: ProjectStoragePlan) -> ProjectDeletionResult:
@@ -105,38 +149,50 @@ def cleanup_project_storage(plan: ProjectStoragePlan) -> ProjectDeletionResult:
     removed = 0
     errors: list[str] = []
 
-    output_root = Path(config.OUTPUT_DIR).resolve()
-    upload_root = Path(config.UPLOAD_DIR).resolve()
-    base_root = Path(config.BASE_DIR).resolve()
+    output_root = _resolve_cleanup_root(config.OUTPUT_DIR, "output", errors)
+    upload_root = _resolve_cleanup_root(config.UPLOAD_DIR, "upload", errors)
+    base_root = _resolve_cleanup_root(config.BASE_DIR, "base", errors)
 
-    removed += _remove_safe_id_dir(
-        output_root, plan.project_id, "project output", errors
-    )
-    for interview_id in plan.interview_ids:
+    if output_root is not None:
         removed += _remove_safe_id_dir(
-            upload_root, interview_id, "interview upload", errors
+            output_root, plan.project_id, "project output", errors
         )
+    if upload_root is not None:
+        for interview_id in plan.interview_ids:
+            removed += _remove_safe_id_dir(
+                upload_root, interview_id, "interview upload", errors
+            )
 
-    raw_root = (output_root / "raw_transcripts").resolve()
-    try:
-        raw_root.relative_to(output_root)
-    except ValueError:
-        errors.append("raw transcript cleanup path rejected: escapes OUTPUT_DIR")
-    else:
-        if raw_root.is_dir():
-            for transcription_id in plan.transcription_ids:
-                for path in raw_root.glob(f"transcription_{int(transcription_id)}_*.json"):
-                    if path.is_file() or path.is_symlink():
-                        removed += _remove_file(path, errors)
+    if output_root is not None:
+        raw_candidate = output_root / "raw_transcripts"
+        try:
+            if _is_link_or_reparse(raw_candidate):
+                raise ValueError("raw transcript directory is linked")
+            raw_root = raw_candidate.resolve()
+            raw_root.relative_to(output_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            errors.append(f"raw transcript cleanup path rejected: {exc}")
+        else:
+            if raw_root.is_dir():
+                for transcription_id in plan.transcription_ids:
+                    for path in raw_root.glob(f"transcription_{int(transcription_id)}_*.json"):
+                        if path.is_file() or path.is_symlink():
+                            removed += _remove_file(path, errors)
 
-    logs_root = (base_root / "logs").resolve()
-    try:
-        logs_root.relative_to(base_root)
-    except ValueError:
-        errors.append("processing log cleanup path rejected: escapes BASE_DIR")
-    else:
-        for job_id in plan.processing_job_ids:
-            removed += _remove_file(logs_root / f"processing_job_{int(job_id)}.log", errors)
+    if base_root is not None:
+        logs_candidate = base_root / "logs"
+        try:
+            if _is_link_or_reparse(logs_candidate):
+                raise ValueError("processing log directory is linked")
+            logs_root = logs_candidate.resolve()
+            logs_root.relative_to(base_root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            errors.append(f"processing log cleanup path rejected: {exc}")
+        else:
+            for job_id in plan.processing_job_ids:
+                removed += _remove_file(
+                    logs_root / f"processing_job_{int(job_id)}.log", errors
+                )
 
     return ProjectDeletionResult(
         project_id=plan.project_id,
@@ -145,38 +201,64 @@ def cleanup_project_storage(plan: ProjectStoragePlan) -> ProjectDeletionResult:
     )
 
 
-def delete_project(project: Project) -> ProjectDeletionResult:
-    """Delete one project without racing an active durable worker.
+def _begin_project_deletion_transaction(project_id: int) -> Project:
+    """Serialize project deletion with durable-job admission on SQLite."""
+    if db.session.new or db.session.dirty or db.session.deleted:
+        raise RuntimeError("project deletion requires a clean database session")
 
-    Stale jobs are recovered first. Any still-active job blocks deletion. Terminal
-    ProcessingJob rows are explicitly removed because Project does not own them via
-    an ORM delete-orphan relationship. Filesystem cleanup occurs only after the DB
-    transaction commits.
+    # Validation/recovery reads may already have opened a transaction. End it,
+    # then acquire the same SQLite write reservation used by job admission before
+    # checking active jobs and deleting any rows.
+    db.session.rollback()
+    if db.engine.dialect.name == "sqlite":
+        db.session.execute(text("BEGIN IMMEDIATE"))
+        current = db.session.get(Project, int(project_id))
+    else:
+        current = (
+            Project.query
+            .filter(Project.id == int(project_id))
+            .with_for_update()
+            .first()
+        )
+    if current is None:
+        db.session.rollback()
+        raise ValueError("project not found")
+    return current
+
+
+def delete_project(project: Project) -> ProjectDeletionResult:
+    """Delete one project without racing durable-job admission or workers.
+
+    Stale jobs are recovered first. Deletion then acquires the SQLite write
+    reservation used by job admission before reloading the project and checking
+    active jobs. The active-job decision and database deletion therefore remain in
+    one serialized transaction. Filesystem cleanup occurs only after DB commit.
     """
     project_id = int(project.id)
     recover_stale_jobs(project_id=project_id)
 
-    active_jobs = (
-        ProcessingJob.query
-        .filter_by(project_id=project_id)
-        .filter(ProcessingJob.status.in_(ACTIVE_STATUSES))
-        .order_by(ProcessingJob.id.asc())
-        .all()
-    )
-    if active_jobs:
-        raise ProjectDeletionBlocked([int(job.id) for job in active_jobs])
-
-    job_ids = [
-        int(row[0])
-        for row in (
-            db.session.query(ProcessingJob.id)
-            .filter(ProcessingJob.project_id == project_id)
+    try:
+        project = _begin_project_deletion_transaction(project_id)
+        active_jobs = (
+            ProcessingJob.query
+            .filter_by(project_id=project_id)
+            .filter(ProcessingJob.status.in_(ACTIVE_STATUSES))
+            .order_by(ProcessingJob.id.asc())
             .all()
         )
-    ]
-    plan = _build_storage_plan(project, job_ids)
+        if active_jobs:
+            raise ProjectDeletionBlocked([int(job.id) for job in active_jobs])
 
-    try:
+        job_ids = [
+            int(row[0])
+            for row in (
+                db.session.query(ProcessingJob.id)
+                .filter(ProcessingJob.project_id == project_id)
+                .all()
+            )
+        ]
+        plan = _build_storage_plan(project, job_ids)
+
         (
             ProcessingJob.query
             .filter(ProcessingJob.project_id == project_id)
