@@ -25,6 +25,7 @@ from routes.analyze       import bp as analyze_bp
 from routes.outputs       import bp as outputs_bp
 from routes.settings      import bp as settings_bp
 from routes.analysis_view import bp as analysis_view_bp
+from services.request_guards import register_request_guards
 
 
 def _install_processing_job_question_guards():
@@ -166,6 +167,7 @@ def create_app():
     app.config["MAX_UPLOAD_BYTES"]               = config.MAX_UPLOAD_BYTES
 
     db.init_app(app)
+    register_request_guards(app)
 
     app.register_blueprint(projects_bp)
     app.register_blueprint(participants_bp)
