@@ -8,6 +8,7 @@ from uuid import uuid4
 import config
 from models import db
 from models.generated_file import GeneratedFile
+from services.storage_paths import ensure_managed_id_dir, resolve_managed_path
 
 
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -44,19 +45,8 @@ def safe_output_filename(filename: str) -> str:
 
 
 def _resolve_stored_path(stored_path: str) -> Path:
-    """Resolve one DB stored_path and reject paths outside OUTPUT_DIR."""
-    normalized = str(stored_path or "").replace("\\", "/")
-    relative = Path(normalized)
-    if not normalized or relative.is_absolute() or ".." in relative.parts:
-        raise ValueError("stored output path is invalid")
-
-    root = _output_root()
-    candidate = (root / relative).resolve()
-    try:
-        candidate.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("stored output path escapes OUTPUT_DIR") from exc
-    return candidate
+    """Resolve one DB stored_path and reject linked paths/out-of-root targets."""
+    return resolve_managed_path(config.OUTPUT_DIR, stored_path)
 
 
 def _unique_storage_name(filename: str) -> str:
@@ -71,7 +61,8 @@ def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
     ``filename`` remains the user-facing download name. The filesystem/DB
     ``stored_path`` uses a UUID-only internal basename plus the original extension,
     so concurrent generations cannot collide and long display names cannot push the
-    filesystem component beyond common 255-byte limits.
+    filesystem component beyond common 255-byte limits. The project ID directory
+    must be a normal directory, never a symlink or Windows junction/reparse point.
     """
     project_id = int(project_id)
     if project_id <= 0:
@@ -79,9 +70,9 @@ def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
 
     safe_name = safe_output_filename(filename)
     storage_name = _unique_storage_name(safe_name)
+    ensure_managed_id_dir(config.OUTPUT_DIR, project_id)
     stored_path = f"{project_id}/{storage_name}"
     full_path = _resolve_stored_path(stored_path)
-    full_path.parent.mkdir(parents=True, exist_ok=True)
     return OutputTarget(
         filename=safe_name,
         full_path=str(full_path),
