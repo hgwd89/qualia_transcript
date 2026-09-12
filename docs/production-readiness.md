@@ -58,6 +58,7 @@ The audit currently blocks on:
 
 - missing required database tables
 - failed SQLite `PRAGMA integrity_check`
+- existing SQLite foreign-key violations reported by `PRAGMA foreign_key_check`
 - empty source Segment text
 - unsupported speaker roles
 - interview/segment/speaker-assignment participant links crossing project boundaries
@@ -69,6 +70,8 @@ The audit currently blocks on:
 - `GeneratedFile` paths escaping the output directory
 - registered generated artifacts that are missing or zero bytes
 - malformed raw transcript snapshot JSON
+
+A foreign-key blocker means the database already contains at least one child row whose referenced parent row is missing. FK enforcement prevents new invalid writes, but it does not repair corruption that predates enforcement; the affected rows must be reconciled before release.
 
 ## Warning conditions
 
