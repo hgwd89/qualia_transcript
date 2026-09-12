@@ -59,6 +59,9 @@ The audit currently blocks on:
 - missing required database tables
 - failed SQLite `PRAGMA integrity_check`
 - existing SQLite foreign-key violations reported by `PRAGMA foreign_key_check`
+- missing `processing_jobs.question_id` on an installation that has not completed the compatibility upgrade
+- legacy `processing_jobs.question_id` with neither a declared FK nor the compatibility insert/update trigger guard
+- existing `ProcessingJob.question_id` values that reference missing interview-flow questions
 - empty source Segment text
 - unsupported speaker roles
 - interview/segment/speaker-assignment participant links crossing project boundaries
@@ -72,6 +75,8 @@ The audit currently blocks on:
 - malformed raw transcript snapshot JSON
 
 A foreign-key blocker means the database already contains at least one child row whose referenced parent row is missing. FK enforcement prevents new invalid writes, but it does not repair corruption that predates enforcement; the affected rows must be reconciled before release.
+
+Legacy `processing_jobs` tables require special handling because older SQLite installations added `question_id` after table creation and therefore may not have the model-declared FK. The upgraded app installs non-destructive insert/update trigger guards so future orphan question references are rejected without rebuilding durable job history. Readiness separately scans existing rows so pre-upgrade orphan values remain visible as blockers rather than being silently changed.
 
 ## Warning conditions
 

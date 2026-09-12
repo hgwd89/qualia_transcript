@@ -27,6 +27,43 @@ from routes.settings      import bp as settings_bp
 from routes.analysis_view import bp as analysis_view_bp
 
 
+def _install_processing_job_question_guards():
+    """Enforce question existence on legacy SQLite processing_jobs tables.
+
+    Older databases received question_id through ALTER TABLE and therefore lack
+    the model-declared FK. Non-destructive triggers protect future INSERT/UPDATE
+    writes without rebuilding or rewriting durable job history.
+    """
+    from sqlalchemy import text
+
+    if db.engine.dialect.name != "sqlite":
+        return
+
+    db.session.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS trg_processing_jobs_question_insert
+        BEFORE INSERT ON processing_jobs
+        WHEN NEW.question_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM interview_flow_questions q WHERE q.id = NEW.question_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'processing_jobs.question_id references missing question');
+        END
+    """))
+    db.session.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS trg_processing_jobs_question_update
+        BEFORE UPDATE OF question_id ON processing_jobs
+        WHEN NEW.question_id IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM interview_flow_questions q WHERE q.id = NEW.question_id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'processing_jobs.question_id references missing question');
+        END
+    """))
+    db.session.commit()
+
+
 def _run_migrations(app):
     """
     既存 SQLite DB への後付けカラム追加。
@@ -117,6 +154,7 @@ def _run_migrations(app):
                     "ALTER TABLE processing_jobs ADD COLUMN question_id INTEGER"
                 ))
                 db.session.commit()
+            _install_processing_job_question_guards()
 
 
 def create_app():

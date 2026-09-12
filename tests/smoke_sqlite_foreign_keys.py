@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -17,11 +18,18 @@ def main() -> int:
         sys.path.insert(0, str(repo_root))
 
     import config
-    original_uri = config.DATABASE_URI
+    original = {
+        "DATABASE_URI": config.DATABASE_URI,
+        "UPLOAD_DIR": config.UPLOAD_DIR,
+        "OUTPUT_DIR": config.OUTPUT_DIR,
+    }
 
     with tempfile.TemporaryDirectory(prefix="qualia_fk_") as tmp:
         root = Path(tmp)
-        config.DATABASE_URI = f"sqlite:///{(root / 'fk.db').as_posix()}"
+        db_path = root / "fk.db"
+        config.DATABASE_URI = f"sqlite:///{db_path.as_posix()}"
+        config.UPLOAD_DIR = str(root / "uploads")
+        config.OUTPUT_DIR = str(root / "outputs")
         try:
             from sqlalchemy import text
             from sqlalchemy.exc import IntegrityError
@@ -29,6 +37,7 @@ def main() -> int:
             from models import db
             from models.project import Project
             from models.participant import Participant
+            from models.processing_job import ProcessingJob
 
             app = create_app()
             app.config["TESTING"] = True
@@ -72,10 +81,79 @@ def main() -> int:
                     rejected,
                 )
 
+                baseline_job = ProcessingJob(
+                    project_id=project_id,
+                    question_id=None,
+                    job_type="analyze_question",
+                    status="succeeded",
+                )
+                db.session.add(baseline_job)
+                db.session.commit()
+                baseline_job_id = int(baseline_job.id)
+
+                trigger_names = {
+                    str(row[0])
+                    for row in db.session.execute(text(
+                        "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='processing_jobs'"
+                    )).all()
+                }
+                failures += check(
+                    "processing-job question compatibility triggers are installed",
+                    {
+                        "trg_processing_jobs_question_insert",
+                        "trg_processing_jobs_question_update",
+                    }.issubset(trigger_names),
+                    str(trigger_names),
+                )
+
                 db.session.remove()
                 db.engine.dispose()
+
+            # Prove the compatibility guard works independently of PRAGMA FK
+            # enforcement, matching the legacy-table case that lacks question_id FK.
+            raw = sqlite3.connect(str(db_path))
+            try:
+                raw.execute("PRAGMA foreign_keys=OFF")
+                insert_rejected = False
+                try:
+                    raw.execute(
+                        """
+                        INSERT INTO processing_jobs(
+                            project_id, interview_id, question_id, job_type, status,
+                            attempt_count, created_at
+                        ) VALUES (?, NULL, ?, 'analyze_question', 'pending', 0, ?)
+                        """,
+                        (project_id, 999999999, "2026-09-12 00:00:00"),
+                    )
+                    raw.commit()
+                except sqlite3.IntegrityError:
+                    insert_rejected = True
+                    raw.rollback()
+                failures += check(
+                    "question trigger rejects orphan insert with FK pragma disabled",
+                    insert_rejected,
+                )
+
+                update_rejected = False
+                try:
+                    raw.execute(
+                        "UPDATE processing_jobs SET question_id=? WHERE id=?",
+                        (888888888, baseline_job_id),
+                    )
+                    raw.commit()
+                except sqlite3.IntegrityError:
+                    update_rejected = True
+                    raw.rollback()
+                failures += check(
+                    "question trigger rejects orphan update with FK pragma disabled",
+                    update_rejected,
+                )
+            finally:
+                raw.close()
         finally:
-            config.DATABASE_URI = original_uri
+            config.DATABASE_URI = original["DATABASE_URI"]
+            config.UPLOAD_DIR = original["UPLOAD_DIR"]
+            config.OUTPUT_DIR = original["OUTPUT_DIR"]
 
     if failures:
         print(f"\nSummary: FAIL ({failures} checks failed)")
