@@ -1,5 +1,6 @@
 import os
 from datetime import datetime
+from pathlib import Path
 from flask import Flask, render_template, g
 import config
 from models import db
@@ -25,6 +26,28 @@ from routes.analyze       import bp as analyze_bp
 from routes.outputs       import bp as outputs_bp
 from routes.settings      import bp as settings_bp
 from routes.analysis_view import bp as analysis_view_bp
+
+
+def _uses_canonical_runtime_database() -> bool:
+    """Return True when the app is pointed at its configured live local DB."""
+    canonical_uri = f"sqlite:///{Path(config.DATABASE_PATH).as_posix()}"
+    return str(config.DATABASE_URI) == canonical_uri
+
+
+def _ensure_live_runtime_process_lock() -> None:
+    """Retain a shared runtime slot before touching canonical live storage.
+
+    Test/smoke callers normally redirect DATABASE_URI to a temporary database and
+    therefore do not retain a process-lifetime lock. Any factory launch against
+    the canonical local database does, including Flask CLI / alternate factory
+    entry points that do not execute this module's ``__main__`` block.
+    """
+    if not _uses_canonical_runtime_database():
+        return
+
+    from services.runtime_lock import hold_runtime_lock_for_process
+
+    hold_runtime_lock_for_process("app")
 
 
 def _install_processing_job_question_guards():
@@ -158,6 +181,8 @@ def _run_migrations(app):
 
 
 def create_app():
+    _ensure_live_runtime_process_lock()
+
     app = Flask(__name__)
     app.config["SECRET_KEY"]                     = config.SECRET_KEY
     app.config["SQLALCHEMY_DATABASE_URI"]        = config.DATABASE_URI
