@@ -19,6 +19,7 @@ Safe checks use temporary fixtures where data or storage is needed. They must no
 The required `safe-smoke` gate currently covers:
 
 - baseline application/model/route initialization
+- launcher runtime configuration: IPv4/IPv6 bind addresses resolve to reachable browser/readiness URLs, IPv4/IPv6 wildcard binds map to loopback destinations, and IPv6 literals are RFC-3986 bracketed in URLs
 - generated-file integrity, including project-scoped path enforcement, UUID-isolated internal storage for same-name outputs, rollback isolation, bounded storage basenames for long display filenames, and rejection of linked/reparse project storage paths
 - media-upload integrity, including rejection of linked/reparse interview storage paths
 - managed-storage path guards that reject symlinks and Windows junction/reparse entries below configured output/upload roots before generated files or uploaded media are created or resolved
