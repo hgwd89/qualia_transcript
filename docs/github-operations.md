@@ -49,9 +49,9 @@ Safe checks must not:
 
 If a check violates one of these rules, it belongs in a manual or paid/API category, not in required CI.
 
-The required safe workflow intentionally runs only `scripts/check_safe.ps1`. Do not add mapping, analysis, transcription, or output-generation checks to this required workflow.
+The required safe workflow intentionally runs only `scripts/check_safe.ps1`. That script includes lightweight temporary-fixture integrity checks such as `GeneratedFile` path/registration/rollback safety; these do not generate production Word/Excel deliverables and are part of the required safe gate. Do not add provider-backed mapping, analysis, transcription, or production-like output-generation checks to this required workflow.
 
-`scripts/check_all.ps1 -AllLocal` is a broader non-paid local preflight using self-contained temporary fixtures/directories where applicable. It remains manual/non-required so required CI stays small and does not expand into output-generation or broader integration coverage.
+`scripts/check_all.ps1 -AllLocal` is a broader non-paid local preflight using self-contained temporary fixtures/directories where applicable. It remains manual/non-required so required CI stays small and does not expand into production-like output generation or broader integration coverage.
 
 `scripts/check_local_data_integrity.ps1` is a separate manual read-only local research-data check. It can compare structural integrity, minimum counts, source-segment fingerprints, and raw transcript snapshot hashes against an optional baseline. It depends on local data and must not be a required CI check.
 
@@ -74,9 +74,11 @@ PRs that modify these paths should describe:
 
 ## Output Generation Checks
 
-Word, Excel, CSV, and `GeneratedFile` checks are not default safe checks.
+Full Word, Excel, CSV, and production-like report generation is not part of the default required safe gate. These checks may create real document artifacts and remain opt-in/manual unless a task explicitly targets them.
 
-Before running output checks:
+The required safe gate does include `tests/smoke_generated_file_integrity.py`. That smoke uses a temporary SQLite database and temporary output root to validate `GeneratedFile` storage-path containment, registration/rollback behavior, collision isolation, and filename safety without producing production deliverables.
+
+Before running production-like output checks:
 
 - confirm the output scope
 - confirm whether temporary output paths are used
