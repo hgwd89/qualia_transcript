@@ -63,6 +63,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] runtime maintenance exclusion smoke checks passed."
 
+Write-Host "[INFO] Running app-factory runtime exclusion smoke check..."
+python tests/smoke_app_factory_runtime_lock.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] app-factory runtime exclusion smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] app-factory runtime exclusion smoke checks passed."
+
 Write-Host "[INFO] Running admin CLI maintenance exclusion smoke check..."
 python tests/smoke_admin_cli_maintenance_lock.py
 if ($LASTEXITCODE -ne 0) {
