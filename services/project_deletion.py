@@ -29,7 +29,6 @@ class ProjectDeletionBlocked(RuntimeError):
 class ProjectStoragePlan:
     project_id: int
     interview_ids: tuple[int, ...]
-    transcription_ids: tuple[int, ...]
     processing_job_ids: tuple[int, ...]
 
 
@@ -63,18 +62,10 @@ def _safe_id_dir(root: Path, value: int) -> Path:
 
 
 def _build_storage_plan(project: Project, job_ids: list[int]) -> ProjectStoragePlan:
-    interview_ids: list[int] = []
-    transcription_ids: list[int] = []
-    for interview in project.interviews:
-        interview_ids.append(int(interview.id))
-        for media in interview.media_files:
-            for transcription in media.transcriptions:
-                transcription_ids.append(int(transcription.id))
-
+    interview_ids = [int(interview.id) for interview in project.interviews]
     return ProjectStoragePlan(
         project_id=int(project.id),
         interview_ids=tuple(sorted(set(interview_ids))),
-        transcription_ids=tuple(sorted(set(transcription_ids))),
         processing_job_ids=tuple(sorted(set(int(value) for value in job_ids))),
     )
 
@@ -85,9 +76,6 @@ def _remove_link_only(path: Path, errors: list[str]) -> int:
         if path.is_symlink():
             path.unlink()
         else:
-            # Windows junctions/reparse directories are not always reported by
-            # pathlib as symlinks. rmdir removes the reparse entry itself and does
-            # not recurse into its target.
             os.rmdir(path)
         return 1
     except FileNotFoundError:
@@ -141,10 +129,10 @@ def _resolve_cleanup_root(value: str | Path, label: str, errors: list[str]) -> P
 def cleanup_project_storage(plan: ProjectStoragePlan) -> ProjectDeletionResult:
     """Best-effort cleanup after the database deletion has committed.
 
-    DB deletion is committed first so a filesystem error never leaves database
-    rows pointing at media/output files that were already removed. A hard process
-    crash after DB commit can still leave orphan files; integrity audits can safely
-    remove those because all paths below are project/interview/job scoped.
+    Project-scoped generated outputs, interview upload directories, and processing
+    job logs are cleaned after commit. Raw transcript snapshots are deliberately
+    excluded: repository policy treats them as high-sensitivity source snapshots
+    that must not be deleted unless the user explicitly requests that operation.
     """
     removed = 0
     errors: list[str] = []
@@ -162,22 +150,6 @@ def cleanup_project_storage(plan: ProjectStoragePlan) -> ProjectDeletionResult:
             removed += _remove_safe_id_dir(
                 upload_root, interview_id, "interview upload", errors
             )
-
-    if output_root is not None:
-        raw_candidate = output_root / "raw_transcripts"
-        try:
-            if _is_link_or_reparse(raw_candidate):
-                raise ValueError("raw transcript directory is linked")
-            raw_root = raw_candidate.resolve()
-            raw_root.relative_to(output_root)
-        except (OSError, RuntimeError, ValueError) as exc:
-            errors.append(f"raw transcript cleanup path rejected: {exc}")
-        else:
-            if raw_root.is_dir():
-                for transcription_id in plan.transcription_ids:
-                    for path in raw_root.glob(f"transcription_{int(transcription_id)}_*.json"):
-                        if path.is_file() or path.is_symlink():
-                            removed += _remove_file(path, errors)
 
     if base_root is not None:
         logs_candidate = base_root / "logs"
@@ -206,9 +178,6 @@ def _begin_project_deletion_transaction(project_id: int) -> Project:
     if db.session.new or db.session.dirty or db.session.deleted:
         raise RuntimeError("project deletion requires a clean database session")
 
-    # Validation/recovery reads may already have opened a transaction. End it,
-    # then acquire the same SQLite write reservation used by job admission before
-    # checking active jobs and deleting any rows.
     db.session.rollback()
     if db.engine.dialect.name == "sqlite":
         db.session.execute(text("BEGIN IMMEDIATE"))
@@ -227,13 +196,7 @@ def _begin_project_deletion_transaction(project_id: int) -> Project:
 
 
 def delete_project(project: Project) -> ProjectDeletionResult:
-    """Delete one project without racing durable-job admission or workers.
-
-    Stale jobs are recovered first. Deletion then acquires the SQLite write
-    reservation used by job admission before reloading the project and checking
-    active jobs. The active-job decision and database deletion therefore remain in
-    one serialized transaction. Filesystem cleanup occurs only after DB commit.
-    """
+    """Delete one project without racing durable-job admission or workers."""
     project_id = int(project.id)
     recover_stale_jobs(project_id=project_id)
 
