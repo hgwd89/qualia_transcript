@@ -18,6 +18,34 @@ function Get-QualiaPythonExecutable {
     throw "Python executable was not found. Check Python or the project virtual environment."
 }
 
+function Get-QualiaAppScriptPath {
+    param([string]$ProjectDir)
+
+    $scriptPath = Join-Path $ProjectDir "app.py"
+    if (-not (Test-Path $scriptPath -PathType Leaf)) {
+        throw "Qualia Transcript app.py was not found: $scriptPath"
+    }
+    return (Resolve-Path $scriptPath).Path
+}
+
+function Test-QualiaProcessCommandLine {
+    param(
+        [string]$CommandLine,
+        [string]$ProjectDir
+    )
+
+    if (-not $CommandLine) { return $false }
+    try {
+        $appScript = Get-QualiaAppScriptPath -ProjectDir $ProjectDir
+    } catch {
+        return $false
+    }
+
+    $normalizedLine = "$CommandLine".Replace("/", "\").ToLowerInvariant()
+    $normalizedScript = "$appScript".Replace("/", "\").ToLowerInvariant()
+    return $normalizedLine.Contains($normalizedScript)
+}
+
 function Get-QualiaBrowserHost {
     param([string]$HostAddress)
 
@@ -63,7 +91,7 @@ function Get-QualiaRuntimeConfig {
 
     Push-Location $ProjectDir
     try {
-        $json = & $PythonExe -c "import json, config; print(json.dumps({'host': config.APP_HOST, 'port': config.APP_PORT}))"
+        $json = & $PythonExe -c "import json, config; print(json.dumps({'host': config.APP_HOST, 'port': config.APP_PORT, 'service_name': config.SERVICE_NAME}))"
         if ($LASTEXITCODE -ne 0 -or -not $json) {
             throw "Could not load APP_HOST / APP_PORT from config.py."
         }
@@ -81,5 +109,6 @@ function Get-QualiaRuntimeConfig {
         Port        = $port
         BrowserHost = $browserHost
         Url         = Get-QualiaAppUrl -HostAddress $hostAddress -Port $port
+        ServiceName = "$($runtime.service_name)"
     }
 }
