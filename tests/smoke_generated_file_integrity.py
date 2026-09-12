@@ -77,6 +77,17 @@ def main() -> int:
                     target.filename,
                 )
 
+                long_download_name = ("長" * 110) + ".xlsx"
+                long_target = prepare_output_target(project_id, long_download_name)
+                long_storage_name = Path(long_target.stored_path).name
+                failures += check(
+                    "long download name keeps bounded UUID-only storage basename",
+                    long_target.filename == long_download_name
+                    and long_storage_name.endswith(".xlsx")
+                    and len(long_storage_name.encode("utf-8")) < 64,
+                    f"storage_bytes={len(long_storage_name.encode('utf-8'))}",
+                )
+
                 target_path.write_bytes(b"generated")
                 gf = register_generated_file(
                     target,
@@ -194,7 +205,6 @@ def main() -> int:
                     safe_output_filename("CON.txt") == "_CON.txt",
                 )
 
-                # Windows keeps SQLite files locked while pooled connections are open.
                 db.session.remove()
                 db.engine.dispose()
 
