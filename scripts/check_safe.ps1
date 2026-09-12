@@ -87,6 +87,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] interview creation scope smoke checks passed."
 
+Write-Host "[INFO] Running role normalization/update integrity smoke check..."
+python tests/smoke_role_normalization.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] role normalization/update integrity smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] role normalization/update integrity smoke checks passed."
+
 Write-Host "[INFO] Running SQLite foreign key smoke check..."
 python tests/smoke_sqlite_foreign_keys.py
 if ($LASTEXITCODE -ne 0) {
