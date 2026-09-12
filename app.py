@@ -208,10 +208,13 @@ def create_app():
 
 
 if __name__ == "__main__":
-    app = create_app()
-    app.run(
-        host=config.APP_HOST,
-        port=config.APP_PORT,
-        debug=config.APP_DEBUG,
-        use_reloader=False,
-    )
+    from services.runtime_lock import runtime_lock
+
+    with runtime_lock("app"):
+        app = create_app()
+        app.run(
+            host=config.APP_HOST,
+            port=config.APP_PORT,
+            debug=config.APP_DEBUG,
+            use_reloader=False,
+        )
