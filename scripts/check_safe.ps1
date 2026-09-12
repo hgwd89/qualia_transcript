@@ -55,6 +55,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] backup/restore integrity hardening smoke checks passed."
 
+Write-Host "[INFO] Running backup service-boundary smoke check..."
+python tests/smoke_backup_service_boundary.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] backup service-boundary smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] backup service-boundary smoke checks passed."
+
 Write-Host "[INFO] Running runtime maintenance exclusion smoke check..."
 python tests/smoke_runtime_maintenance_lock.py
 if ($LASTEXITCODE -ne 0) {
