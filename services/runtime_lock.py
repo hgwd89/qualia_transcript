@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import os
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,6 +15,8 @@ class RuntimeLockError(RuntimeError):
 
 _STATE_GUARD = RLock()
 _HELD: dict[str, dict[str, object]] = {}
+_PROCESS_HOLDS: dict[tuple[str, str], object] = {}
+_ATEXIT_REGISTERED = False
 _RUNTIME_SLOTS = 128
 
 
@@ -172,3 +175,47 @@ def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
             _HELD.pop(key, None)
             _unlock_range(handle, offset, length)
             handle.close()
+
+
+def hold_runtime_lock_for_process(
+    role: str,
+    lock_path: str | os.PathLike | None = None,
+) -> Path:
+    """Acquire one runtime-mode reservation and retain it until process exit.
+
+    This is for application factories or other launch paths where a short `with`
+    block cannot represent the lifetime of the process. Repeated calls for the
+    same path/mode are idempotent. The retained context is released at normal
+    interpreter shutdown; OS process teardown is the final safety net after a
+    crash or forced termination.
+    """
+    global _ATEXIT_REGISTERED
+
+    mode = _role_mode(role)
+    if mode != "runtime":
+        raise ValueError("process-lifetime holds are only valid for live runtime roles")
+
+    path = Path(lock_path).resolve() if lock_path else _default_lock_path()
+    key = (str(path), mode)
+
+    with _STATE_GUARD:
+        if key in _PROCESS_HOLDS:
+            return path
+
+        holder = runtime_lock(role, path)
+        holder.__enter__()
+        _PROCESS_HOLDS[key] = holder
+        if not _ATEXIT_REGISTERED:
+            atexit.register(release_process_runtime_locks)
+            _ATEXIT_REGISTERED = True
+    return path
+
+
+def release_process_runtime_locks() -> None:
+    """Release retained process-lifetime holds; mainly useful for controlled tests."""
+    with _STATE_GUARD:
+        holders = list(_PROCESS_HOLDS.values())
+        _PROCESS_HOLDS.clear()
+
+    for holder in reversed(holders):
+        holder.__exit__(None, None, None)
