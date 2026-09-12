@@ -26,6 +26,7 @@ from models.generated_file import GeneratedFile  # noqa: F401
 from models.setting import AppSetting  # noqa: F401
 
 from services.integrated_analysis import run_integrated_interview_analysis
+from services.runtime_lock import RuntimeLockError, runtime_lock
 
 
 def create_analysis_app() -> Flask:
@@ -65,23 +66,31 @@ def main() -> int:
     no_ai = not bool(args.ai)
     save = bool(args.save)
 
-    app = create_analysis_app()
-    with app.app_context():
-        try:
-            result = run_integrated_interview_analysis(
-                interview_id=args.interview_id,
-                no_ai=no_ai,
-                save=save,
-                max_quotes=args.max_quotes,
-                include_needs_review=bool(args.include_needs_review),
-            )
-        except Exception as e:
-            print(json.dumps({
-                "ok": False,
-                "error_type": type(e).__name__,
-                "error_message": str(e),
-            }, ensure_ascii=False, indent=2))
-            return 1
+    try:
+        with runtime_lock("reader"):
+            app = create_analysis_app()
+            with app.app_context():
+                result = run_integrated_interview_analysis(
+                    interview_id=args.interview_id,
+                    no_ai=no_ai,
+                    save=save,
+                    max_quotes=args.max_quotes,
+                    include_needs_review=bool(args.include_needs_review),
+                )
+    except RuntimeLockError as exc:
+        print(json.dumps({
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }, ensure_ascii=False, indent=2))
+        return 3
+    except Exception as e:
+        print(json.dumps({
+            "ok": False,
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+        }, ensure_ascii=False, indent=2))
+        return 1
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok") else 1

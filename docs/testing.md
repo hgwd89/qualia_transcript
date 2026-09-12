@@ -24,7 +24,7 @@ The required `safe-smoke` gate currently covers:
 - media-upload integrity, including rejection of linked/reparse interview storage paths
 - managed-storage path guards that reject symlinks and Windows junction/reparse entries below configured output/upload roots before generated files or uploaded media are created or resolved
 - backup/restore integrity hardening: the backup tool resolves the same SQLite file as Flask, validates and restores the same staged archive bytes, honors the manifest-declared database member, removes a newly created DB when restore rolls back, preserves a raw damaged DB copy only under explicit recovery acknowledgement, and keeps backup files owner-only on POSIX
-- runtime maintenance exclusion: the local Flask process, detached durable workers, semantic-analysis CLI (including dry-run startup because `create_app()` may migrate local state), and explicit processing-job recovery writes hold shared runtime file locks; backup and applied restore hold the exclusive maintenance lock for the whole operation; maintenance is rejected while any live writer remains, while read-only recovery inspection stays lock-free
+- runtime maintenance exclusion: the local Flask process, detached durable workers, semantic-analysis CLI, operational read-only readers, and explicit processing-job recovery writes hold shared runtime slots; backup and applied restore hold the exclusive maintenance lock for the whole operation. Read-only job inspection, integrated-analysis dry-run, production-readiness wrappers, and the manual local-data integrity wrapper therefore refuse to start while maintenance is replacing or snapshotting the live recovery set
 - project deletion lifecycle, including durable-job serialization, pre-commit quarantine of existing output/upload numeric ID entries and captured processing-job logs, deletion refusal when quarantine cannot be established, quarantine restoration on DB rollback, non-recursive linked-path handling, immediate SQLite Project/ProcessingJob ID-reuse safety after post-commit cleanup failure, and mandatory retention of raw transcript snapshots
 - participant/interview-flow project boundaries and delete guards
 - interview-creation scope validation
@@ -57,7 +57,7 @@ Use only for read-only inspection of the existing local research database and tr
 powershell -ExecutionPolicy Bypass -File scripts/check_local_data_integrity.ps1
 ```
 
-This check is manual-only and must not become a required CI gate. It opens SQLite read-only and checks important table relationships, source fingerprints, analysis counts, and snapshot hashes without modifying the source dataset.
+This check is manual-only and must not become a required CI gate. It opens SQLite read-only and checks important table relationships, source fingerprints, analysis counts, and snapshot hashes without modifying the source dataset. The wrapper holds the shared `reader` runtime lock so it cannot inspect the live DB while backup/applied-restore maintenance owns the exclusive recovery-set boundary.
 
 ## Integrated analysis no-AI checks
 
@@ -67,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check_integrated_analysis_cli_g
 powershell -ExecutionPolicy Bypass -File scripts/check_integrated_analysis_preview_ui.ps1
 ```
 
-Expected contract: no external request, no save for dry-run preview, no `Segment.text` change, and no raw transcript change.
+Expected contract: no external request, no save for dry-run preview, no `Segment.text` change, and no raw transcript change. Direct integrated-analysis CLI execution holds the shared `reader` runtime lock while it reads the live database.
 
 ## AI analysis review/export
 

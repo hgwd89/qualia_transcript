@@ -10,9 +10,13 @@ Write-Host "[INFO] It does not call OpenAI, run Whisper, or generate Word/Excel 
 Write-Host "[INFO] Set QUALIA_LOCAL_DB_PATH to override the DB path."
 Write-Host "[INFO] Set QUALIA_LOCAL_DATA_BASELINE to compare representative fingerprints."
 
-python tests/smoke_local_data_integrity.py
+python scripts/run_with_runtime_reader.py tests/smoke_local_data_integrity.py
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[FAIL] local data integrity check failed."
+    if ($LASTEXITCODE -eq 3) {
+        Write-Host "[FAIL] local data integrity check refused while backup/restore maintenance is active."
+    } else {
+        Write-Host "[FAIL] local data integrity check failed."
+    }
     exit $LASTEXITCODE
 }
 

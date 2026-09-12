@@ -9,7 +9,7 @@ import config
 
 
 class RuntimeLockError(RuntimeError):
-    """Raised when application/worker and maintenance lifecycles overlap."""
+    """Raised when live-runtime access and maintenance lifecycles overlap."""
 
 
 _STATE_GUARD = RLock()
@@ -28,11 +28,13 @@ def _default_lock_path() -> Path:
 
 
 def _role_mode(role: str) -> str:
-    if role in {"app", "worker"}:
+    if role in {"app", "worker", "reader"}:
         return "runtime"
     if role == "maintenance":
         return "maintenance"
-    raise ValueError("runtime lock role must be 'app', 'worker', or 'maintenance'")
+    raise ValueError(
+        "runtime lock role must be 'app', 'worker', 'reader', or 'maintenance'"
+    )
 
 
 def _ensure_lock_file_size(handle) -> None:
@@ -98,7 +100,7 @@ def _acquire_range(handle, mode: str) -> tuple[int, int]:
         if _try_lock_range(handle, 0, _RUNTIME_SLOTS):
             return 0, _RUNTIME_SLOTS
         raise RuntimeLockError(
-            "Qualia runtime is busy: stop the application and all durable workers before maintenance"
+            "Qualia runtime is busy: stop all live runtime access before maintenance"
         )
 
     for offset in range(_RUNTIME_SLOTS):
@@ -113,14 +115,16 @@ def _acquire_range(handle, mode: str) -> tuple[int, int]:
 def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
     """Hold the runtime/maintenance exclusion lock for one process lifecycle.
 
-    App and detached worker processes each reserve one byte-range slot, allowing
-    many runtime writers to coexist. Backup and applied restore lock the complete
-    slot range, so maintenance cannot start while any app/worker process remains,
-    and no app/worker can start while maintenance owns the range.
+    App, detached worker, and operational reader processes each reserve one
+    byte-range slot, allowing normal live access to coexist. Backup and applied
+    restore lock the complete slot range, so maintenance cannot start while any
+    live reader/writer process remains and no live accessor can start while
+    maintenance owns the range.
 
     Nested acquisition is allowed only for the same lock mode in the same process.
     This lets applied restore invoke a pre-restore backup while retaining one
-    exclusive maintenance boundary.
+    exclusive maintenance boundary and lets a reader path enter a write helper
+    without dropping the shared runtime reservation.
     """
     mode = _role_mode(role)
     path = Path(lock_path).resolve() if lock_path else _default_lock_path()

@@ -130,8 +130,8 @@ def _apply_recovery(job_id: int) -> int:
     from services.job_recovery import mark_job_failed
 
     # Explicit recovery is a live-database write and create_app() may itself run
-    # idempotent migrations. Share the runtime lock with the app/workers so an
-    # applied backup/restore maintenance operation cannot overlap this mutation.
+    # idempotent migrations. This nested runtime acquisition stays in the same
+    # shared mode when main() already holds the reader reservation.
     try:
         with runtime_lock("worker"):
             app = create_app()
@@ -161,23 +161,28 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        row = _read_job(args.job_id)
-    except Exception as exc:
-        print(f"inspection failed: {type(exc).__name__}: {exc}")
-        return 1
-    if not row:
-        print(f"job_id={args.job_id} not found")
-        return 1
+        with runtime_lock("reader"):
+            try:
+                row = _read_job(args.job_id)
+            except Exception as exc:
+                print(f"inspection failed: {type(exc).__name__}: {exc}")
+                return 1
+            if not row:
+                print(f"job_id={args.job_id} not found")
+                return 1
 
-    print(json.dumps(_display_payload(row), ensure_ascii=False, indent=2, default=str))
+            print(json.dumps(_display_payload(row), ensure_ascii=False, indent=2, default=str))
 
-    if not args.apply:
-        print("Validation only. Database opened read-only; no job state changed.")
-        return 0
-    if not args.yes:
-        print("Refusing write: --apply requires --yes.")
-        return 2
-    return _apply_recovery(args.job_id)
+            if not args.apply:
+                print("Validation only. Database opened read-only; no job state changed.")
+                return 0
+            if not args.yes:
+                print("Refusing write: --apply requires --yes.")
+                return 2
+            return _apply_recovery(args.job_id)
+    except RuntimeLockError as exc:
+        print(f"Refusing job inspection while maintenance is active: {exc}")
+        return 3
 
 
 if __name__ == "__main__":
