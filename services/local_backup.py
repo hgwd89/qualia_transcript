@@ -354,9 +354,10 @@ def restore_backup(
         if not staged_db.is_file():
             raise ValueError("staged backup database missing")
 
-        # This is an advisory/best-effort busy check only. A process-lifetime
-        # application lock is added separately; keep this check for old launchers.
-        if database_path.exists():
+        # This is an advisory/best-effort busy check only. If an explicitly
+        # acknowledged damaged DB could not be snapshotted but was preserved as a
+        # raw copy, SQLite cannot reliably open it for this legacy check.
+        if database_path.exists() and pre_restore_database_copy is None:
             current = sqlite3.connect(str(database_path), timeout=1)
             try:
                 current.execute("BEGIN EXCLUSIVE")
