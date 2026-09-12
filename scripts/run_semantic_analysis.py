@@ -8,6 +8,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from app import create_app
+from services.runtime_lock import RuntimeLockError, runtime_lock
 from services.semantic_analysis import run_semantic_cluster_analysis
 
 
@@ -29,22 +30,33 @@ def main() -> int:
     if not args.save and not args.dry_run:
         save = False  # default dry-run
 
-    app = create_app()
-    with app.app_context():
-        try:
-            result = run_semantic_cluster_analysis(
-                interview_id=args.interview_id,
-                save=save,
-                max_segments=args.max_segments,
-                no_ai=bool(args.no_ai),
-            )
-        except Exception as e:
-            print(json.dumps({
-                "ok": False,
-                "error_type": type(e).__name__,
-                "error_message": str(e),
-            }, ensure_ascii=False))
-            return 1
+    # create_app() can run idempotent migrations and Windows secret migration even
+    # when semantic analysis itself is a dry-run. Treat this CLI as a normal shared
+    # runtime writer for its full lifetime so backup/applied restore cannot overlap.
+    try:
+        with runtime_lock("worker"):
+            app = create_app()
+            with app.app_context():
+                result = run_semantic_cluster_analysis(
+                    interview_id=args.interview_id,
+                    save=save,
+                    max_segments=args.max_segments,
+                    no_ai=bool(args.no_ai),
+                )
+    except RuntimeLockError as exc:
+        print(json.dumps({
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }, ensure_ascii=False))
+        return 3
+    except Exception as e:
+        print(json.dumps({
+            "ok": False,
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+        }, ensure_ascii=False))
+        return 1
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if not result.get("ok", False):
