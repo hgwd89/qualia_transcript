@@ -23,6 +23,7 @@ The required `safe-smoke` gate currently covers:
 - media-upload integrity, including rejection of linked/reparse interview storage paths
 - managed-storage path guards that reject symlinks and Windows junction/reparse entries below configured output/upload roots before generated files or uploaded media are created or resolved
 - backup/restore integrity hardening: the backup tool resolves the same SQLite file as Flask, validates and restores the same staged archive bytes, honors the manifest-declared database member, removes a newly created DB when restore rolls back, preserves a raw damaged DB copy only under explicit recovery acknowledgement, and keeps backup files owner-only on POSIX
+- runtime maintenance exclusion: the local app holds the runtime file lock for its process lifetime, backup and applied restore take the mutually exclusive maintenance role, maintenance reentry is allowed only within the same maintenance operation, and cross-process contention is rejected on Windows and POSIX
 - project deletion lifecycle, including durable-job serialization, managed-storage cleanup, non-recursive linked-path handling, DB-failure preservation, and mandatory retention of raw transcript snapshots
 - participant/interview-flow project boundaries and delete guards
 - interview-creation scope validation
