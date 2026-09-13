@@ -47,11 +47,17 @@ class ManagedWriteFile:
             self.stream.flush()
             info = os.fstat(self.stream.fileno())
             if not stat.S_ISREG(info.st_mode):
-                raise ValueError(f"managed storage write target is not a regular file: {self.display_path}")
+                raise ValueError(
+                    f"managed storage write target is not a regular file: {self.display_path}"
+                )
             self.stream.close()
-            return info
-        finally:
-            self._release_pins()
+        except Exception:
+            # Keep the ancestry pins alive until abort has removed the exact
+            # partial target (or made the best platform-safe attempt to do so).
+            self.abort()
+            raise
+        self._release_pins()
+        return info
 
     def abort(self) -> None:
         """Best-effort removal without allowing ancestor replacement to escape the root."""
@@ -66,19 +72,17 @@ class ManagedWriteFile:
                     pass
                 try:
                     self.stream.close()
-                except OSError:
+                except (OSError, ValueError):
                     pass
             else:
                 if self._posix_parent_fd is not None and self._posix_name:
                     try:
                         os.unlink(self._posix_name, dir_fd=self._posix_parent_fd)
-                    except FileNotFoundError:
-                        pass
-                    except OSError:
+                    except (FileNotFoundError, OSError):
                         pass
                 try:
                     self.stream.close()
-                except OSError:
+                except (OSError, ValueError):
                     pass
         finally:
             self._release_pins()
@@ -115,11 +119,15 @@ def _open_managed_file_for_write_posix(root: Path, relative: Path) -> ManagedWri
         try:
             fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
         except OSError as exc:
-            raise ValueError(f"managed storage file could not be created safely: {display_path}") from exc
+            raise ValueError(
+                f"managed storage file could not be created safely: {display_path}"
+            ) from exc
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
-                raise ValueError(f"managed storage write target is not a regular file: {display_path}")
+                raise ValueError(
+                    f"managed storage write target is not a regular file: {display_path}"
+                )
             stream = os.fdopen(fd, "w+b", closefd=True)
             fd = -1
             result = ManagedWriteFile(
@@ -174,7 +182,11 @@ def _windows_create_new_file(path: Path) -> int:
     invalid_handle_value = ctypes.c_void_p(-1).value
     if handle == invalid_handle_value:
         error_code = ctypes.get_last_error()
-        raise OSError(error_code, "managed storage file could not be created safely", str(path))
+        raise OSError(
+            error_code,
+            "managed storage file could not be created safely",
+            str(path),
+        )
     return int(handle)
 
 
@@ -185,7 +197,7 @@ def _windows_mark_delete_on_close(handle: int) -> None:
     file_disposition_info = 4
 
     class FileDispositionInfo(ctypes.Structure):
-        _fields_ = [("DeleteFile", wintypes.BOOLEAN)]
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
 
     set_info = _windows_kernel32().SetFileInformationByHandle
     set_info.argtypes = [
@@ -196,7 +208,12 @@ def _windows_mark_delete_on_close(handle: int) -> None:
     ]
     set_info.restype = wintypes.BOOL
     info = FileDispositionInfo(1)
-    if not set_info(handle, file_disposition_info, ctypes.byref(info), ctypes.sizeof(info)):
+    if not set_info(
+        handle,
+        file_disposition_info,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
         error_code = ctypes.get_last_error()
         raise OSError(error_code, "managed storage file could not be marked for deletion")
 
@@ -234,7 +251,11 @@ def _open_windows_delete_handle(path: Path) -> int:
     invalid_handle_value = ctypes.c_void_p(-1).value
     if handle == invalid_handle_value:
         error_code = ctypes.get_last_error()
-        raise OSError(error_code, "managed storage file could not be opened for deletion", str(path))
+        raise OSError(
+            error_code,
+            "managed storage file could not be opened for deletion",
+            str(path),
+        )
     return int(handle)
 
 
@@ -249,7 +270,11 @@ def _open_managed_file_for_write_windows(root: Path, relative: Path) -> ManagedW
             current = current / part
             child_handle = _windows_open_path_handle(current, directory=True)
             try:
-                _windows_validate_handle_type(child_handle, directory=True, display_path=current)
+                _windows_validate_handle_type(
+                    child_handle,
+                    directory=True,
+                    display_path=current,
+                )
             except Exception:
                 _windows_close_handle(child_handle)
                 raise
@@ -257,7 +282,11 @@ def _open_managed_file_for_write_windows(root: Path, relative: Path) -> ManagedW
 
         display_path = current / relative.parts[-1]
         final_handle = _windows_create_new_file(display_path)
-        _windows_validate_handle_type(final_handle, directory=False, display_path=display_path)
+        _windows_validate_handle_type(
+            final_handle,
+            directory=False,
+            display_path=display_path,
+        )
 
         flags = os.O_RDWR | int(getattr(os, "O_BINARY", 0) or 0)
         fd = msvcrt.open_osfhandle(final_handle, flags)
@@ -265,7 +294,9 @@ def _open_managed_file_for_write_windows(root: Path, relative: Path) -> ManagedW
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
-                raise ValueError(f"managed storage write target is not a regular file: {display_path}")
+                raise ValueError(
+                    f"managed storage write target is not a regular file: {display_path}"
+                )
             stream = os.fdopen(fd, "w+b", closefd=True)
             fd = -1
             result = ManagedWriteFile(
@@ -287,7 +318,10 @@ def _open_managed_file_for_write_windows(root: Path, relative: Path) -> ManagedW
             _windows_close_handle(handle)
 
 
-def open_managed_file_for_write(root_value: str | Path, stored_path: str) -> ManagedWriteFile:
+def open_managed_file_for_write(
+    root_value: str | Path,
+    stored_path: str,
+) -> ManagedWriteFile:
     """Create a new regular managed file while pinning every ancestor."""
     root = _managed_root(root_value)
     relative = _validated_relative(stored_path)
@@ -317,14 +351,22 @@ def unlink_managed_file(root_value: str | Path, stored_path: str) -> None:
                 current = current / part
                 child_handle = _windows_open_path_handle(current, directory=True)
                 try:
-                    _windows_validate_handle_type(child_handle, directory=True, display_path=current)
+                    _windows_validate_handle_type(
+                        child_handle,
+                        directory=True,
+                        display_path=current,
+                    )
                 except Exception:
                     _windows_close_handle(child_handle)
                     raise
                 pinned.append(child_handle)
             display_path = current / relative.parts[-1]
             final_handle = _open_windows_delete_handle(display_path)
-            _windows_validate_handle_type(final_handle, directory=False, display_path=display_path)
+            _windows_validate_handle_type(
+                final_handle,
+                directory=False,
+                display_path=display_path,
+            )
             _windows_mark_delete_on_close(final_handle)
         finally:
             if final_handle is not None:
