@@ -357,7 +357,6 @@ def _create_backup_unlocked(
         validate_backup(partial_archive)
         os.replace(partial_archive, archive)
         published = True
-        _restrict_permissions(archive, 0o600)
         return archive
     finally:
         if not published:
