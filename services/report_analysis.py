@@ -14,8 +14,7 @@ from models.segment import Segment, UtteranceMapping
 from models.generated_file import GeneratedFile
 from services.file_manager import (
     prepare_output_target,
-    register_generated_file,
-    write_output_target,
+    write_and_register_generated_file,
 )
 
 
@@ -101,9 +100,9 @@ def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"分析データ_{project.name}_{ts}.xlsx"
     target = prepare_output_target(project_id, filename)
-    write_output_target(target, wb.save)
-    return register_generated_file(
+    return write_and_register_generated_file(
         target,
+        wb.save,
         project_id=project_id,
         file_type="analysis",
         file_format="xlsx",
@@ -131,12 +130,12 @@ def generate_analysis_csv(project_id: int) -> GeneratedFile:
             text_stream.flush()
         finally:
             # Keep ownership of the underlying managed handle with the write
-            # boundary so it can finish or abort while ancestor pins are held.
+            # boundary so it can commit or abort while ancestor pins are held.
             text_stream.detach()
 
-    write_output_target(target, write_csv)
-    return register_generated_file(
+    return write_and_register_generated_file(
         target,
+        write_csv,
         project_id=project_id,
         file_type="analysis",
         file_format="csv",
