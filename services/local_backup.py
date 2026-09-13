@@ -279,7 +279,7 @@ def _stat_identity(info: os.stat_result) -> tuple[int, int]:
 
 
 def _snapshot_stat_token(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
-    """Generation-sensitive token used to detect replacement or in-place mutation."""
+    """Generation-sensitive token used to detect file replacement or in-place mutation."""
     return (
         int(info.st_dev),
         int(info.st_ino),
@@ -288,6 +288,11 @@ def _snapshot_stat_token(info: os.stat_result) -> tuple[int, int, int, int, int,
         int(info.st_mtime_ns),
         int(info.st_ctime_ns),
     )
+
+
+def _directory_identity_token(info: os.stat_result) -> tuple[int, int, int]:
+    """Stable directory identity without volatile child-list timestamps or size."""
+    return int(info.st_dev), int(info.st_ino), int(info.st_mode)
 
 
 def _xattr_unsupported(error_number: int | None) -> bool:
@@ -302,14 +307,16 @@ def _capture_extended_attributes(source: str | os.PathLike | int) -> dict[str, b
     """Capture POSIX extended attributes from a checked path or open descriptor."""
     if os.name == "nt" or not hasattr(os, "listxattr") or not hasattr(os, "getxattr"):
         return {}
-    if isinstance(source, int) and os.listxattr not in getattr(os, "supports_fd", set()):
-        raise ValueError("platform cannot safely capture extended attributes from an open file")
     try:
         names = os.listxattr(source)
     except OSError as exc:
         if _xattr_unsupported(exc.errno):
             return {}
         raise ValueError("could not read snapshot extended attributes") from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "platform cannot safely capture extended attributes from an open snapshot object"
+        ) from exc
 
     attributes: dict[str, bytes] = {}
     for name in names:
@@ -319,6 +326,10 @@ def _capture_extended_attributes(source: str | os.PathLike | int) -> dict[str, b
             if _xattr_unsupported(exc.errno):
                 raise ValueError("snapshot extended attributes became unavailable") from exc
             raise ValueError(f"could not read snapshot extended attribute: {name}") from exc
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"platform cannot read snapshot extended attribute from open object: {name}"
+            ) from exc
     return attributes
 
 
@@ -352,6 +363,8 @@ def _copy_open_regular_snapshot_file(
     target: Path,
     opened: os.stat_result,
     source_label: str,
+    *,
+    preserve_xattrs: bool = True,
 ) -> None:
     if not stat.S_ISREG(opened.st_mode):
         raise ValueError(f"managed snapshot file is not regular: {source_label}")
@@ -360,7 +373,7 @@ def _copy_open_regular_snapshot_file(
     try:
         with os.fdopen(os.dup(fd), "rb") as src, target.open("wb") as dst:
             shutil.copyfileobj(src, dst)
-        attributes = _capture_extended_attributes(fd)
+        attributes = _capture_extended_attributes(fd) if preserve_xattrs else {}
         final = os.fstat(fd)
         if _snapshot_stat_token(final) != _snapshot_stat_token(opened):
             raise ValueError(f"managed snapshot file changed during snapshot: {source_label}")
@@ -422,8 +435,8 @@ def _open_directory_component(parent_fd: int, name: str, display_path: Path) -> 
         after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         if (
             not stat.S_ISDIR(opened.st_mode)
-            or _snapshot_stat_token(before) != _snapshot_stat_token(opened)
-            or _snapshot_stat_token(after) != _snapshot_stat_token(opened)
+            or _directory_identity_token(before) != _directory_identity_token(opened)
+            or _directory_identity_token(after) != _directory_identity_token(opened)
         ):
             raise ValueError(f"managed snapshot directory changed during snapshot: {display_path}")
         return child_fd, opened
@@ -463,6 +476,8 @@ def _copy_regular_snapshot_file_at(
     name: str,
     target: Path,
     display_path: Path,
+    *,
+    preserve_xattrs: bool = True,
 ) -> None:
     """Copy a regular file relative to a pinned parent directory descriptor."""
     try:
@@ -488,7 +503,13 @@ def _copy_regular_snapshot_file_at(
             or _snapshot_stat_token(after) != _snapshot_stat_token(opened)
         ):
             raise ValueError(f"managed snapshot file changed during snapshot: {display_path}")
-        _copy_open_regular_snapshot_file(fd, target, opened, str(display_path))
+        _copy_open_regular_snapshot_file(
+            fd,
+            target,
+            opened,
+            str(display_path),
+            preserve_xattrs=preserve_xattrs,
+        )
     finally:
         os.close(fd)
 
@@ -529,7 +550,13 @@ def _collect_tree_pinned(source_dir: Path, archive_prefix: str, staging_root: Pa
                 relative = (relative_dir / name).as_posix()
                 archive_path = _safe_member_name(f"{archive_prefix}/{relative}")
                 staged = staging_root / Path(archive_path)
-                _copy_regular_snapshot_file_at(current_fd, name, staged, display)
+                _copy_regular_snapshot_file_at(
+                    current_fd,
+                    name,
+                    staged,
+                    display,
+                    preserve_xattrs=False,
+                )
                 entries.append({
                     "path": archive_path,
                     "size": staged.stat().st_size,
