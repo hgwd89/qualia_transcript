@@ -28,6 +28,21 @@ def _parse(a: AIAnalysis) -> dict:
             content = json.loads(a.content_json)
         except (json.JSONDecodeError, TypeError):
             pass
+
+    # Cross-participant analyses are scoped by canonical question_id. Surface the
+    # owning flow identity on every result view so reused question codes/text
+    # across flow versions cannot become visually indistinguishable after save.
+    if a.analysis_type == "cross_participant" and a.question_id is not None:
+        question = db.session.get(InterviewFlowQuestion, int(a.question_id))
+        flow = question.section.flow if question and question.section else None
+        if flow is not None:
+            flow_label = str(flow.title or f"Flow {flow.id}")
+            if flow.version:
+                flow_label += f" v{flow.version}"
+            suffix = f" — {flow_label}"
+            if suffix not in str(a.title or ""):
+                a.title = f"{a.title or '横断分析'}{suffix}"
+
     return {"obj": a, "content": content}
 
 
