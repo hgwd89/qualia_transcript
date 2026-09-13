@@ -7,34 +7,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  sync-master:
-    name: sync-master
-    runs-on: ubuntu-latest
-    if: github.head_ref == 'fix/media-transcription-read-fencing'
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@v4
-        with:
-          ref: fix/media-transcription-read-fencing
-          fetch-depth: 0
-
-      - name: Merge current master if needed
-        shell: bash
-        run: |
-          # sync-round-2
-          git fetch origin master
-          if git merge-base --is-ancestor origin/master HEAD; then
-            echo 'Current master already included.'
-          else
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git merge --no-edit origin/master
-            git push origin HEAD:fix/media-transcription-read-fencing
-          fi
-
   safe-smoke:
     name: safe-smoke
     runs-on: windows-latest
