@@ -616,11 +616,24 @@ def run_transcription(
             )
         except Exception:
             if get_fallback_provider() == "local_whisper":
-                return run_local_whisper_transcription(
+                # Long-form OpenAI can already have committed earlier chunks. Fence
+                # cleanup with the durable write reservation before switching the
+                # same Transcription row to a full local result.
+                if result_write_guard is not None:
+                    result_write_guard()
+                elif lease_check is not None:
+                    lease_check()
+                from services.processing_result_guard import discard_transcription_segments
+
+                discarded_openai_segments = discard_transcription_segments(transcription_id)
+                result = run_local_whisper_transcription(
                     transcription_id,
                     lease_check=lease_check,
                     result_write_guard=result_write_guard,
                 )
+                if isinstance(result, dict):
+                    result["discarded_openai_segment_count"] = discarded_openai_segments
+                return result
             raise
 
     return run_local_whisper_transcription(

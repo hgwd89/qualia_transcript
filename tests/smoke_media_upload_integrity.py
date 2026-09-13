@@ -480,6 +480,66 @@ def main() -> int:
                     ),
                 )
 
+                fallback_tr = Transcription(
+                    media_file_id=int(media.id),
+                    whisper_model="tiny",
+                    language="ja",
+                    status="pending",
+                )
+                db.session.add(fallback_tr)
+                db.session.commit()
+                fallback_tr_id = int(fallback_tr.id)
+
+                def fail_openai_after_committed_chunk(transcription_id, **_kwargs):
+                    db.session.add(Segment(
+                        transcription_id=int(transcription_id),
+                        interview_id=int(interview.id),
+                        speaker_label="C01_SPEAKER_00",
+                        speaker_role="respondent",
+                        start_sec=0.0,
+                        end_sec=1.0,
+                        text="OPENAI_PARTIAL_SHOULD_BE_REMOVED",
+                        seq=999,
+                    ))
+                    db.session.commit()
+                    raise RuntimeError("simulated later OpenAI chunk failure")
+
+                with patch.object(
+                    transcription_service,
+                    "get_transcription_provider",
+                    return_value="openai",
+                ), patch.object(
+                    transcription_service,
+                    "get_fallback_provider",
+                    return_value="local_whisper",
+                ), patch.object(
+                    transcription_service,
+                    "run_openai_transcription",
+                    side_effect=fail_openai_after_committed_chunk,
+                ), patch.object(
+                    transcription_service,
+                    "_get_model",
+                    return_value=FakeLocalModel(),
+                ):
+                    fallback_result = transcription_service.run_transcription(fallback_tr_id)
+
+                fallback_segment_texts = [
+                    row.text
+                    for row in Segment.query.filter_by(transcription_id=fallback_tr_id)
+                    .order_by(Segment.seq)
+                    .all()
+                ]
+                failures += check(
+                    "OpenAI partial chunks are removed before in-place local fallback",
+                    fallback_result.get("discarded_openai_segment_count") == 1
+                    and fallback_segment_texts == ["えーっと", "そのままです。"]
+                    and "OPENAI_PARTIAL_SHOULD_BE_REMOVED" not in fallback_segment_texts,
+                    (
+                        f"discarded={fallback_result.get('discarded_openai_segment_count')} "
+                        f"segments={fallback_segment_texts!r}"
+                    ),
+                )
+
                 db.session.remove()
                 db.engine.dispose()
 
@@ -507,6 +567,11 @@ def main() -> int:
                 "local fallback inherits durable lease checks and stale errors are fenced",
                 transcription_source.count("lease_check=lease_check") >= 2
                 and transcription_source.count("If this exception reflects durable lease loss") == 2,
+            )
+            failures += check(
+                "in-place local fallback clears committed OpenAI partial segments",
+                "discard_transcription_segments" in transcription_source
+                and "discarded_openai_segment_count" in transcription_source,
             )
             failures += check(
                 "legacy databases receive the media content identity column additively",
