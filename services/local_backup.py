@@ -203,10 +203,17 @@ def _sqlite_path(database_uri: str | None = None) -> Path:
         raise ValueError("file-backed SQLite database is required")
     path = Path(raw)
     if not path.is_absolute():
-        # Flask-SQLAlchemy resolves relative sqlite:/// paths beneath Flask's
+        # Flask-SQLAlchemy resolves relative sqlite:/// URLs beneath Flask's
         # instance directory. Mirror that rule for explicit legacy relative URIs.
         path = Path(getattr(config, "INSTANCE_DIR", Path(config.BASE_DIR) / "instance")) / path
     return path.resolve()
+
+
+def _paths_overlap(first: Path, second: Path) -> bool:
+    """Return True when two resolved recovery paths intersect by ancestry."""
+    left = first.resolve()
+    right = second.resolve()
+    return left == right or left in right.parents or right in left.parents
 
 
 def _touches_live_recovery_set(
@@ -214,15 +221,18 @@ def _touches_live_recovery_set(
     upload_dir: str | os.PathLike | None,
     output_dir: str | os.PathLike | None,
 ) -> bool:
-    """Return True when any requested target is part of the configured live set."""
-    database_path = _sqlite_path(database_uri)
-    uploads = Path(upload_dir or config.UPLOAD_DIR).resolve()
-    outputs = Path(output_dir or config.OUTPUT_DIR).resolve()
-    return (
-        database_path == Path(config.DATABASE_PATH).resolve()
-        or uploads == Path(config.UPLOAD_DIR).resolve()
-        or outputs == Path(config.OUTPUT_DIR).resolve()
+    """Return True when any requested target overlaps the configured live set."""
+    requested = (
+        _sqlite_path(database_uri),
+        Path(upload_dir or config.UPLOAD_DIR).resolve(),
+        Path(output_dir or config.OUTPUT_DIR).resolve(),
     )
+    live = (
+        Path(config.DATABASE_PATH).resolve(),
+        Path(config.UPLOAD_DIR).resolve(),
+        Path(config.OUTPUT_DIR).resolve(),
+    )
+    return any(_paths_overlap(candidate, live_path) for candidate in requested for live_path in live)
 
 
 def _safe_member_name(name: str) -> str:
