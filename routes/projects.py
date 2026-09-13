@@ -3,6 +3,10 @@ from datetime import datetime, timezone
 from models import db
 from models.project import Project
 from services.project_deletion import ProjectDeletionBlocked, delete_project
+from services.research_input_guard import (
+    ResearchInputWriteBlocked,
+    begin_project_metadata_write,
+)
 
 bp = Blueprint("projects", __name__)
 
@@ -79,6 +83,15 @@ def _project_form_context():
     }
 
 
+def _project_metadata_write_blocked_response(project_id: int, exc: ResearchInputWriteBlocked):
+    ids = ", ".join(f"#{value}" for value in exc.active_job_ids)
+    flash(
+        f"処理中の分析ジョブ（{ids}）がプロジェクト情報を使用しているため、完了または失敗後に更新してください",
+        "error",
+    )
+    return redirect(url_for("projects.detail", project_id=project_id))
+
+
 @bp.route("/")
 def index():
     projects = Project.query.order_by(Project.created_at.desc()).all()
@@ -126,18 +139,41 @@ def edit(project_id):
         if not name:
             flash("プロジェクト名は必須です", "error")
             return render_template("projects/edit.html", project=project, **_project_form_context())
-        project.name               = name
-        project.client             = request.form.get("client", "").strip() or None
-        project.research_theme     = request.form.get("research_theme", "").strip() or None
-        project.research_category  = _sanitize_category(request.form.get("research_category"))
-        project.glossary_profile   = _sanitize_profile(request.form.get("glossary_profile"))
-        project.research_objective = request.form.get("research_objective", "").strip() or None
-        project.description        = request.form.get("description", "").strip() or None
-        project.method             = request.form.get("method", project.method or "DI")
-        project.deliverable_type   = _sanitize_deliverable(request.form.get("deliverable_type"))
-        project.confidentiality_level = _sanitize_confidentiality(request.form.get("confidentiality_level"))
-        project.status             = request.form.get("status", project.status or "draft")
-        project.updated_at         = datetime.now(timezone.utc)
+
+        requested = {
+            "name": name,
+            "client": request.form.get("client", "").strip() or None,
+            "research_theme": request.form.get("research_theme", "").strip() or None,
+            "research_category": _sanitize_category(request.form.get("research_category")),
+            "glossary_profile": _sanitize_profile(request.form.get("glossary_profile")),
+            "research_objective": request.form.get("research_objective", "").strip() or None,
+            "description": request.form.get("description", "").strip() or None,
+            "method": request.form.get("method", project.method or "DI"),
+            "deliverable_type": _sanitize_deliverable(request.form.get("deliverable_type")),
+            "confidentiality_level": _sanitize_confidentiality(request.form.get("confidentiality_level")),
+            "status": request.form.get("status", project.status or "draft"),
+        }
+
+        try:
+            project = begin_project_metadata_write(project_id)
+        except ResearchInputWriteBlocked as exc:
+            return _project_metadata_write_blocked_response(project_id, exc)
+        except ValueError:
+            db.session.rollback()
+            return redirect(url_for("projects.index"))
+
+        project.name = requested["name"]
+        project.client = requested["client"]
+        project.research_theme = requested["research_theme"]
+        project.research_category = requested["research_category"]
+        project.glossary_profile = requested["glossary_profile"]
+        project.research_objective = requested["research_objective"]
+        project.description = requested["description"]
+        project.method = requested["method"]
+        project.deliverable_type = requested["deliverable_type"]
+        project.confidentiality_level = requested["confidentiality_level"]
+        project.status = requested["status"]
+        project.updated_at = datetime.now(timezone.utc)
         db.session.commit()
         flash("プロジェクトを更新しました", "success")
         return redirect(url_for("projects.detail", project_id=project.id))
