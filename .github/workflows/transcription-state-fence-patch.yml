@@ -22,8 +22,8 @@ jobs:
       - name: Apply production patch once
         shell: bash
         run: |
-          python scripts/patch_transcription_state_fencing.py
-          git rm scripts/patch_transcription_state_fencing.py
+          python scripts/run_patch_transcription_state_fencing_v2.py
+          git rm scripts/patch_transcription_state_fencing.py scripts/run_patch_transcription_state_fencing_v2.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add services/processing_jobs.py services/transcription.py scripts/check_safe.ps1 docs/transcription-dispatch-fencing.md docs/architecture.md docs/testing.md
