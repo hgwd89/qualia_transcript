@@ -34,6 +34,9 @@ jobs:
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 
+      - name: Run managed write identity regression
+        run: python tests/smoke_managed_write_identity.py
+
   posix-backup-snapshot:
     name: posix-backup-snapshot
     runs-on: ubuntu-latest
@@ -57,5 +60,8 @@ jobs:
       - name: Run POSIX snapshot fencing regression
         run: python tests/smoke_backup_snapshot_fencing.py
 
-      - name: Run POSIX managed-storage read fencing regression
+      - name: Run POSIX managed-storage read/write fencing regression
         run: python tests/smoke_linked_storage_guards.py
+
+      - name: Run managed write identity regression
+        run: python tests/smoke_managed_write_identity.py
