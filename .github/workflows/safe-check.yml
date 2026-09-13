@@ -86,3 +86,6 @@ jobs:
 
       - name: Run question-code readiness regression
         run: python tests/smoke_question_code_readiness.py
+
+      - name: Run project flow scope regression
+        run: python tests/smoke_project_flow_scope.py
