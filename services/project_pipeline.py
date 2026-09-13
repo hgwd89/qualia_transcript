@@ -100,13 +100,42 @@ def run_project_pipeline(job, update_progress) -> dict:
 
         if needs_assignment:
             try:
+                # The earlier read is only a preflight. BEGIN IMMEDIATE rolls that
+                # read transaction back before reserving the canonical write. Reload
+                # and re-resolve under the reservation so a concurrently added flow
+                # cannot turn a formerly unambiguous assignment into guessed
+                # research provenance.
                 begin_job_result_write(job)
-                interview.flow_id = int(resolved_flow.id)
-                db.session.commit()
-                row["steps"].append({"step": "assign_flow", "result": int(resolved_flow.id)})
+                locked_project = db.session.get(Project, int(job.project_id))
+                locked_interview = db.session.get(Interview, int(interview_id))
+                if not locked_project or not locked_interview:
+                    raise RuntimeError("project/interview disappeared before flow assignment")
+                locked_flow, locked_needs_assignment = resolve_pipeline_interview_flow(
+                    locked_project,
+                    locked_interview,
+                )
+                if locked_needs_assignment:
+                    locked_interview.flow_id = int(locked_flow.id)
+                    db.session.commit()
+                    row["steps"].append({
+                        "step": "assign_flow",
+                        "result": int(locked_flow.id),
+                    })
+                else:
+                    # Another serialized writer may have assigned the exact valid
+                    # flow before this reservation. Release the reservation without
+                    # overwriting that explicit provenance.
+                    db.session.commit()
+                project = locked_project
+                interview = locked_interview
             except JobLeaseLost:
                 db.session.rollback()
                 raise
+            except ProjectFlowScopeError as exc:
+                db.session.rollback()
+                _step_error(row, "assign_flow", exc, code=exc.code)
+                results.append(row)
+                continue
             except Exception as exc:
                 db.session.rollback()
                 _step_error(row, "assign_flow", exc)
