@@ -1,5 +1,6 @@
 import errno
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -19,6 +20,31 @@ def xattr_unsupported(exc: OSError) -> bool:
         getattr(errno, "ENOSYS", -3),
         getattr(errno, "EPERM", -4),
     }
+
+
+def windows_acl_sids(path: Path) -> set[str]:
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$acl = Get-Acl -LiteralPath $args[0]
+foreach ($rule in @($acl.Access)) {
+    try {
+        $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        $rule.IdentityReference.Value
+    }
+}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script, str(path)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"could not inspect Windows ACL for {path}: {result.stderr}")
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
 def main() -> int:
@@ -80,7 +106,7 @@ def main() -> int:
 
             def replace_ancestor_before_leaf_open(path, flags, *args, **kwargs):
                 if (
-                    path == "payload.txt"
+                    os.fspath(path) == "payload.txt"
                     and kwargs.get("dir_fd") is not None
                     and not swapped["done"]
                 ):
@@ -91,7 +117,10 @@ def main() -> int:
 
             local_backup.os.open = replace_ancestor_before_leaf_open
             try:
-                local_backup._snapshot_tree_no_links(source, target)
+                # Call the pinned implementation directly. Monkeypatching os.open
+                # would otherwise make the capability detector intentionally fall
+                # back because the wrapper function is not in os.supports_dir_fd.
+                local_backup._snapshot_tree_no_links_pinned(source, target)
             finally:
                 local_backup.os.open = original_open
             copied = target / "inner" / "payload.txt"
@@ -118,7 +147,7 @@ def main() -> int:
 
             def replace_collect_ancestor(path, flags, *args, **kwargs):
                 if (
-                    path == "payload.txt"
+                    os.fspath(path) == "payload.txt"
                     and kwargs.get("dir_fd") is not None
                     and not swapped_collect["done"]
                 ):
@@ -129,7 +158,11 @@ def main() -> int:
 
             local_backup.os.open = replace_collect_ancestor
             try:
-                entries = local_backup._collect_tree(collect_source, "uploads", collect_stage)
+                entries = local_backup._collect_tree_pinned(
+                    collect_source,
+                    "uploads",
+                    collect_stage,
+                )
             finally:
                 local_backup.os.open = original_open
             staged = collect_stage / "uploads" / "inner" / "payload.txt"
@@ -190,6 +223,38 @@ def main() -> int:
                 "SKIP: xattr API unavailable on this platform",
             )
 
+        if os.name == "nt":
+            acl_dir = root / "acl-boundary"
+            acl_dir.mkdir()
+            grant = subprocess.run(
+                ["icacls", str(acl_dir), "/grant", "*S-1-1-0:(OI)(CI)R"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if grant.returncode != 0:
+                raise RuntimeError(f"could not seed explicit Everyone ACL: {grant.stderr}")
+
+            local_backup._restrict_permissions(acl_dir, 0o700)
+            inherited_child = acl_dir / "inherited.txt"
+            inherited_child.write_text("sensitive", encoding="utf-8")
+            expected_sid = local_backup._current_windows_user_sid()
+            directory_sids = windows_acl_sids(acl_dir)
+            child_sids = windows_acl_sids(inherited_child)
+            failures += check(
+                "Windows backup ACL removes unrelated explicit grants before child creation",
+                directory_sids == {expected_sid} and child_sids == {expected_sid},
+                f"directory={sorted(directory_sids)}, child={sorted(child_sids)}",
+            )
+        else:
+            failures += check(
+                "Windows explicit-ACE privacy regression",
+                True,
+                "SKIP: Windows ACL semantics unavailable on this platform",
+            )
+
         source_text = (repo_root / "services" / "local_backup.py").read_text(encoding="utf-8")
         failures += check(
             "implementation pins POSIX ancestry and carries generation-sensitive metadata",
@@ -198,6 +263,12 @@ def main() -> int:
             and "st_ctime_ns" in source_text
             and "_capture_extended_attributes" in source_text
             and "_apply_extended_attributes" in source_text,
+        )
+        failures += check(
+            "Windows privacy implementation constructs a protected current-user-only DACL",
+            "SetAccessRuleProtection($true, $false)" in source_text
+            and "RemoveAccessRuleSpecific" in source_text
+            and "FileSystemAccessRule" in source_text,
         )
 
     if failures:
