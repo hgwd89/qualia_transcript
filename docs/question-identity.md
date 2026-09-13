@@ -33,6 +33,10 @@ Approval evidence resolution uses `source_flow_id` as the boundary before applyi
 
 For a historical integrated analysis that lacks `source_flow_id`, approval may infer the flow only when the project has exactly one flow. If multiple flows exist, the source is ambiguous and approval fails closed rather than guessing.
 
+## Readiness
+
+Production readiness reports `duplicate_question_code` as a blocker when a non-empty code occurs more than once inside the same flow. Reusing that code in another flow or flow version remains valid and must not trigger the blocker. The audit is read-only and never rewrites historical question rows.
+
 ## Regression contract
 
 `tests/smoke_question_code_identity.py` uses only temporary local data and no external AI provider. It verifies:
@@ -46,3 +50,5 @@ For a historical integrated analysis that lacks `source_flow_id`, approval may i
 - ambiguous legacy integrated analysis cannot be approved by rebinding to an arbitrary flow;
 - cross-participant generation rejects foreign-project questions before a provider call and persists canonical question identity;
 - integrated generation persists canonical source-flow metadata and discards unknown model-provided question-code labels.
+
+`tests/smoke_question_code_readiness.py` uses a temporary SQLite database to prove historical same-flow duplicates become a readiness blocker while identical codes in another flow remain valid. Both question-identity regressions are providerless and never touch the real research database.
