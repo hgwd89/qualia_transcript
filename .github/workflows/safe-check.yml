@@ -10,6 +10,21 @@ permissions:
   contents: read
 
 jobs:
+  render-transcription-patch:
+    name: render-transcription-patch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Render transcription patch
+        run: python scripts/render_transcription_snapshot_patch.py
+
   safe-smoke:
     name: safe-smoke
     runs-on: windows-latest
