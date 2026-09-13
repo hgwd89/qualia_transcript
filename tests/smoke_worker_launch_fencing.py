@@ -41,6 +41,7 @@ def main() -> int:
             from models.processing_job import ProcessingJob
             from models.project import Project
             import routes.analysis_view as analysis_view
+            import routes.analyze as analyze_route
             import routes.transcribe as transcribe_route
             import services.processing_jobs as processing_jobs
             import services.worker_launch_guard as launch_guard
@@ -53,10 +54,10 @@ def main() -> int:
                 db.session.add(project)
                 db.session.flush()
 
-                def new_job() -> ProcessingJob:
+                def new_job(job_type: str = "project_pipeline") -> ProcessingJob:
                     job = ProcessingJob(
                         project_id=project.id,
-                        job_type="project_pipeline",
+                        job_type=job_type,
                         status="pending",
                         progress_json='{"stage":"queued"}',
                         attempt_count=0,
@@ -159,7 +160,7 @@ def main() -> int:
                     db.session.expire_all()
                     claimed_after = db.session.get(ProcessingJob, claimed_id)
                     failures += check(
-                        "analysis route cannot overwrite a live claimed worker lease",
+                        "project-analysis route cannot overwrite a live claimed worker lease",
                         launch_error is None
                         and pid == 43211
                         and claimed_after.status == "running"
@@ -170,6 +171,27 @@ def main() -> int:
                             f"error={launch_error!r} pid={pid!r} status={claimed_after.status!r} "
                             f"attempt={claimed_after.attempt_count!r} "
                             f"worker_pid={claimed_after.worker_pid!r}"
+                        ),
+                    )
+
+                    individual_job = new_job("analyze")
+                    individual_id = int(individual_job.id)
+                    launch_guard.launch_job_worker = child_claims_then_parent_bookkeeping_fails
+                    pid, launch_error = analyze_route._launch_or_fail(individual_job)
+                    db.session.expire_all()
+                    individual_after = db.session.get(ProcessingJob, individual_id)
+                    failures += check(
+                        "individual-analysis route cannot overwrite a live claimed worker lease",
+                        launch_error is None
+                        and pid == 43211
+                        and individual_after.status == "running"
+                        and int(individual_after.attempt_count or 0) == 1
+                        and int(individual_after.worker_pid or 0) == 43211
+                        and individual_after.finished_at is None,
+                        (
+                            f"error={launch_error!r} pid={pid!r} status={individual_after.status!r} "
+                            f"attempt={individual_after.attempt_count!r} "
+                            f"worker_pid={individual_after.worker_pid!r}"
                         ),
                     )
                 finally:
@@ -198,13 +220,16 @@ def main() -> int:
             config.BACKUP_DIR = original["BACKUP_DIR"]
 
     transcribe_source = (repo_root / "routes" / "transcribe.py").read_text(encoding="utf-8")
-    analysis_source = (repo_root / "routes" / "analysis_view.py").read_text(encoding="utf-8")
+    project_analysis_source = (repo_root / "routes" / "analysis_view.py").read_text(encoding="utf-8")
+    individual_analysis_source = (repo_root / "routes" / "analyze.py").read_text(encoding="utf-8")
     failures += check(
         "all HTTP worker launch routes use the shared durable launch guard",
         "from services.worker_launch_guard import launch_job_or_preserve_active" in transcribe_source
-        and "from services.worker_launch_guard import launch_job_or_preserve_active" in analysis_source
+        and "from services.worker_launch_guard import launch_job_or_preserve_active" in project_analysis_source
+        and "from services.worker_launch_guard import launch_job_or_preserve_active" in individual_analysis_source
         and "from services.processing_jobs import launch_job_worker" not in transcribe_source
-        and "from services.processing_jobs import launch_job_worker" not in analysis_source,
+        and "from services.processing_jobs import launch_job_worker" not in project_analysis_source
+        and "from services.processing_jobs import launch_job_worker" not in individual_analysis_source,
     )
 
     if failures:
