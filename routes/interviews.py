@@ -21,12 +21,24 @@ from services.research_input_guard import (
     ResearchInputWriteBlocked,
     begin_interview_input_write,
 )
+from services.research_input_guard import (
+    ResearchInputWriteBlocked,
+    begin_interview_input_write,
+)
 
 bp = Blueprint("interviews", __name__)
 
 ALLOWED = config.ALLOWED_AUDIO_EXTENSIONS
 FLAG_TYPES = ("favorite", "quote", "exclude", "needs_review")
 SPEAKER_ROLES = ("moderator", "respondent", "observer", "unknown")
+
+
+def _input_write_blocked_response(exc: ResearchInputWriteBlocked):
+    return jsonify({
+        "ok": False,
+        "error": "処理中のジョブが分析入力を使用しているため、完了または失敗後に変更してください。",
+        "active_job_ids": list(exc.active_job_ids),
+    }), 409
 
 
 def _input_write_blocked_response(exc: ResearchInputWriteBlocked):
