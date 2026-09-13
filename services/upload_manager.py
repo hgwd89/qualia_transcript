@@ -9,6 +9,7 @@ from uuid import uuid4
 import config
 from models import db
 from models.interview import Interview, MediaFile
+from services.managed_write_commit_guard import open_managed_write_commit_guard
 from services.storage_paths import (
     ensure_managed_id_dir,
     open_managed_file_for_create,
@@ -65,9 +66,6 @@ def _file_generation(info: os.stat_result) -> tuple[int, int, int, int, int, int
 
 
 def media_extension(original_filename: str) -> str:
-    # The original name is metadata only; the stored filename is always a UUID.
-    # Inspect the original Unicode extension directly so names such as
-    # "インタビュー音声.mp3" do not lose their suffix through ASCII sanitization.
     normalized = str(original_filename or "").replace("\\", "/")
     basename = normalized.rsplit("/", 1)[-1]
     ext = Path(basename).suffix.lower()
@@ -97,18 +95,33 @@ def _discard_target_if_same_generation(
     target: MediaUploadTarget,
     expected: os.stat_result | None,
 ) -> None:
-    """Best-effort cleanup without unlinking a pathname-replacement successor."""
+    """Best-effort cleanup through a re-pinned exact-generation guard."""
     if expected is None:
         return
+    guard = None
     try:
-        path = _resolve_stored_path(target.stored_path)
-        if path != Path(target.full_path).resolve() or not path.is_file():
-            return
-        if _file_generation(path.stat()) != _file_generation(expected):
-            return
-        path.unlink(missing_ok=True)
+        guard = open_managed_write_commit_guard(
+            config.UPLOAD_DIR,
+            target.stored_path,
+            expected,
+        )
+        guard.discard()
     except (OSError, ValueError):
         pass
+    finally:
+        if guard is not None:
+            guard.close()
+
+
+def _compensate_committed_media(media: MediaFile) -> None:
+    try:
+        db.session.delete(media)
+        db.session.commit()
+    except Exception as cleanup_exc:
+        db.session.rollback()
+        raise RuntimeError(
+            "uploaded media namespace changed during DB commit and compensating row deletion failed"
+        ) from cleanup_exc
 
 
 def save_and_register_media(
@@ -118,19 +131,23 @@ def save_and_register_media(
     original_filename: str,
     mime_type: str | None = None,
 ) -> MediaFile:
-    """Save media and atomically commit its DB metadata as far as one DB allows.
+    """Save media and commit metadata while the written generation stays pinned.
 
-    Filesystem and database cannot share one transaction. The function therefore
-    removes a partial/saved upload whenever file saving or the DB commit fails, but
-    rollback cleanup is allowed to unlink only the exact generation written by this
-    call. The upload itself is created through the ancestry-pinned managed write
-    boundary rather than reopening a validated pathname.
+    The upload is created through the ancestry-pinned write boundary. After the
+    writer closes, a commit guard re-pins that exact generation and its current
+    ancestry for the full database commit window. Namespace replacement before the
+    guard is rejected; replacement during commit is detected by post-commit
+    verification, the just-created MediaFile row is compensated, and cleanup is
+    limited to the pinned original generation rather than the replacement path.
     """
     if interview.id is None:
         raise ValueError("interview must be flushed before media upload")
 
     target = prepare_media_upload_target(interview.id, original_filename)
     written_stat = None
+    guard = None
+    media = None
+    committed = False
     try:
         opened = open_managed_file_for_create(config.UPLOAD_DIR, target.stored_path)
         try:
@@ -149,13 +166,12 @@ def save_and_register_media(
         if written_stat is None:
             raise RuntimeError("uploaded media write did not complete")
 
-        full_path = _resolve_stored_path(target.stored_path)
-        if full_path != Path(target.full_path).resolve():
-            raise ValueError("uploaded media target path changed")
-        if not full_path.is_file():
-            raise FileNotFoundError("uploaded media file was not created")
-        if _file_generation(full_path.stat()) != _file_generation(written_stat):
-            raise ValueError("uploaded media target changed after write")
+        guard = open_managed_write_commit_guard(
+            config.UPLOAD_DIR,
+            target.stored_path,
+            written_stat,
+        )
+        guard.verify_namespace()
 
         media = MediaFile(
             interview_id=int(interview.id),
@@ -171,11 +187,32 @@ def save_and_register_media(
         )
         db.session.add(media)
         db.session.commit()
+        committed = True
+
+        try:
+            guard.verify_namespace()
+        except Exception as namespace_exc:
+            _compensate_committed_media(media)
+            try:
+                guard.discard()
+            except (OSError, ValueError):
+                pass
+            raise namespace_exc
         return media
     except Exception:
-        db.session.rollback()
-        _discard_target_if_same_generation(target, written_stat)
+        if not committed:
+            db.session.rollback()
+            if guard is not None:
+                try:
+                    guard.discard()
+                except (OSError, ValueError):
+                    pass
+            else:
+                _discard_target_if_same_generation(target, written_stat)
         raise
+    finally:
+        if guard is not None:
+            guard.close()
 
 
 def create_media_read_snapshot(media: MediaFile) -> MediaReadSnapshot:
