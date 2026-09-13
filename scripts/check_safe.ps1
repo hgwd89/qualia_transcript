@@ -39,6 +39,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] media upload integrity smoke checks passed."
 
+Write-Host "[INFO] Running production transcription dispatch fencing smoke check..."
+python tests/smoke_transcription_dispatch_fencing.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] production transcription dispatch fencing smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] production transcription dispatch fencing smoke checks passed."
+
 Write-Host "[INFO] Running linked managed-storage guard smoke check..."
 python tests/smoke_linked_storage_guards.py
 if ($LASTEXITCODE -ne 0) {

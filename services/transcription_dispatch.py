@@ -34,13 +34,16 @@ def run_transcription(
     lease_check: LeaseCheck | None = None,
     result_write_guard: ResultWriteGuard | None = None,
 ) -> dict:
-    """Run transcription with fallback cleanup and optional durable-job fencing.
+    """Run transcription with fallback cleanup and durable-job fencing.
 
     OpenAI long-audio mode commits successful chunks incrementally. Before local
     fallback, those partial rows must be discarded or the local result would be
-    appended to the same transcription. When a durable worker loses its lease,
-    any rows committed by that stale transcription attempt are invalidated before
-    control returns to the worker layer.
+    appended to the same transcription. The production dispatcher must preserve
+    the same lease/result-write callbacks all the way into the selected provider.
+
+    Cleanup is itself a canonical DB write. Acquire the stronger result-write
+    reservation before deleting partial OpenAI rows so recovery/retry cannot take
+    ownership between the lease check and the cleanup commit.
     """
     _check_or_invalidate(transcription_id, lease_check)
     provider = get_transcription_provider()
@@ -57,11 +60,14 @@ def run_transcription(
             if get_fallback_provider() != "local_whisper":
                 raise
 
+            if result_write_guard is not None:
+                result_write_guard()
             discarded = discard_transcription_segments(transcription_id)
             _check_or_invalidate(transcription_id, lease_check)
             try:
                 result = run_local_whisper_transcription(
                     transcription_id,
+                    lease_check=lease_check,
                     result_write_guard=result_write_guard,
                 )
             except Exception:
@@ -80,6 +86,7 @@ def run_transcription(
     try:
         result = run_local_whisper_transcription(
             transcription_id,
+            lease_check=lease_check,
             result_write_guard=result_write_guard,
         )
     except Exception:
