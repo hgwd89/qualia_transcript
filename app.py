@@ -130,6 +130,57 @@ def _install_participant_code_guards():
     db.session.commit()
 
 
+def _install_question_code_guards():
+    """Prevent new duplicate question codes within one interview flow on SQLite.
+
+    Question rows point to sections rather than directly to flows, so a normal
+    table-local UNIQUE constraint cannot express the research identity boundary.
+    Non-destructive triggers join through the section table and preserve any
+    historical duplicate rows for readiness tooling to surface explicitly.
+    """
+    from sqlalchemy import text
+
+    if db.engine.dialect.name != "sqlite":
+        return
+
+    db.session.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS trg_question_code_insert
+        BEFORE INSERT ON interview_flow_questions
+        WHEN NEW.question_code IS NOT NULL
+          AND TRIM(NEW.question_code) <> ''
+          AND EXISTS (
+              SELECT 1
+              FROM interview_flow_questions q
+              JOIN interview_flow_sections existing_sec ON existing_sec.id = q.section_id
+              JOIN interview_flow_sections new_sec ON new_sec.id = NEW.section_id
+              WHERE existing_sec.flow_id = new_sec.flow_id
+                AND q.question_code = NEW.question_code
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'question_code must be unique within flow');
+        END
+    """))
+    db.session.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS trg_question_code_update
+        BEFORE UPDATE OF section_id, question_code ON interview_flow_questions
+        WHEN NEW.question_code IS NOT NULL
+          AND TRIM(NEW.question_code) <> ''
+          AND EXISTS (
+              SELECT 1
+              FROM interview_flow_questions q
+              JOIN interview_flow_sections existing_sec ON existing_sec.id = q.section_id
+              JOIN interview_flow_sections new_sec ON new_sec.id = NEW.section_id
+              WHERE existing_sec.flow_id = new_sec.flow_id
+                AND q.question_code = NEW.question_code
+                AND q.id <> OLD.id
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'question_code must be unique within flow');
+        END
+    """))
+    db.session.commit()
+
+
 def _run_migrations(app):
     """
     既存 SQLite DB への後付けカラム追加。
@@ -234,6 +285,12 @@ def _run_migrations(app):
 
         if "participants" in existing_tables:
             _install_participant_code_guards()
+
+        if {
+            "interview_flow_sections",
+            "interview_flow_questions",
+        }.issubset(existing_tables):
+            _install_question_code_guards()
 
 
 def create_app():
