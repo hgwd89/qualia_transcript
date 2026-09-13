@@ -118,6 +118,7 @@ def main() -> int:
                 raw_dir = Path(config.OUTPUT_DIR) / "raw_transcripts"
                 raw_snapshot = raw_dir / f"transcription_{transcription_id}_source.json"
                 raw_manifest = raw_dir / f"transcription_{transcription_id}_manifest.json"
+                legacy_snapshot = raw_dir / f"transcription_{transcription_id}_legacy.json"
                 snapshot_bytes = write_snapshot(
                     raw_snapshot,
                     transcription_id=transcription_id,
@@ -131,6 +132,13 @@ def main() -> int:
                     interview_id=interview_id,
                     created_at_utc="2026-09-13T00:06:00+00:00",
                     manifest=True,
+                )
+                legacy_bytes = write_snapshot(
+                    legacy_snapshot,
+                    transcription_id=transcription_id,
+                    interview_id=interview_id,
+                    created_at_utc="2026-09-12T23:55:00+00:00",
+                    text="legacy source outside current generation",
                 )
 
                 delete_project(project)
@@ -152,24 +160,30 @@ def main() -> int:
                 tombstone_by_name = {str(row["snapshot_name"]): row for row in tombstones}
                 snapshot_tombstone = tombstone_by_name.get(raw_snapshot.name)
                 manifest_tombstone = tombstone_by_name.get(raw_manifest.name)
+                legacy_tombstone = tombstone_by_name.get(legacy_snapshot.name)
                 failures += check(
                     "project deletion retains immutable raw source bytes",
                     raw_snapshot.read_bytes() == snapshot_bytes
-                    and raw_manifest.read_bytes() == manifest_bytes,
+                    and raw_manifest.read_bytes() == manifest_bytes
+                    and legacy_snapshot.read_bytes() == legacy_bytes,
                 )
                 failures += check(
-                    "project deletion persists stable owner tombstones for raw source and manifest",
+                    "project deletion tombstones current, manifest, and legacy out-of-generation source",
                     snapshot_tombstone is not None
                     and manifest_tombstone is not None
+                    and legacy_tombstone is not None
                     and snapshot_tombstone["owner_token"]
                     == manifest_tombstone["owner_token"]
+                    == legacy_tombstone["owner_token"]
                     and int(snapshot_tombstone["project_id"]) == project_id
                     and int(snapshot_tombstone["interview_id"]) == interview_id
                     and int(snapshot_tombstone["transcription_id"]) == transcription_id
                     and snapshot_tombstone["snapshot_sha256"]
                     == hashlib.sha256(snapshot_bytes).hexdigest()
                     and manifest_tombstone["snapshot_sha256"]
-                    == hashlib.sha256(manifest_bytes).hexdigest(),
+                    == hashlib.sha256(manifest_bytes).hexdigest()
+                    and legacy_tombstone["snapshot_sha256"]
+                    == hashlib.sha256(legacy_bytes).hexdigest(),
                     str([dict(row) for row in tombstones]),
                 )
 
@@ -237,8 +251,11 @@ def main() -> int:
                     tombstoned_names,
                 )
                 failures += check(
-                    "stable owner tombstone rejects predecessor even with identical IDs and generation times",
-                    replacement_transcription_id in missing and not invalid,
+                    "stable owner tombstones reject retained predecessors after identical ID reuse",
+                    replacement_transcription_id in missing
+                    and raw_snapshot.name in tombstoned_names
+                    and legacy_snapshot.name in tombstoned_names
+                    and not invalid,
                     f"missing={missing} tombstones={sorted(tombstoned_names)} invalid={invalid}",
                 )
 
