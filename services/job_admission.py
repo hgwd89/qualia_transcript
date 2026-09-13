@@ -19,6 +19,7 @@ _JOB_SCOPE = {
     "transcribe": (True, False),
     "map": (True, False),
     "analyze": (True, False),
+    "analyze_semantic": (True, False),
     "analyze_question": (True, True),
     "analyze_cross": (False, True),
     "analyze_integrated": (False, False),

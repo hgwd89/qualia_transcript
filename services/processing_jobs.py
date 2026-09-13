@@ -16,7 +16,7 @@ from models.processing_job import ProcessingJob
 
 
 ACTIVE_STATUSES = {"pending", "running"}
-JOB_TYPES = {"transcribe", "map", "analyze", "analyze_question", "analyze_cross", "analyze_integrated", "project_pipeline"}
+JOB_TYPES = {"transcribe", "map", "analyze", "analyze_semantic", "analyze_question", "analyze_cross", "analyze_integrated", "project_pipeline"}
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
 _LAUNCH_RESERVED_PID = 0
 
@@ -617,6 +617,44 @@ def _perform_integrated_analysis(job: ProcessingJob) -> dict:
     return {"analysis_id": analysis.id}
 
 
+def _perform_semantic_analysis(
+    job: ProcessingJob,
+    *,
+    max_segments: int | None = None,
+    no_ai: bool = False,
+) -> dict:
+    from models.interview import Interview
+    from services.processing_result_guard import find_completed_analysis_for_scope
+    from services.semantic_analysis import run_semantic_cluster_analysis
+
+    interview = db.session.get(Interview, job.interview_id)
+    if not interview or interview.project_id != job.project_id:
+        raise ValueError("interview not found in job project")
+
+    existing = find_completed_analysis_for_scope(job, "semantic_clusters")
+    if existing:
+        update_progress(job, "analyzing_semantic", analysis_id=existing.id, already_done=True)
+        return {"analysis_id": existing.id, "already_done": True}
+
+    update_progress(job, "analyzing_semantic")
+    result = run_semantic_cluster_analysis(
+        interview.id,
+        save=True,
+        max_segments=max_segments,
+        no_ai=no_ai,
+        result_write_guard=lambda: begin_job_result_write(job),
+    )
+    analysis_id = result.get("saved_analysis_id")
+    if not analysis_id:
+        raise RuntimeError("semantic analysis completed without a saved AIAnalysis row")
+    return {
+        "analysis_id": int(analysis_id),
+        "cluster_count": int(result.get("cluster_count") or 0),
+        "embedding_api_call_count": int(result.get("embedding_api_call_count") or 0),
+        "summary_api_call_count": int(result.get("summary_api_call_count") or 0),
+    }
+
+
 def _perform_project_pipeline(job: ProcessingJob) -> dict:
     from services.project_pipeline import run_project_pipeline
 
@@ -645,6 +683,7 @@ def execute_job(
         "transcribe": _perform_transcription,
         "map": _perform_mapping,
         "analyze": _perform_analysis,
+        "analyze_semantic": _perform_semantic_analysis,
         "analyze_question": _perform_question_analysis,
         "analyze_cross": _perform_cross_analysis,
         "analyze_integrated": _perform_integrated_analysis,

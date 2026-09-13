@@ -185,6 +185,10 @@ def find_completed_result_for_active_job(job: ProcessingJob) -> dict | None:
         analysis = find_completed_analysis_for_job(job)
         if analysis is not None:
             result = {"analysis_id": int(analysis.id)}
+    elif job.job_type == "analyze_semantic":
+        analysis = find_completed_analysis_for_scope(job, "semantic_clusters")
+        if analysis is not None:
+            result = {"analysis_id": int(analysis.id)}
     elif job.job_type == "analyze_question":
         analysis = find_completed_analysis_for_scope(job, "per_question")
         if analysis is not None:
