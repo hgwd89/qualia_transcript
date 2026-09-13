@@ -59,13 +59,23 @@ def resolve_pipeline_interview_flow(project, interview) -> tuple[InterviewFlow, 
 
 
 def resolve_integrated_analysis_scope(project) -> IntegratedAnalysisScope:
-    """Resolve one evidence-complete flow for project integrated analysis.
+    """Resolve the one supported source flow for project integrated analysis.
 
-    Integrated analysis is currently a single-flow artifact. Unused draft flow
-    definitions do not create ambiguity, but every participant interview must be
-    mapped-or-later, have an explicit flow, and share the same flow. This prevents
-    silent participant omission and arbitrary `project.interview_flows[0]` use.
+    The current integrated artifact persists exactly one `source_flow_id`. It must
+    therefore never guess among multiple configured flow versions. Every
+    participant interview must also be mapped-or-later and explicitly belong to
+    that sole flow, preventing silent participant omission before provider work.
     """
+    try:
+        flow = resolve_only_configured_flow(project)
+    except ProjectFlowScopeError as exc:
+        if exc.code == "ambiguous_flow_assignment":
+            raise ProjectFlowScopeError(
+                "integrated_multiple_configured_flows",
+                "複数のインタビューフローがあるため、現在の単一フロー統合分析は実行できません",
+            ) from exc
+        raise
+
     target_interviews = [
         interview
         for interview in project.interviews
@@ -89,6 +99,18 @@ def resolve_integrated_analysis_scope(project) -> IntegratedAnalysisScope:
             interview_ids=missing_flow_ids,
         )
 
+    wrong_flow_ids = [
+        int(interview.id)
+        for interview in target_interviews
+        if int(interview.flow_id) != int(flow.id)
+    ]
+    if wrong_flow_ids:
+        raise ProjectFlowScopeError(
+            "integrated_interview_flow_mismatch",
+            "統合分析対象のインタビューが同一フローに揃っていません",
+            interview_ids=wrong_flow_ids,
+        )
+
     incomplete_ids = [
         int(interview.id)
         for interview in target_interviews
@@ -99,26 +121,6 @@ def resolve_integrated_analysis_scope(project) -> IntegratedAnalysisScope:
             "integrated_interview_not_mapped",
             "全対象インタビューのマッピング完了後に統合分析を実行してください",
             interview_ids=incomplete_ids,
-        )
-
-    flow_ids = {int(interview.flow_id) for interview in target_interviews}
-    if len(flow_ids) != 1:
-        raise ProjectFlowScopeError(
-            "integrated_multiple_flows",
-            "複数フローのインタビューが混在しているため、統合分析の対象フローを一意に決められません",
-            interview_ids=[int(interview.id) for interview in target_interviews],
-        )
-
-    flow_id = next(iter(flow_ids))
-    flow = next(
-        (candidate for candidate in project.interview_flows if int(candidate.id) == flow_id),
-        None,
-    )
-    if flow is None:
-        raise ProjectFlowScopeError(
-            "integrated_flow_project_mismatch",
-            "インタビューがこのプロジェクトに属さないフローを参照しています",
-            interview_ids=[int(interview.id) for interview in target_interviews],
         )
 
     return IntegratedAnalysisScope(
