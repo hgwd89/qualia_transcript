@@ -127,7 +127,10 @@ def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
     Nested acquisition is allowed only for the same lock mode in the same process.
     This lets applied restore invoke a pre-restore backup while retaining one
     exclusive maintenance boundary and lets a reader path enter a write helper
-    without dropping the shared runtime reservation.
+    without dropping the shared runtime reservation. Nested exit only decrements
+    the reference count; it must never return from the generator's ``finally``
+    block because doing so would suppress an exception raised inside the nested
+    ``with`` body.
     """
     mode = _role_mode(role)
     path = Path(lock_path).resolve() if lock_path else _default_lock_path()
@@ -164,17 +167,15 @@ def runtime_lock(role: str, lock_path: str | os.PathLike | None = None):
     finally:
         with _STATE_GUARD:
             current = _HELD.get(key)
-            if current is None:
-                return
-            current["count"] = int(current["count"]) - 1
-            if int(current["count"]) > 0:
-                return
-            handle = current["handle"]
-            offset = int(current["offset"])
-            length = int(current["length"])
-            _HELD.pop(key, None)
-            _unlock_range(handle, offset, length)
-            handle.close()
+            if current is not None:
+                current["count"] = int(current["count"]) - 1
+                if int(current["count"]) <= 0:
+                    handle = current["handle"]
+                    offset = int(current["offset"])
+                    length = int(current["length"])
+                    _HELD.pop(key, None)
+                    _unlock_range(handle, offset, length)
+                    handle.close()
 
 
 def hold_runtime_lock_for_process(
