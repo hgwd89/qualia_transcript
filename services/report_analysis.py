@@ -132,7 +132,10 @@ def generate_analysis_csv(project_id: int) -> GeneratedFile:
         writer.writerows(rows)
         text_stream.flush()
     finally:
-        text_stream.close()
+        try:
+            text_stream.detach()
+        except (OSError, ValueError):
+            pass
         opened.close()
 
     return register_generated_file(
