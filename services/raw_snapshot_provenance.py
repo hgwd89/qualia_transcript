@@ -16,8 +16,6 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
-from services.readiness_validation import raw_snapshot_matches_transcription_generation
-
 
 TABLE_NAME = "raw_snapshot_tombstones"
 
@@ -55,6 +53,13 @@ def stage_project_raw_snapshot_tombstones(
     deleted owner. This is important when SQLite later reuses the same integer IDs
     and even the same transcription timestamps: a subsequent deletion must never
     rebind that retained historical source to the replacement row.
+
+    Every parseable retained JSON whose transcription/interview IDs currently
+    resolve to the project being deleted is tombstoned, even when its timestamp is
+    outside the current transcription generation. Such a file may be legacy or
+    already ambiguous because of historical ID reuse; excluding it permanently is
+    safer than allowing a later reused ID/generation window to reclassify it as a
+    current snapshot.
     """
     project_id = int(project_id)
     ensure_raw_snapshot_tombstone_table(session)
@@ -97,18 +102,22 @@ def stage_project_raw_snapshot_tombstones(
             snapshot_bytes = path.read_bytes()
             payload = json.loads(snapshot_bytes.decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            # Malformed source remains untouched. Readiness already reports such
-            # files; without trustworthy metadata it cannot be safely attributed.
+            # Malformed source remains untouched. Readiness reports it as invalid;
+            # without trustworthy owner IDs it cannot be safely attributed here.
             continue
         if not isinstance(payload, dict):
             continue
         transcription_id = payload.get("transcription_id")
-        if not isinstance(transcription_id, int) or isinstance(transcription_id, bool):
+        interview_id = payload.get("interview_id")
+        if (
+            not isinstance(transcription_id, int)
+            or isinstance(transcription_id, bool)
+            or not isinstance(interview_id, int)
+            or isinstance(interview_id, bool)
+        ):
             continue
         row = by_transcription.get(int(transcription_id))
-        if row is None:
-            continue
-        if not raw_snapshot_matches_transcription_generation(payload, row):
+        if row is None or int(interview_id) != int(row["interview_id"]):
             continue
 
         session.execute(
