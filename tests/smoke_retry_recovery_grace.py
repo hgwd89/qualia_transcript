@@ -4,6 +4,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 
 def check(name: str, ok: bool, detail: str = "") -> int:
@@ -52,6 +53,7 @@ def main() -> int:
             from services.job_admission import admit_retry_job
             from services.job_recovery import (
                 ACTIVE_WITHOUT_WORKER_GRACE,
+                _mark_job_failed_if_unchanged,
                 recover_stale_jobs,
                 stale_reason,
             )
@@ -120,6 +122,76 @@ def main() -> int:
                     "normal recovery pass does not fail a just-retried old job",
                     not recovered and retried.status == "pending",
                     f"recovered={[item.id for item in recovered]} status={retried.status!r}",
+                )
+
+                # Reproduce an ABA window while no worker has claimed the durable
+                # row yet. attempt_count does not increment until worker claim, so
+                # two retry admissions can otherwise look identical to a stale
+                # recovery observer unless started_at participates in the CAS.
+                aba_project = Project(name="Retry recovery ABA")
+                db.session.add(aba_project)
+                db.session.flush()
+                aba_job = ProcessingJob(
+                    project_id=aba_project.id,
+                    job_type="project_pipeline",
+                    status="failed",
+                    progress_json='{"stage":"failed"}',
+                    error_message="first failure",
+                    attempt_count=4,
+                    created_at=datetime.now(timezone.utc) - timedelta(hours=3),
+                    started_at=datetime.now(timezone.utc) - timedelta(hours=2),
+                    finished_at=datetime.now(timezone.utc) - timedelta(hours=1),
+                )
+                db.session.add(aba_job)
+                db.session.commit()
+                aba_job_id = int(aba_job.id)
+
+                first_aba_admission = admit_retry_job(aba_job_id)
+                db.session.expire_all()
+                first_pending = db.session.get(ProcessingJob, aba_job_id)
+                first_anchor = first_pending.started_at
+                observed = SimpleNamespace(
+                    id=aba_job_id,
+                    status=first_pending.status,
+                    attempt_count=int(first_pending.attempt_count or 0),
+                    worker_pid=first_pending.worker_pid,
+                    started_at=first_anchor,
+                )
+
+                first_pending.status = "failed"
+                first_pending.progress_json = '{"stage":"failed"}'
+                first_pending.error_message = "second pre-claim failure"
+                first_pending.finished_at = datetime.now(timezone.utc)
+                db.session.commit()
+
+                second_aba_admission = admit_retry_job(aba_job_id)
+                db.session.expire_all()
+                second_pending = db.session.get(ProcessingJob, aba_job_id)
+                second_anchor = second_pending.started_at
+
+                _current, stale_changed = _mark_job_failed_if_unchanged(
+                    observed,
+                    "stale recovery observation from previous retry",
+                )
+                db.session.expire_all()
+                after_stale_cas = db.session.get(ProcessingJob, aba_job_id)
+                failures += check(
+                    "recovery CAS rejects a prior retry after failed-pending ABA reuse",
+                    first_aba_admission.created
+                    and second_aba_admission.created
+                    and first_anchor is not None
+                    and second_anchor is not None
+                    and first_anchor != second_anchor
+                    and not stale_changed
+                    and after_stale_cas.status == "pending"
+                    and after_stale_cas.started_at == second_anchor
+                    and int(after_stale_cas.attempt_count or 0) == 4
+                    and after_stale_cas.worker_pid is None,
+                    (
+                        f"first={first_anchor!r} second={second_anchor!r} "
+                        f"changed={stale_changed} status={after_stale_cas.status!r} "
+                        f"attempt={after_stale_cas.attempt_count!r} pid={after_stale_cas.worker_pid!r}"
+                    ),
                 )
 
                 retried.worker_pid = 0
