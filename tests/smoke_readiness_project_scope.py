@@ -128,19 +128,25 @@ def create_fixture(db_path: Path) -> None:
             "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status, progress_json) "
             "VALUES (2, 2, 2, NULL, 'analyze', 'running', '{\"stage\":\"analyzing\"}')"
         )
-        # All referenced IDs below exist, so these are semantic scope violations,
-        # not ordinary FK/orphan failures.
+
+        # Fill the global diagnostic sample with 205 FK-valid semantic violations
+        # from project 2. Project 1's invalid rows are intentionally assigned
+        # larger IDs so they sort beyond the global 200-row display cap.
+        for job_id in range(10, 215):
+            con.execute(
+                "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status) "
+                "VALUES (?, 2, NULL, 1, 'analyze_cross', 'succeeded')",
+                (job_id,),
+            )
+
+        # Both rows are project 1 semantic violations whose referenced IDs exist.
         con.execute(
             "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status) "
-            "VALUES (3, 1, 1, 3, 'analyze_question', 'succeeded')"
+            "VALUES (300, 1, 1, 3, 'analyze_question', 'succeeded')"
         )
         con.execute(
             "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status) "
-            "VALUES (4, 1, 2, NULL, 'map', 'succeeded')"
-        )
-        con.execute(
-            "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status) "
-            "VALUES (5, 2, NULL, 1, 'analyze_cross', 'succeeded')"
+            "VALUES (301, 1, 2, NULL, 'map', 'succeeded')"
         )
         con.commit()
     finally:
@@ -199,27 +205,35 @@ def main() -> int:
             f"blockers={global_blockers} warnings={global_warnings}",
         )
         failures += check(
-            "database-wide audit blocks semantic processing-job scope violations",
+            "database-wide audit keeps exact scope count while capping diagnostic rows",
             "processing_job_scope_invalid" in global_blockers
-            and global_report.get("info", {}).get("processing_job_scope_invalid_count") == 3
-            and {int(job["id"]) for job in global_scope_jobs} == {3, 4, 5},
-            str(global_scope_jobs),
+            and global_report.get("info", {}).get("processing_job_scope_invalid_count") == 207
+            and len(global_scope_jobs) == 200
+            and all(int(job["project_id"]) == 2 for job in global_scope_jobs)
+            and not ({300, 301} & {int(job["id"]) for job in global_scope_jobs}),
+            f"count={global_report.get('info', {}).get('processing_job_scope_invalid_count')} sample_tail={global_scope_jobs[-3:]}",
         )
         failures += check(
-            "scope audit identifies wrong-flow and cross-project ownership reasons",
+            "project-scoped audit keeps target blockers beyond global display cap",
+            "processing_job_scope_invalid" in target_blockers
+            and target_report.get("info", {}).get("processing_job_scope_invalid_count") == 2
+            and {int(job["id"]) for job in target_scope_jobs} == {300, 301}
+            and all(int(job["project_id"]) == 1 for job in target_scope_jobs),
+            str(target_scope_jobs),
+        )
+        failures += check(
+            "target scope preserves wrong-flow and cross-project ownership reasons",
             any(
-                int(job["id"]) == 3 and "question_wrong_interview_flow" in job.get("reasons", [])
-                for job in global_scope_jobs
+                int(job["id"]) == 300
+                and "question_wrong_interview_flow" in job.get("reasons", [])
+                for job in target_scope_jobs
             )
             and any(
-                int(job["id"]) == 4 and "interview_cross_project" in job.get("reasons", [])
-                for job in global_scope_jobs
-            )
-            and any(
-                int(job["id"]) == 5 and "question_cross_project" in job.get("reasons", [])
-                for job in global_scope_jobs
+                int(job["id"]) == 301
+                and "interview_cross_project" in job.get("reasons", [])
+                for job in target_scope_jobs
             ),
-            str(global_scope_jobs),
+            str(target_scope_jobs),
         )
         failures += check(
             "project-scoped audit excludes unrelated project content defects",
@@ -230,18 +244,11 @@ def main() -> int:
             f"blockers={target_blockers} warnings={target_warnings}",
         )
         failures += check(
-            "project-scoped audit keeps only target project's processing-job blockers",
-            "processing_job_scope_invalid" in target_blockers
-            and target_report.get("info", {}).get("processing_job_scope_invalid_count") == 2
-            and {int(job["id"]) for job in target_scope_jobs} == {3, 4}
-            and all(int(job["project_id"]) == 1 for job in target_scope_jobs),
-            str(target_scope_jobs),
-        )
-        failures += check(
-            "second project receives only its own job-scope blocker and active job warning",
+            "second project keeps exact scope count with bounded samples",
             "processing_job_scope_invalid" in other_blockers
-            and other_report.get("info", {}).get("processing_job_scope_invalid_count") == 1
-            and {int(job["id"]) for job in other_scope_jobs} == {5}
+            and other_report.get("info", {}).get("processing_job_scope_invalid_count") == 205
+            and {int(job["id"]) for job in other_scope_jobs} == {10, 11, 12, 13, 14}
+            and all(int(job["project_id"]) == 2 for job in other_scope_jobs)
             and "active_processing_jobs" in other_warnings
             and other_report.get("info", {}).get("active_processing_job_count") == 1,
             f"scope_jobs={other_scope_jobs} warnings={other_warnings}",
