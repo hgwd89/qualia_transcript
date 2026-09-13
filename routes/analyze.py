@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from flask import Blueprint, jsonify
 
 from models import db
@@ -7,7 +5,7 @@ from models.interview import Interview
 from models.interview_flow import InterviewFlowQuestion
 from models.processing_job import ProcessingJob
 from services.job_admission import admit_processing_job
-from services.processing_jobs import launch_job_worker
+from services.worker_launch_guard import launch_job_or_preserve_active
 
 bp = Blueprint("analyze", __name__)
 
@@ -34,19 +32,7 @@ def _queued_response(job: ProcessingJob, *, created: bool, worker_pid=None):
 
 
 def _launch_or_fail(job: ProcessingJob):
-    try:
-        return launch_job_worker(job.id), None
-    except Exception as exc:
-        db.session.rollback()
-        current = db.session.get(ProcessingJob, job.id)
-        if current:
-            current.status = "failed"
-            current.error_message = f"worker launch failed: {exc}"[:4000]
-            current.finished_at = datetime.now(timezone.utc)
-            current.worker_pid = None
-            db.session.add(current)
-            db.session.commit()
-        return None, exc
+    return launch_job_or_preserve_active(job)
 
 
 def _queue_analysis_job(
