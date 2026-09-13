@@ -77,3 +77,6 @@ jobs:
 
       - name: Run raw snapshot storage fencing regression
         run: python tests/smoke_raw_snapshot_storage_fencing.py
+
+      - name: Run question identity/evidence-scope regression
+        run: python tests/smoke_question_code_identity.py
