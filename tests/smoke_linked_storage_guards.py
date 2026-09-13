@@ -42,6 +42,8 @@ def main() -> int:
     original_upload = config.UPLOAD_DIR
     original_detector = storage_paths.is_link_or_reparse
     original_os_open = storage_paths.os.open
+    original_supports_pinned = storage_paths._supports_pinned_posix_read
+    supports_pinned_posix = original_supports_pinned()
 
     with tempfile.TemporaryDirectory(prefix="qualia_link_guard_") as tmp:
         root = Path(tmp)
@@ -69,7 +71,7 @@ def main() -> int:
                 == b"inside-managed-file",
             )
 
-            if storage_paths._supports_pinned_posix_read():
+            if supports_pinned_posix:
                 race_target = prepare_output_target(3, "race.bin")
                 race_path = Path(race_target.full_path)
                 race_path.write_bytes(b"pinned-inside")
@@ -93,6 +95,9 @@ def main() -> int:
                         swapped = True
                     return original_os_open(path, flags, *args, **kwargs)
 
+                # Monkeypatching storage_paths.os.open mutates the shared os module,
+                # so preserve the capability decision made with the real os.open.
+                storage_paths._supports_pinned_posix_read = lambda: supports_pinned_posix
                 storage_paths.os.open = racing_open
                 try:
                     raced_data = read_and_close(
@@ -103,6 +108,7 @@ def main() -> int:
                     )
                 finally:
                     storage_paths.os.open = original_os_open
+                    storage_paths._supports_pinned_posix_read = original_supports_pinned
                     if id_dir.is_symlink():
                         id_dir.unlink()
                     if saved_dir.exists():
@@ -140,6 +146,7 @@ def main() -> int:
             )
         finally:
             storage_paths.os.open = original_os_open
+            storage_paths._supports_pinned_posix_read = original_supports_pinned
             storage_paths.is_link_or_reparse = original_detector
             config.OUTPUT_DIR = original_output
             config.UPLOAD_DIR = original_upload
@@ -157,9 +164,9 @@ def main() -> int:
         and "_open_posix_directory_chain" in helper_source,
     )
     failures += check(
-        "Windows managed reads pin components without delete sharing",
+        "Windows managed reads deny write/delete sharing while pinning components",
         "file_flag_open_reparse_point = 0x00200000" in helper_source
-        and "Deliberately omit FILE_SHARE_DELETE" in helper_source
+        and "Omitting both FILE_SHARE_WRITE and FILE_SHARE_DELETE" in helper_source
         and "_open_windows_directory_chain" in helper_source,
     )
 
