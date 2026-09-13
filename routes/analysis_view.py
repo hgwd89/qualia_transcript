@@ -39,6 +39,7 @@ def _parse(a: AIAnalysis) -> dict:
             flow_label = str(flow.title or f"Flow {flow.id}")
             if flow.version:
                 flow_label += f" v{flow.version}"
+            flow_label += f" [flow_id:{int(flow.id)}]"
             suffix = f" — {flow_label}"
             if suffix not in str(a.title or ""):
                 a.title = f"{a.title or '横断分析'}{suffix}"
@@ -142,7 +143,7 @@ def index(project_id):
                     "obj": question,
                     "section_title": section.title,
                     "flow_id": int(flow.id),
-                    "flow_title": flow.title,
+                    "flow_title": f"{flow.title or f'Flow #{int(flow.id)}'} [flow_id:{int(flow.id)}]",
                     "flow_version": flow.version,
                 })
 
