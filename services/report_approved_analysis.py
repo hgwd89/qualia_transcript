@@ -11,8 +11,7 @@ from models.generated_file import GeneratedFile
 from models.project import Project
 from services.file_manager import (
     prepare_output_target,
-    register_generated_file,
-    write_output_target,
+    write_and_register_generated_file,
 )
 
 
@@ -183,15 +182,15 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"承認済AI分析_{project.name}_{ts}.xlsx"
     target = prepare_output_target(project_id, filename)
-    write_output_target(target, wb.save)
 
     params = {
         "approved_only": True,
         "analysis_count": len(summary_rows) - 1,
         "finding_count": finding_count,
     }
-    return register_generated_file(
+    return write_and_register_generated_file(
         target,
+        wb.save,
         project_id=project_id,
         file_type="approved_analysis",
         file_format="xlsx",
