@@ -19,7 +19,7 @@ From the repository root:
 python scripts/backup_local_data.py --label before_major_change
 ```
 
-The default destination is `backups/`. The command does not merely copy the live SQLite file: it creates a SQLite-consistent snapshot, builds the archive, then reopens and validates the archive.
+The default destination is `backups/`. The command does not merely copy the live SQLite file: it creates a SQLite-consistent snapshot, builds the archive into an owner-private hidden `.partial` file in the destination directory, reopens and fully validates those exact bytes, and only then atomically publishes the file under the official `qualia_backup_....zip` name. A write, validation, or publish failure therefore cannot leave an unverified archive looking like a completed backup.
 
 A backup is considered valid only when:
 
@@ -58,13 +58,15 @@ The `--apply --yes` pair is intentionally required. `--apply` without `--yes` is
 - Keep at least one verified backup outside the working repository/device for projects that cannot be reconstructed from source media.
 - After restore, run `scripts/check_local_data_integrity.ps1` before resuming production work.
 - If a restore fails after changes begin, the restore service attempts to roll the DB/uploads/outputs back to the state captured immediately before replacement; the pre-restore ZIP is an additional recovery point.
+- Hidden `.partial` files are never valid backups. They are private construction artifacts from interrupted/failed creation and must not be treated as recovery points.
 
 ## Regression check
 
-The implementation is covered by a temporary-data round-trip smoke test:
+The implementation is covered by temporary-data smoke tests:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/check_local_production.ps1
+powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
 
-It verifies runtime defaults, portable launcher behavior, backup creation, validation-only behavior, DB/file round-trip restore, removal of stale files, tamper detection, and rejection of files not declared in the manifest. It does not call OpenAI, Whisper, or any external API.
+They verify runtime defaults, portable launcher behavior, backup creation, validation-only behavior, DB/file round-trip restore, removal of stale files, tamper detection, rejection of files not declared in the manifest, and the atomic-publish contract that no official backup name is exposed before complete validation. They do not call OpenAI, Whisper, or any external API.

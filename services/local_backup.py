@@ -286,6 +286,21 @@ def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
         _apply_snapshot_metadata(target, info)
 
 
+def _create_private_partial_archive(destination: Path, archive: Path) -> Path:
+    """Reserve an owner-private unpublished archive path on the destination filesystem."""
+    partial = destination / f".{archive.name}.{uuid.uuid4().hex}.partial"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | int(getattr(os, "O_BINARY", 0))
+    )
+    fd = os.open(partial, flags, 0o600)
+    os.close(fd)
+    _restrict_permissions(partial, 0o600)
+    return partial
+
+
 def _create_backup_unlocked(
     destination_dir: str | os.PathLike | None = None,
     *,
@@ -304,40 +319,49 @@ def _create_backup_unlocked(
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     safe_label = "".join(c if c.isalnum() or c in {"-", "_"} else "_" for c in label)[:40] or "backup"
     archive = destination / f"qualia_backup_{ts}_{safe_label}_{uuid.uuid4().hex[:8]}.zip"
+    partial_archive = _create_private_partial_archive(destination, archive)
+    published = False
 
-    with tempfile.TemporaryDirectory(prefix="qualia_backup_stage_") as tmp:
-        staging = Path(tmp).resolve()
-        db_stage = staging / DB_ARCHIVE_PATH
-        _sqlite_snapshot(database_path, db_stage)
+    try:
+        with tempfile.TemporaryDirectory(prefix="qualia_backup_stage_") as tmp:
+            staging = Path(tmp).resolve()
+            db_stage = staging / DB_ARCHIVE_PATH
+            _sqlite_snapshot(database_path, db_stage)
 
-        files = [{
-            "path": DB_ARCHIVE_PATH,
-            "size": db_stage.stat().st_size,
-            "sha256": _sha256(db_stage),
-        }]
-        files.extend(_collect_tree(uploads, "uploads", staging))
-        files.extend(_collect_tree(outputs, "outputs", staging))
+            files = [{
+                "path": DB_ARCHIVE_PATH,
+                "size": db_stage.stat().st_size,
+                "sha256": _sha256(db_stage),
+            }]
+            files.extend(_collect_tree(uploads, "uploads", staging))
+            files.extend(_collect_tree(outputs, "outputs", staging))
 
-        manifest = {
-            "format": "qualia-transcript-backup",
-            "format_version": BACKUP_FORMAT_VERSION,
-            "created_at_utc": datetime.now(timezone.utc).isoformat(),
-            "label": label,
-            "service_slug": config.SERVICE_SLUG,
-            "database_archive_path": DB_ARCHIVE_PATH,
-            "files": files,
-        }
-        manifest_path = staging / MANIFEST_NAME
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            manifest = {
+                "format": "qualia-transcript-backup",
+                "format_version": BACKUP_FORMAT_VERSION,
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "label": label,
+                "service_slug": config.SERVICE_SLUG,
+                "database_archive_path": DB_ARCHIVE_PATH,
+                "files": files,
+            }
+            manifest_path = staging / MANIFEST_NAME
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-            for source in sorted(staging.rglob("*")):
-                if source.is_file():
-                    zf.write(source, source.relative_to(staging).as_posix())
+            with zipfile.ZipFile(partial_archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                for source in sorted(staging.rglob("*")):
+                    if source.is_file():
+                        zf.write(source, source.relative_to(staging).as_posix())
 
-    _restrict_permissions(archive, 0o600)
-    validate_backup(archive)
-    return archive
+        _restrict_permissions(partial_archive, 0o600)
+        validate_backup(partial_archive)
+        os.replace(partial_archive, archive)
+        published = True
+        _restrict_permissions(archive, 0o600)
+        return archive
+    finally:
+        if not published:
+            partial_archive.unlink(missing_ok=True)
 
 
 def create_backup(

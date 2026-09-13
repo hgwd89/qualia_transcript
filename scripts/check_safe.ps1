@@ -63,6 +63,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] managed backup collector guard smoke checks passed."
 
+Write-Host "[INFO] Running backup atomic-publish smoke check..."
+python tests/smoke_backup_atomic_publish.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] backup atomic-publish smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] backup atomic-publish smoke checks passed."
+
 Write-Host "[INFO] Running backup service-boundary smoke check..."
 python tests/smoke_backup_service_boundary.py
 if ($LASTEXITCODE -ne 0) {
