@@ -1,0 +1,43 @@
+name: Job Recovery Result Generation
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  job-recovery-result-generation:
+    name: job-recovery-result-generation (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      OPENAI_API_KEY: ""
+      ANTHROPIC_API_KEY: ""
+      RAKUTEN_APP_ID: ""
+      GOOGLE_BOOKS_API_KEY: ""
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run baseline durable job recovery regression
+        run: python tests/smoke_job_recovery.py
+
+      - name: Run current-attempt result recovery regression
+        run: python tests/smoke_job_recovery_result_generation.py
