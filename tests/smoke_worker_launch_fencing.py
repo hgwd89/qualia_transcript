@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -40,6 +41,7 @@ def main() -> int:
             from models import db
             from models.processing_job import ProcessingJob
             from models.project import Project
+            from services.job_admission import admit_retry_job
             import routes.analysis_view as analysis_view
             import routes.analyze as analyze_route
             import routes.transcribe as transcribe_route
@@ -70,7 +72,7 @@ def main() -> int:
                 try:
                     pre_spawn = new_job()
 
-                    def fail_before_spawn(_job_id: int):
+                    def fail_before_spawn(_job_id: int, **_kwargs):
                         raise RuntimeError("simulated spawn failure")
 
                     launch_guard.launch_job_worker = fail_before_spawn
@@ -94,7 +96,7 @@ def main() -> int:
                     reserved = new_job()
                     reserved_id = int(reserved.id)
 
-                    def fail_after_launch_reservation(job_id: int):
+                    def fail_after_launch_reservation(job_id: int, **_kwargs):
                         changed = (
                             ProcessingJob.query
                             .filter_by(id=int(job_id), status="pending")
@@ -146,7 +148,7 @@ def main() -> int:
                     claimed_job = new_job()
                     claimed_id = int(claimed_job.id)
 
-                    def child_claims_then_parent_bookkeeping_fails(job_id: int):
+                    def child_claims_then_parent_bookkeeping_fails(job_id: int, **_kwargs):
                         current, did_claim = processing_jobs._claim_pending_job(
                             int(job_id),
                             worker_pid=43211,
@@ -194,6 +196,180 @@ def main() -> int:
                             f"worker_pid={individual_after.worker_pid!r}"
                         ),
                     )
+
+                    # A spawned parent/child pair can outlive the reservation it
+                    # was created for. Reusing the same row for another pre-claim
+                    # retry must not let the old parent record/release the new
+                    # reservation or let the delayed old child claim it.
+                    aba_project = Project(name="Worker launch generation ABA")
+                    db.session.add(aba_project)
+                    db.session.flush()
+                    aba_job = ProcessingJob(
+                        project_id=aba_project.id,
+                        job_type="project_pipeline",
+                        status="failed",
+                        progress_json='{"stage":"failed"}',
+                        error_message="old launch failed",
+                        attempt_count=4,
+                        created_at=datetime.now(timezone.utc) - timedelta(hours=3),
+                        started_at=datetime.now(timezone.utc) - timedelta(hours=2),
+                        finished_at=datetime.now(timezone.utc) - timedelta(hours=1),
+                    )
+                    db.session.add(aba_job)
+                    db.session.commit()
+                    aba_id = int(aba_job.id)
+
+                    first_retry = admit_retry_job(aba_id)
+                    db.session.expire_all()
+                    first_pending = db.session.get(ProcessingJob, aba_id)
+                    first_attempt = int(first_pending.attempt_count or 0)
+                    first_anchor = first_pending.started_at
+                    _first_reserved, first_reserved = processing_jobs._reserve_worker_launch(
+                        aba_id,
+                        expected_attempt_count=first_attempt,
+                        expected_started_at=first_anchor,
+                    )
+
+                    first_pending = db.session.get(ProcessingJob, aba_id)
+                    first_pending.status = "failed"
+                    first_pending.worker_pid = None
+                    first_pending.progress_json = '{"stage":"failed"}'
+                    first_pending.error_message = "reservation abandoned"
+                    first_pending.finished_at = datetime.now(timezone.utc)
+                    db.session.commit()
+
+                    second_retry = admit_retry_job(aba_id)
+                    db.session.expire_all()
+                    second_pending = db.session.get(ProcessingJob, aba_id)
+                    second_attempt = int(second_pending.attempt_count or 0)
+                    second_anchor = second_pending.started_at
+                    _second_reserved, second_reserved = processing_jobs._reserve_worker_launch(
+                        aba_id,
+                        expected_attempt_count=second_attempt,
+                        expected_started_at=second_anchor,
+                    )
+
+                    stale_recorded = processing_jobs._record_worker_launch(
+                        aba_id,
+                        44001,
+                        expected_attempt_count=first_attempt,
+                        expected_started_at=first_anchor,
+                    )
+                    stale_released = processing_jobs._release_worker_launch_reservation(
+                        aba_id,
+                        expected_attempt_count=first_attempt,
+                        expected_started_at=first_anchor,
+                    )
+                    _stale_child, stale_claimed = processing_jobs._claim_pending_job(
+                        aba_id,
+                        worker_pid=44001,
+                        expected_attempt_count=first_attempt,
+                        expected_started_at=first_anchor,
+                    )
+                    db.session.expire_all()
+                    after_stale = db.session.get(ProcessingJob, aba_id)
+                    after_stale_status = after_stale.status
+                    after_stale_pid = after_stale.worker_pid
+                    after_stale_anchor = after_stale.started_at
+                    fresh_child, fresh_claimed = processing_jobs._claim_pending_job(
+                        aba_id,
+                        worker_pid=44002,
+                        expected_attempt_count=second_attempt,
+                        expected_started_at=second_anchor,
+                    )
+                    failures += check(
+                        "stale parent and child cannot cross a reused launch reservation generation",
+                        first_retry.created
+                        and second_retry.created
+                        and first_reserved
+                        and second_reserved
+                        and first_anchor is not None
+                        and second_anchor is not None
+                        and first_anchor != second_anchor
+                        and not stale_recorded
+                        and not stale_released
+                        and not stale_claimed
+                        and after_stale_status == "pending"
+                        and int(after_stale_pid or 0) == 0
+                        and after_stale_anchor == second_anchor
+                        and fresh_claimed
+                        and fresh_child.status == "running"
+                        and int(fresh_child.worker_pid or 0) == 44002
+                        and int(fresh_child.attempt_count or 0) == second_attempt + 1,
+                        (
+                            f"first={first_anchor!r} second={second_anchor!r} "
+                            f"recorded={stale_recorded} released={stale_released} "
+                            f"stale_claimed={stale_claimed} fresh_claimed={fresh_claimed} "
+                            f"status={fresh_child.status!r} pid={fresh_child.worker_pid!r}"
+                        ),
+                    )
+
+                    # Route-level pre-spawn error handling uses the same anchor.
+                    # If the row cycles through failed and a new retry while the
+                    # old launch call is unwinding, the old exception must not
+                    # fail the fresh retry.
+                    route_project = Project(name="Route launch ABA")
+                    db.session.add(route_project)
+                    db.session.flush()
+                    route_job = ProcessingJob(
+                        project_id=route_project.id,
+                        job_type="project_pipeline",
+                        status="failed",
+                        progress_json='{"stage":"failed"}',
+                        error_message="old route failure",
+                        attempt_count=7,
+                        created_at=datetime.now(timezone.utc) - timedelta(hours=3),
+                        started_at=datetime.now(timezone.utc) - timedelta(hours=2),
+                        finished_at=datetime.now(timezone.utc) - timedelta(hours=1),
+                    )
+                    db.session.add(route_job)
+                    db.session.commit()
+                    route_id = int(route_job.id)
+                    route_first = admit_retry_job(route_id)
+                    db.session.expire_all()
+                    route_first_pending = db.session.get(ProcessingJob, route_id)
+                    route_first_anchor = route_first_pending.started_at
+                    route_second_anchor = {"value": None}
+
+                    def fail_after_row_reuse(job_id: int, **_kwargs):
+                        current = db.session.get(ProcessingJob, int(job_id))
+                        current.status = "failed"
+                        current.worker_pid = None
+                        current.progress_json = '{"stage":"failed"}'
+                        current.error_message = "simulated old pre-spawn failure"
+                        current.finished_at = datetime.now(timezone.utc)
+                        db.session.commit()
+                        admission = admit_retry_job(int(job_id))
+                        assert admission.created
+                        db.session.expire_all()
+                        route_second_anchor["value"] = db.session.get(
+                            ProcessingJob,
+                            int(job_id),
+                        ).started_at
+                        raise RuntimeError("simulated old launcher exception")
+
+                    launch_guard.launch_job_worker = fail_after_row_reuse
+                    route_pid, route_error = launch_guard.launch_job_or_preserve_active(
+                        route_first_pending,
+                    )
+                    db.session.expire_all()
+                    route_after = db.session.get(ProcessingJob, route_id)
+                    failures += check(
+                        "route launch failure CAS cannot fail a later pre-claim retry",
+                        route_first.created
+                        and route_first_anchor is not None
+                        and route_second_anchor["value"] is not None
+                        and route_first_anchor != route_second_anchor["value"]
+                        and route_pid is None
+                        and route_error is None
+                        and route_after.status == "pending"
+                        and route_after.worker_pid is None
+                        and route_after.started_at == route_second_anchor["value"],
+                        (
+                            f"first={route_first_anchor!r} second={route_second_anchor['value']!r} "
+                            f"pid={route_pid!r} error={route_error!r} status={route_after.status!r}"
+                        ),
+                    )
                 finally:
                     launch_guard.launch_job_worker = original_launch
                     db.session.remove()
@@ -222,6 +398,8 @@ def main() -> int:
     transcribe_source = (repo_root / "routes" / "transcribe.py").read_text(encoding="utf-8")
     project_analysis_source = (repo_root / "routes" / "analysis_view.py").read_text(encoding="utf-8")
     individual_analysis_source = (repo_root / "routes" / "analyze.py").read_text(encoding="utf-8")
+    processing_source = (repo_root / "services" / "processing_jobs.py").read_text(encoding="utf-8")
+    worker_script_source = (repo_root / "scripts" / "run_processing_job.py").read_text(encoding="utf-8")
     failures += check(
         "all HTTP worker launch routes use the shared durable launch guard",
         "from services.worker_launch_guard import launch_job_or_preserve_active" in transcribe_source
@@ -230,6 +408,16 @@ def main() -> int:
         and "from services.processing_jobs import launch_job_worker" not in transcribe_source
         and "from services.processing_jobs import launch_job_worker" not in project_analysis_source
         and "from services.processing_jobs import launch_job_worker" not in individual_analysis_source,
+    )
+
+    failures += check(
+        "detached worker command and claim carry the launch generation token",
+        '"--expected-attempt-count"' in processing_source
+        and '"--expected-started-at"' in processing_source
+        and 'parser.add_argument("--expected-attempt-count", type=int, required=True)' in worker_script_source
+        and 'parser.add_argument("--expected-started-at", required=True)' in worker_script_source
+        and "expected_attempt_count=args.expected_attempt_count" in worker_script_source
+        and "expected_started_at=expected_started_at" in worker_script_source,
     )
 
     if failures:

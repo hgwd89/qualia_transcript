@@ -165,75 +165,99 @@ def _refresh_job(job_id: int) -> ProcessingJob:
     return job
 
 
-def _reserve_worker_launch(job_id: int) -> tuple[ProcessingJob, bool]:
-    reserved = (
+def _filter_launch_generation(query, attempt_count: int, started_at):
+    query = query.filter(ProcessingJob.attempt_count == int(attempt_count))
+    if started_at is None:
+        return query.filter(ProcessingJob.started_at.is_(None))
+    return query.filter(ProcessingJob.started_at == started_at)
+
+
+def _reserve_worker_launch(
+    job_id: int,
+    *,
+    expected_attempt_count: int | None = None,
+    expected_started_at=None,
+) -> tuple[ProcessingJob, bool]:
+    query = (
         ProcessingJob.query
         .filter(ProcessingJob.id == job_id)
         .filter(ProcessingJob.status == "pending")
         .filter(ProcessingJob.worker_pid.is_(None))
-        .update(
-            {
-                ProcessingJob.worker_pid: _LAUNCH_RESERVED_PID,
-                ProcessingJob.progress_json: _json_dump({"stage": "launching"}),
-            },
-            synchronize_session=False,
-        )
+    )
+    if expected_attempt_count is not None:
+        query = _filter_launch_generation(query, expected_attempt_count, expected_started_at)
+    reserved = query.update(
+        {
+            ProcessingJob.worker_pid: _LAUNCH_RESERVED_PID,
+            ProcessingJob.progress_json: _json_dump({"stage": "launching"}),
+        },
+        synchronize_session=False,
     )
     db.session.commit()
     return _refresh_job(job_id), reserved == 1
 
 
-def _release_worker_launch_reservation(job_id: int) -> None:
-    (
-        ProcessingJob.query
-        .filter(ProcessingJob.id == job_id)
-        .filter(ProcessingJob.status.in_(ACTIVE_STATUSES))
-        .filter(ProcessingJob.worker_pid == _LAUNCH_RESERVED_PID)
-        .update(
-            {
-                ProcessingJob.worker_pid: None,
-                ProcessingJob.progress_json: _json_dump({"stage": "queued"}),
-            },
-            synchronize_session=False,
-        )
-    )
-    db.session.commit()
-    db.session.expire_all()
-
-
-def _record_worker_launch(job_id: int, pid: int) -> bool:
-    pid = int(pid)
-    pending_updated = (
+def _release_worker_launch_reservation(
+    job_id: int,
+    *,
+    expected_attempt_count: int,
+    expected_started_at,
+) -> bool:
+    query = (
         ProcessingJob.query
         .filter(ProcessingJob.id == job_id)
         .filter(ProcessingJob.status == "pending")
         .filter(ProcessingJob.worker_pid == _LAUNCH_RESERVED_PID)
-        .update(
-            {
-                ProcessingJob.worker_pid: pid,
-                ProcessingJob.progress_json: _json_dump({"stage": "worker_started", "pid": pid}),
-            },
-            synchronize_session=False,
-        )
     )
-    running_updated = 0
-    if not pending_updated:
-        running_updated = (
-            ProcessingJob.query
-            .filter(ProcessingJob.id == job_id)
-            .filter(ProcessingJob.status == "running")
-            .filter(ProcessingJob.worker_pid == _LAUNCH_RESERVED_PID)
-            .update(
-                {ProcessingJob.worker_pid: pid},
-                synchronize_session=False,
-            )
-        )
+    query = _filter_launch_generation(query, expected_attempt_count, expected_started_at)
+    updated = query.update(
+        {
+            ProcessingJob.worker_pid: None,
+            ProcessingJob.progress_json: _json_dump({"stage": "queued"}),
+        },
+        synchronize_session=False,
+    )
     db.session.commit()
     db.session.expire_all()
-    return bool(pending_updated or running_updated)
+    return updated == 1
 
 
-def launch_job_worker(job_id: int) -> int:
+def _record_worker_launch(
+    job_id: int,
+    pid: int,
+    *,
+    expected_attempt_count: int,
+    expected_started_at,
+) -> bool:
+    # Parent bookkeeping belongs only to the exact pending reservation it
+    # created. A claimed production child writes its own real PID atomically, so
+    # there is no safe need for a parent-side running-state fallback.
+    pid = int(pid)
+    query = (
+        ProcessingJob.query
+        .filter(ProcessingJob.id == job_id)
+        .filter(ProcessingJob.status == "pending")
+        .filter(ProcessingJob.worker_pid == _LAUNCH_RESERVED_PID)
+    )
+    query = _filter_launch_generation(query, expected_attempt_count, expected_started_at)
+    updated = query.update(
+        {
+            ProcessingJob.worker_pid: pid,
+            ProcessingJob.progress_json: _json_dump({"stage": "worker_started", "pid": pid}),
+        },
+        synchronize_session=False,
+    )
+    db.session.commit()
+    db.session.expire_all()
+    return updated == 1
+
+
+def launch_job_worker(
+    job_id: int,
+    *,
+    expected_attempt_count: int | None = None,
+    expected_started_at=None,
+) -> int:
     job = db.session.get(ProcessingJob, job_id)
     if not job:
         raise ValueError("processing job not found")
@@ -245,11 +269,18 @@ def launch_job_worker(job_id: int) -> int:
     if not script.is_file():
         raise FileNotFoundError(f"worker script not found: {script}")
 
-    job, reserved = _reserve_worker_launch(job_id)
+    job, reserved = _reserve_worker_launch(
+        job_id,
+        expected_attempt_count=expected_attempt_count,
+        expected_started_at=expected_started_at,
+    )
     if not reserved:
         if job.status in ACTIVE_STATUSES:
             return int(job.worker_pid or 0)
         raise ValueError(f"job cannot be launched from status={job.status}")
+
+    reservation_attempt_count = int(job.attempt_count or 0)
+    reservation_started_at = job.started_at
 
     logs_dir = root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -275,16 +306,34 @@ def launch_job_worker(job_id: int) -> int:
     try:
         with log_path.open("ab", buffering=0) as log_handle:
             process = subprocess.Popen(
-                [sys.executable, str(script), "--job-id", str(job.id)],
+                [
+                    sys.executable,
+                    str(script),
+                    "--job-id",
+                    str(job.id),
+                    "--expected-attempt-count",
+                    str(reservation_attempt_count),
+                    "--expected-started-at",
+                    reservation_started_at.isoformat() if reservation_started_at is not None else "none",
+                ],
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 **kwargs,
             )
     except Exception:
-        _release_worker_launch_reservation(job_id)
+        _release_worker_launch_reservation(
+            job_id,
+            expected_attempt_count=reservation_attempt_count,
+            expected_started_at=reservation_started_at,
+        )
         raise
 
-    _record_worker_launch(job_id, process.pid)
+    _record_worker_launch(
+        job_id,
+        process.pid,
+        expected_attempt_count=reservation_attempt_count,
+        expected_started_at=reservation_started_at,
+    )
     current = _refresh_job(job_id)
     if current.worker_pid and int(current.worker_pid) > 0:
         return int(current.worker_pid)
@@ -317,7 +366,13 @@ def retry_failed_job(job: ProcessingJob) -> ProcessingJob:
     return current
 
 
-def _claim_pending_job(job_id: int, worker_pid: int | None = None) -> tuple[ProcessingJob, bool]:
+def _claim_pending_job(
+    job_id: int,
+    worker_pid: int | None = None,
+    *,
+    expected_attempt_count: int | None = None,
+    expected_started_at=None,
+) -> tuple[ProcessingJob, bool]:
     values = {
         ProcessingJob.status: "running",
         ProcessingJob.started_at: _utcnow(),
@@ -328,12 +383,18 @@ def _claim_pending_job(job_id: int, worker_pid: int | None = None) -> tuple[Proc
     if worker_pid is not None and int(worker_pid) > 0:
         values[ProcessingJob.worker_pid] = int(worker_pid)
 
-    claimed = (
+    query = (
         ProcessingJob.query
         .filter(ProcessingJob.id == job_id)
         .filter(ProcessingJob.status == "pending")
-        .update(values, synchronize_session=False)
     )
+    if expected_attempt_count is not None:
+        # Detached production children may claim only the exact launch
+        # reservation that spawned them. This prevents a delayed old child from
+        # claiming a later retry of the same durable job row.
+        query = query.filter(ProcessingJob.worker_pid == _LAUNCH_RESERVED_PID)
+        query = _filter_launch_generation(query, expected_attempt_count, expected_started_at)
+    claimed = query.update(values, synchronize_session=False)
     db.session.commit()
     current = _refresh_job(job_id)
     if claimed == 1:
@@ -574,8 +635,15 @@ def execute_job(
     handlers: dict[str, object] | None = None,
     *,
     worker_pid: int | None = None,
+    expected_attempt_count: int | None = None,
+    expected_started_at=None,
 ) -> ProcessingJob:
-    job, claimed = _claim_pending_job(job_id, worker_pid=worker_pid)
+    job, claimed = _claim_pending_job(
+        job_id,
+        worker_pid=worker_pid,
+        expected_attempt_count=expected_attempt_count,
+        expected_started_at=expected_started_at,
+    )
     if not claimed:
         return job
     attempt_count = _attempt_number(job)
