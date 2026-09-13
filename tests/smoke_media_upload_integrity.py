@@ -564,9 +564,13 @@ def main() -> int:
                 and 'snapshot_tag="local_whisper"' in transcription_source,
             )
             failures += check(
-                "local fallback inherits durable lease checks and stale errors are fenced",
+                "local fallback inherits durable callbacks and stale error commits are result-write fenced",
                 transcription_source.count("lease_check=lease_check") >= 2
-                and transcription_source.count("If this exception reflects durable lease loss") == 2,
+                and transcription_source.count("result_write_guard=result_write_guard") >= 2
+                and transcription_source.count("# Error status is canonical too. Reserve the write") == 2
+                and transcription_source.count(
+                    "if result_write_guard is not None:\n            result_write_guard()\n        elif lease_check is not None:\n            lease_check()\n        tr.status = \"error\""
+                ) == 2,
             )
             failures += check(
                 "in-place local fallback clears committed OpenAI partial segments",
