@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -19,11 +20,11 @@ def raises_value_error(fn) -> bool:
 
 
 def read_and_close(fn) -> bytes:
-    handle = fn()
+    opened = fn()
     try:
-        return handle.read()
+        return opened.stream.read()
     finally:
-        handle.close()
+        opened.close()
 
 
 def main() -> int:
@@ -68,27 +69,49 @@ def main() -> int:
                 == b"inside-managed-file",
             )
 
-            outside = root / "outside.bin"
-            outside.write_bytes(b"different-file-object")
+            if storage_paths._supports_pinned_posix_read():
+                race_target = prepare_output_target(3, "race.bin")
+                race_path = Path(race_target.full_path)
+                race_path.write_bytes(b"pinned-inside")
+                outside_dir = root / "outside-tree"
+                outside_dir.mkdir()
+                (outside_dir / race_path.name).write_bytes(b"outside-redirection")
+                id_dir = race_path.parent
+                saved_dir = id_dir.with_name(f"{id_dir.name}.pinned-original")
+                swapped = False
 
-            def redirected_open(path, flags, *args, **kwargs):
-                if Path(path) == output_path:
-                    return original_os_open(outside, flags, *args, **kwargs)
-                return original_os_open(path, flags, *args, **kwargs)
+                def racing_open(path, flags, *args, **kwargs):
+                    nonlocal swapped
+                    if (
+                        not swapped
+                        and kwargs.get("dir_fd") is not None
+                        and str(path) == race_path.name
+                        and not (flags & getattr(os, "O_DIRECTORY", 0))
+                    ):
+                        id_dir.rename(saved_dir)
+                        os.symlink(outside_dir, id_dir, target_is_directory=True)
+                        swapped = True
+                    return original_os_open(path, flags, *args, **kwargs)
 
-            storage_paths.os.open = redirected_open
-            failures += check(
-                "managed reader rejects an opened descriptor that differs from the checked path",
-                raises_value_error(
-                    lambda: read_and_close(
+                storage_paths.os.open = racing_open
+                try:
+                    raced_data = read_and_close(
                         lambda: storage_paths.open_managed_file_for_read(
                             config.OUTPUT_DIR,
-                            output.stored_path,
+                            race_target.stored_path,
                         )
                     )
-                ),
-            )
-            storage_paths.os.open = original_os_open
+                finally:
+                    storage_paths.os.open = original_os_open
+                    if id_dir.is_symlink():
+                        id_dir.unlink()
+                    if saved_dir.exists():
+                        saved_dir.rename(id_dir)
+                failures += check(
+                    "POSIX managed reader stays on pinned parent after pathname replacement",
+                    swapped and raced_data == b"pinned-inside",
+                    f"swapped={swapped} data={raced_data!r}",
+                )
 
             def fake_link_detector(path: Path) -> bool:
                 return path.name in {"7", "8", "linked.xlsx"}
@@ -128,17 +151,24 @@ def main() -> int:
         and "path.is_symlink()" in helper_source,
     )
     failures += check(
-        "managed reader validates the opened descriptor against the current path",
-        "os.fstat(fd)" in helper_source
-        and "lexical.lstat()" in helper_source
-        and "managed storage file changed during open" in helper_source,
+        "POSIX managed reads descend through pinned no-follow descriptors",
+        "dir_fd=parent_fd" in helper_source
+        and "os.O_NOFOLLOW" in helper_source
+        and "_open_posix_directory_chain" in helper_source,
+    )
+    failures += check(
+        "Windows managed reads pin components without delete sharing",
+        "file_flag_open_reparse_point = 0x00200000" in helper_source
+        and "Deliberately omit FILE_SHARE_DELETE" in helper_source
+        and "_open_windows_directory_chain" in helper_source,
     )
 
     route_source = (repo_root / "routes" / "outputs.py").read_text(encoding="utf-8")
     failures += check(
-        "output download streams from the descriptor-fenced managed reader",
+        "output download streams from the pinned managed reader",
         "open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)" in route_source
-        and "response.call_on_close(file_obj.close)" in route_source
+        and "response.call_on_close(opened.close)" in route_source
+        and "response.make_conditional(" in route_source
         and "os.path.isfile(full_path)" not in route_source,
     )
 
