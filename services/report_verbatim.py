@@ -4,18 +4,19 @@
 納品用の発言録は分析用マッピングに依存させず、Interview に属する全 Segment を
 seq 順に欠落なく出力する。質問別の整理は formatted sheet 側の責務とする。
 """
-import os
 from datetime import datetime
 
 from docx import Document
 from docx.shared import Pt
 
-import config
-from models import db
 from models.generated_file import GeneratedFile
 from models.interview import Interview
 from models.speaker_assignment import SpeakerAssignment
-from services.file_manager import prepare_output_target, register_generated_file
+from services.file_manager import (
+    prepare_output_target,
+    register_generated_file,
+    write_output_target,
+)
 
 
 ROLE_LABELS = {
@@ -124,7 +125,7 @@ def generate_verbatim(interview_id: int) -> GeneratedFile:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"発言録_{participant.participant_code if participant else 'unknown'}_{ts}.docx"
     target = prepare_output_target(interview.project_id, filename)
-    doc.save(target.full_path)
+    write_output_target(target, doc.save)
     return register_generated_file(
         target,
         project_id=project.id,
