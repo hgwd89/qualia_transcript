@@ -9,6 +9,7 @@ from services.analyzer import analyze_interview_summary
 from services.mapper import run_mapping
 from services.processing_jobs import JobLeaseLost, assert_job_lease, begin_job_result_write
 from services.processing_result_guard import discard_incomplete_transcription_segments
+from services.project_flow_scope import ProjectFlowScopeError, resolve_pipeline_interview_flow
 from services.transcription import (
     auto_assign_speaker_roles,
     get_default_transcription_model,
@@ -55,7 +56,6 @@ def run_project_pipeline(job, update_progress) -> dict:
         raise ValueError("project not found")
 
     interviews = list(project.interviews)
-    first_flow_id = project.interview_flows[0].id if project.interview_flows else None
     results = []
 
     for index, source_interview in enumerate(interviews, start=1):
@@ -91,12 +91,19 @@ def run_project_pipeline(job, update_progress) -> dict:
             results.append(row)
             continue
 
-        if not interview.flow_id and first_flow_id:
+        try:
+            resolved_flow, needs_assignment = resolve_pipeline_interview_flow(project, interview)
+        except ProjectFlowScopeError as exc:
+            _step_error(row, "assign_flow", exc, code=exc.code)
+            results.append(row)
+            continue
+
+        if needs_assignment:
             try:
                 begin_job_result_write(job)
-                interview.flow_id = first_flow_id
+                interview.flow_id = int(resolved_flow.id)
                 db.session.commit()
-                row["steps"].append({"step": "assign_flow", "result": first_flow_id})
+                row["steps"].append({"step": "assign_flow", "result": int(resolved_flow.id)})
             except JobLeaseLost:
                 db.session.rollback()
                 raise
