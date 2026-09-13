@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -64,17 +65,75 @@ def _restrict_permissions(path: Path, mode: int) -> None:
     """Enforce owner-only backup permissions on POSIX and Windows."""
     if os.name == "nt":
         sid = _current_windows_user_sid()
-        grant = f"*{sid}:(OI)(CI)F" if path.is_dir() else f"*{sid}:(F)"
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$target = $env:QUALIA_ACL_TARGET
+$sidText = $env:QUALIA_ACL_SID
+$sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
+$item = Get-Item -LiteralPath $target -Force
+$acl = Get-Acl -LiteralPath $target
+
+# Protect the DACL and discard inherited ACEs, then remove every explicit ACE.
+# `/grant:r` alone is insufficient because it replaces only ACEs for the named
+# identity and can leave an explicit Everyone/Users grant in place.
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($rule in @($acl.Access)) {
+    [void]$acl.RemoveAccessRuleSpecific($rule)
+}
+
+$inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+if ($item.PSIsContainer) {
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+}
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+    $sid,
+    [System.Security.AccessControl.FileSystemRights]::FullControl,
+    $inheritance,
+    [System.Security.AccessControl.PropagationFlags]::None,
+    [System.Security.AccessControl.AccessControlType]::Allow
+)
+[void]$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $target -AclObject $acl
+
+# Fail closed if Windows did not persist the intended protected, single-SID DACL.
+$final = Get-Acl -LiteralPath $target
+if (-not $final.AreAccessRulesProtected) {
+    throw 'backup ACL inheritance is still enabled'
+}
+$rules = @($final.Access)
+if ($rules.Count -lt 1) {
+    throw 'backup ACL has no current-user access rule'
+}
+foreach ($candidate in $rules) {
+    try {
+        $candidateSid = $candidate.IdentityReference.Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        $candidateSid = $candidate.IdentityReference.Value
+    }
+    if ($candidateSid -ne $sidText -or
+        $candidate.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+        throw "backup ACL retained an unrelated or deny ACE: $candidateSid"
+    }
+}
+"""
+        env = os.environ.copy()
+        env["QUALIA_ACL_TARGET"] = str(path)
+        env["QUALIA_ACL_SID"] = sid
         result = subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", grant],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
             check=False,
         )
         if result.returncode != 0:
-            raise OSError(f"could not restrict Windows ACL for backup path: {path}")
+            detail = (result.stderr or result.stdout).strip()
+            raise OSError(f"could not restrict Windows ACL for backup path: {path}: {detail}")
         return
     os.chmod(path, mode)
 
@@ -202,12 +261,25 @@ def _sqlite_snapshot(source: Path, destination: Path) -> None:
         src.close()
 
 
+def _supports_pinned_posix_walk() -> bool:
+    return (
+        os.name != "nt"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in getattr(os, "supports_dir_fd", set())
+        and os.stat in getattr(os, "supports_dir_fd", set())
+        and os.listdir in getattr(os, "supports_fd", set())
+    )
+
+
 def _collect_tree(source_dir: Path, archive_prefix: str, staging_root: Path) -> list[dict]:
     entries: list[dict] = []
     if not source_dir.exists():
         return entries
     if not source_dir.is_dir():
         raise ValueError(f"expected directory: {source_dir}")
+    if _supports_pinned_posix_walk():
+        return _collect_tree_pinned(source_dir, archive_prefix, staging_root)
 
     root = source_dir.resolve()
     pending = [root]
@@ -264,10 +336,112 @@ def _stat_identity(info: os.stat_result) -> tuple[int, int]:
     return int(info.st_dev), int(info.st_ino)
 
 
-def _apply_snapshot_metadata(target: Path, info: os.stat_result) -> None:
+def _snapshot_stat_token(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    """Generation-sensitive token used to detect file replacement or in-place mutation."""
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
+    )
+
+
+def _directory_identity_token(info: os.stat_result) -> tuple[int, int, int]:
+    """Stable directory identity without volatile child-list timestamps or size."""
+    return int(info.st_dev), int(info.st_ino), int(info.st_mode)
+
+
+def _xattr_unsupported(error_number: int | None) -> bool:
+    return error_number in {
+        getattr(errno, "ENOTSUP", -1),
+        getattr(errno, "EOPNOTSUPP", -2),
+        getattr(errno, "ENOSYS", -3),
+    }
+
+
+def _capture_extended_attributes(source: str | os.PathLike | int) -> dict[str, bytes]:
+    """Capture POSIX extended attributes from a checked path or open descriptor."""
+    if os.name == "nt" or not hasattr(os, "listxattr") or not hasattr(os, "getxattr"):
+        return {}
+    try:
+        names = os.listxattr(source)
+    except OSError as exc:
+        if _xattr_unsupported(exc.errno):
+            return {}
+        raise ValueError("could not read snapshot extended attributes") from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "platform cannot safely capture extended attributes from an open snapshot object"
+        ) from exc
+
+    attributes: dict[str, bytes] = {}
+    for name in names:
+        try:
+            attributes[name] = os.getxattr(source, name)
+        except OSError as exc:
+            if _xattr_unsupported(exc.errno):
+                raise ValueError("snapshot extended attributes became unavailable") from exc
+            raise ValueError(f"could not read snapshot extended attribute: {name}") from exc
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"platform cannot read snapshot extended attribute from open object: {name}"
+            ) from exc
+    return attributes
+
+
+def _apply_extended_attributes(target: Path, attributes: dict[str, bytes]) -> None:
+    if os.name == "nt" or not attributes:
+        return
+    if not hasattr(os, "setxattr"):
+        raise ValueError("platform cannot preserve snapshot extended attributes")
+    for name, value in attributes.items():
+        try:
+            os.setxattr(target, name, value)
+        except OSError as exc:
+            raise ValueError(
+                f"could not preserve snapshot extended attribute {name}: {target}"
+            ) from exc
+
+
+def _apply_snapshot_metadata(
+    target: Path,
+    info: os.stat_result,
+    attributes: dict[str, bytes] | None = None,
+) -> None:
     if os.name != "nt":
+        _apply_extended_attributes(target, attributes or {})
         os.chmod(target, stat.S_IMODE(info.st_mode))
     os.utime(target, ns=(int(info.st_atime_ns), int(info.st_mtime_ns)))
+
+
+def _copy_open_regular_snapshot_file(
+    fd: int,
+    target: Path,
+    opened: os.stat_result,
+    source_label: str,
+    *,
+    preserve_xattrs: bool = True,
+) -> None:
+    if not stat.S_ISREG(opened.st_mode):
+        raise ValueError(f"managed snapshot file is not regular: {source_label}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with os.fdopen(os.dup(fd), "rb") as src, target.open("wb") as dst:
+            shutil.copyfileobj(src, dst)
+        attributes = _capture_extended_attributes(fd) if preserve_xattrs else {}
+        final = os.fstat(fd)
+        if _snapshot_stat_token(final) != _snapshot_stat_token(opened):
+            raise ValueError(f"managed snapshot file changed during snapshot: {source_label}")
+        # Use the pre-read stat for metadata restoration. Reading can update
+        # atime on some filesystems; the final stat exists only to detect
+        # mutation and must not redefine the pre-restore metadata snapshot.
+        _apply_snapshot_metadata(target, opened, attributes)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
 
 
 def _copy_regular_snapshot_file(source: Path, target: Path) -> None:
@@ -294,17 +468,227 @@ def _copy_regular_snapshot_file(source: Path, target: Path) -> None:
         if (
             not stat.S_ISREG(opened.st_mode)
             or is_link_or_reparse(source)
-            or _stat_identity(before) != _stat_identity(opened)
-            or _stat_identity(after) != _stat_identity(opened)
+            or _snapshot_stat_token(before) != _snapshot_stat_token(opened)
+            or _snapshot_stat_token(after) != _snapshot_stat_token(opened)
         ):
             raise ValueError(f"managed restore rollback file changed during snapshot: {source}")
-
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with os.fdopen(os.dup(fd), "rb") as src, target.open("wb") as dst:
-            shutil.copyfileobj(src, dst)
-        _apply_snapshot_metadata(target, opened)
+        _copy_open_regular_snapshot_file(fd, target, opened, str(source))
     finally:
         os.close(fd)
+
+
+def _open_directory_component(parent_fd: int, name: str, display_path: Path) -> tuple[int, os.stat_result]:
+    """Open one POSIX directory component relative to a pinned parent without following links."""
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"managed snapshot directory is unreadable: {display_path}") from exc
+    if not stat.S_ISDIR(before.st_mode):
+        raise ValueError(f"managed snapshot directory is not a directory: {display_path}")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        child_fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        raise ValueError(f"managed snapshot directory could not be opened safely: {display_path}") from exc
+    try:
+        opened = os.fstat(child_fd)
+        after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or _directory_identity_token(before) != _directory_identity_token(opened)
+            or _directory_identity_token(after) != _directory_identity_token(opened)
+        ):
+            raise ValueError(f"managed snapshot directory changed during snapshot: {display_path}")
+        return child_fd, opened
+    except Exception:
+        os.close(child_fd)
+        raise
+
+
+def _open_absolute_directory_pinned(path: Path) -> tuple[int, Path]:
+    """Open every component of an absolute POSIX directory beneath pinned parent descriptors."""
+    resolved = path.resolve(strict=True)
+    if not resolved.is_absolute():
+        raise ValueError(f"managed snapshot root must be absolute: {path}")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    anchor = Path(resolved.anchor)
+    try:
+        current_fd = os.open(anchor, flags)
+    except OSError as exc:
+        raise ValueError(f"managed snapshot root is unreadable: {resolved}") from exc
+    current_path = anchor
+    try:
+        for part in resolved.parts[1:]:
+            next_path = current_path / part
+            child_fd, _opened = _open_directory_component(current_fd, part, next_path)
+            os.close(current_fd)
+            current_fd = child_fd
+            current_path = next_path
+        return current_fd, resolved
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _copy_regular_snapshot_file_at(
+    parent_fd: int,
+    name: str,
+    target: Path,
+    display_path: Path,
+    *,
+    preserve_xattrs: bool = True,
+) -> None:
+    """Copy a regular file relative to a pinned parent directory descriptor."""
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"managed snapshot file is unreadable: {display_path}") from exc
+    if not stat.S_ISREG(before.st_mode):
+        if stat.S_ISLNK(before.st_mode):
+            raise ValueError(f"managed snapshot tree contains linked/reparse entry: {display_path}")
+        raise ValueError(f"managed snapshot file is not a regular file: {display_path}")
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0)) | os.O_NOFOLLOW
+    try:
+        fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        raise ValueError(f"managed snapshot file could not be opened safely: {display_path}") from exc
+    try:
+        opened = os.fstat(fd)
+        after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _snapshot_stat_token(before) != _snapshot_stat_token(opened)
+            or _snapshot_stat_token(after) != _snapshot_stat_token(opened)
+        ):
+            raise ValueError(f"managed snapshot file changed during snapshot: {display_path}")
+        _copy_open_regular_snapshot_file(
+            fd,
+            target,
+            opened,
+            str(display_path),
+            preserve_xattrs=preserve_xattrs,
+        )
+    finally:
+        os.close(fd)
+
+
+def _collect_tree_pinned(source_dir: Path, archive_prefix: str, staging_root: Path) -> list[dict]:
+    """Collect a POSIX managed tree beneath pinned directory descriptors."""
+    root_fd, root = _open_absolute_directory_pinned(source_dir)
+    entries: list[dict] = []
+
+    def walk(current_fd: int, relative_dir: Path) -> None:
+        try:
+            names = sorted(os.listdir(current_fd))
+        except OSError as exc:
+            raise ValueError(
+                f"managed backup directory became unreadable: {root / relative_dir}"
+            ) from exc
+
+        for name in names:
+            display = root / relative_dir / name
+            try:
+                info = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError(f"managed backup entry became unreadable: {display}") from exc
+
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(f"managed backup tree contains linked/reparse entry: {display}")
+            if stat.S_ISDIR(info.st_mode):
+                child_fd, _opened = _open_directory_component(current_fd, name, display)
+                try:
+                    walk(child_fd, relative_dir / name)
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"managed backup tree contains unsupported entry type: {display}")
+
+            relative = (relative_dir / name).as_posix()
+            archive_path = _safe_member_name(f"{archive_prefix}/{relative}")
+            staged = staging_root / Path(archive_path)
+            _copy_regular_snapshot_file_at(
+                current_fd,
+                name,
+                staged,
+                display,
+                preserve_xattrs=False,
+            )
+            entries.append({
+                "path": archive_path,
+                "size": staged.stat().st_size,
+                "sha256": _sha256(staged),
+            })
+
+    try:
+        walk(root_fd, Path())
+    finally:
+        os.close(root_fd)
+    return entries
+
+
+def _snapshot_tree_no_links_pinned(source_dir: Path, destination: Path) -> None:
+    """Build a POSIX rollback tree using pinned directory descriptors and full metadata."""
+    root_fd, root = _open_absolute_directory_pinned(source_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    root_info = os.fstat(root_fd)
+    directory_metadata: list[tuple[Path, os.stat_result, dict[str, bytes]]] = [
+        (destination, root_info, _capture_extended_attributes(root_fd))
+    ]
+
+    def walk(current_fd: int, relative_dir: Path) -> None:
+        try:
+            names = sorted(os.listdir(current_fd))
+        except OSError as exc:
+            raise ValueError(
+                f"managed restore rollback directory became unreadable: {root / relative_dir}"
+            ) from exc
+
+        for name in names:
+            display = root / relative_dir / name
+            target = destination / relative_dir / name
+            try:
+                info = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError(
+                    f"managed restore rollback entry became unreadable: {display}"
+                ) from exc
+
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(
+                    f"managed restore rollback tree contains linked/reparse entry: {display}"
+                )
+            if stat.S_ISDIR(info.st_mode):
+                child_fd, opened = _open_directory_component(current_fd, name, display)
+                try:
+                    target.mkdir(parents=True, exist_ok=True)
+                    directory_metadata.append(
+                        (target, opened, _capture_extended_attributes(child_fd))
+                    )
+                    walk(child_fd, relative_dir / name)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(info.st_mode):
+                _copy_regular_snapshot_file_at(current_fd, name, target, display)
+            else:
+                raise ValueError(
+                    f"managed restore rollback tree contains unsupported entry type: {display}"
+                )
+
+    try:
+        walk(root_fd, Path())
+    finally:
+        os.close(root_fd)
+
+    for target, info, attributes in sorted(
+        directory_metadata,
+        key=lambda item: len(item[0].parts),
+        reverse=True,
+    ):
+        _apply_snapshot_metadata(target, info, attributes)
 
 
 def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
@@ -313,6 +697,8 @@ def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
         return
     if not source_dir.is_dir():
         raise ValueError(f"expected directory: {source_dir}")
+    if _supports_pinned_posix_walk():
+        return _snapshot_tree_no_links_pinned(source_dir, destination)
 
     root = source_dir.resolve()
     try:
@@ -323,7 +709,9 @@ def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
         raise ValueError(f"managed restore rollback root is not a directory: {source_dir}")
 
     destination.mkdir(parents=True, exist_ok=True)
-    directory_metadata: list[tuple[Path, os.stat_result]] = [(destination, root_info)]
+    directory_metadata: list[tuple[Path, os.stat_result, dict[str, bytes]]] = [
+        (destination, root_info, _capture_extended_attributes(root))
+    ]
     pending = [root]
     while pending:
         current = pending.pop()
@@ -360,7 +748,9 @@ def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
             target = destination / relative
             if stat.S_ISDIR(info.st_mode):
                 target.mkdir(parents=True, exist_ok=True)
-                directory_metadata.append((target, info))
+                directory_metadata.append(
+                    (target, info, _capture_extended_attributes(source))
+                )
                 pending.append(source)
             elif stat.S_ISREG(info.st_mode):
                 _copy_regular_snapshot_file(source, target)
@@ -369,12 +759,12 @@ def _snapshot_tree_no_links(source_dir: Path, destination: Path) -> None:
                     f"managed restore rollback tree contains unsupported entry type: {source}"
                 )
 
-    for target, info in sorted(
+    for target, info, attributes in sorted(
         directory_metadata,
-        key=lambda pair: len(pair[0].parts),
+        key=lambda item: len(item[0].parts),
         reverse=True,
     ):
-        _apply_snapshot_metadata(target, info)
+        _apply_snapshot_metadata(target, info, attributes)
 
 
 def _create_private_partial_archive(destination: Path, archive: Path) -> Path:

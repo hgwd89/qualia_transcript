@@ -261,9 +261,11 @@ def main() -> int:
             and "zipfile.ZipFile(partial_archive" in source_text,
         )
         failures += check(
-            "Windows backup privacy is enforced with an owner SID ACL before partial creation",
+            "Windows backup privacy is enforced with a protected owner SID ACL before partial creation",
             "whoami\", \"/user\", \"/fo\", \"csv\", \"/nh" in source_text
-            and "\"icacls\", str(path), \"/inheritance:r\", \"/grant:r\"" in source_text
+            and "SetAccessRuleProtection($true, $false)" in source_text
+            and "RemoveAccessRuleSpecific" in source_text
+            and "FileSystemAccessRule" in source_text
             and "_restrict_permissions(destination, 0o700)" in source_text,
         )
 
