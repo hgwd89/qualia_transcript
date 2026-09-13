@@ -15,6 +15,7 @@ from models.processing_job import ProcessingJob
 from models.project import Project
 from services.job_recovery import recover_stale_jobs
 from services.processing_jobs import ACTIVE_STATUSES
+from services.raw_snapshot_provenance import stage_project_raw_snapshot_tombstones
 
 
 class ProjectDeletionBlocked(RuntimeError):
@@ -415,6 +416,11 @@ def delete_project(project: Project) -> ProjectDeletionResult:
             )
         ]
         plan = _build_storage_plan(project, job_ids)
+        stage_project_raw_snapshot_tombstones(
+            db.session,
+            project_id,
+            config.OUTPUT_DIR,
+        )
         quarantined = _prepare_managed_storage_quarantine(plan)
 
         (

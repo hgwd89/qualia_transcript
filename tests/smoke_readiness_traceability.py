@@ -1,3 +1,4 @@
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -22,6 +23,18 @@ def load_base_audit(repo_root: Path):
     return module
 
 
+def load_hardened_audit(repo_root: Path):
+    scripts_dir = repo_root / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    script = scripts_dir / "audit_production_readiness_v2.py"
+    spec = importlib.util.spec_from_file_location("audit_production_readiness_v2_traceability", script)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def create_schema(db_path: Path) -> None:
     con = sqlite3.connect(db_path)
     try:
@@ -40,7 +53,13 @@ def create_schema(db_path: Path) -> None:
                 status TEXT
             );
             CREATE TABLE media_files (id INTEGER PRIMARY KEY, interview_id INTEGER);
-            CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, media_file_id INTEGER, status TEXT);
+            CREATE TABLE transcriptions (
+                id INTEGER PRIMARY KEY,
+                media_file_id INTEGER,
+                status TEXT,
+                started_at DATETIME,
+                completed_at DATETIME
+            );
             CREATE TABLE segments (
                 id INTEGER PRIMARY KEY,
                 interview_id INTEGER,
@@ -91,12 +110,41 @@ def blocker_codes(report: dict) -> set[str]:
     return {str(item.get("code")) for item in report.get("blockers", [])}
 
 
+def warning_codes(report: dict) -> set[str]:
+    return {str(item.get("code")) for item in report.get("warnings", [])}
+
+
+def write_raw_snapshot(
+    path: Path,
+    *,
+    transcription_id: int,
+    interview_id: int,
+    created_at_utc: str,
+    text: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "transcription_id": transcription_id,
+                "interview_id": interview_id,
+                "created_at_utc": created_at_utc,
+                "text": text,
+                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
     failures = 0
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     audit_mod = load_base_audit(repo_root)
+    hardened_audit_mod = load_hardened_audit(repo_root)
 
     with tempfile.TemporaryDirectory(prefix="qualia_readiness_traceability_") as tmp:
         root = Path(tmp)
@@ -171,6 +219,81 @@ def main() -> int:
             not any((item.get("context") or {}).get("segment_id") == 2 for item in mismatches)
             and any((item.get("context") or {}).get("segment_id") == 3 for item in mismatches),
             str(mismatches),
+        )
+
+        # Raw snapshots are intentionally retained after project/transcription
+        # deletion. Prove that reusing the same SQLite integer ID cannot cause a
+        # predecessor snapshot to satisfy readiness for the replacement row.
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute("INSERT INTO media_files VALUES (1, 1)")
+            con.execute(
+                "INSERT INTO transcriptions VALUES (1, 1, 'done', ?, ?)",
+                ("2026-09-13 00:00:00", "2026-09-13 00:10:00"),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        raw_dir = output_dir / "raw_transcripts"
+        predecessor_snapshot = raw_dir / "transcription_1_predecessor.json"
+        write_raw_snapshot(
+            predecessor_snapshot,
+            transcription_id=1,
+            interview_id=1,
+            created_at_utc="2026-09-13T00:05:00+00:00",
+            text="immutable predecessor source",
+        )
+        predecessor_bytes = predecessor_snapshot.read_bytes()
+
+        original_base = audit_mod.audit(db_path, output_dir, backup_dir)
+        original_hardened = hardened_audit_mod.audit(db_path, output_dir, backup_dir)
+        failures += check(
+            "current-generation raw snapshot satisfies both readiness audits",
+            "done_transcription_without_raw_snapshot" not in warning_codes(original_base)
+            and "done_transcription_without_raw_snapshot" not in warning_codes(original_hardened),
+            f"base={warning_codes(original_base)} hardened={warning_codes(original_hardened)}",
+        )
+
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute("DELETE FROM transcriptions WHERE id=1")
+            con.execute(
+                "INSERT INTO transcriptions VALUES (1, 1, 'done', ?, ?)",
+                ("2026-09-13 01:00:00", "2026-09-13 01:10:00"),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        reused_base = audit_mod.audit(db_path, output_dir, backup_dir)
+        reused_hardened = hardened_audit_mod.audit(db_path, output_dir, backup_dir)
+        failures += check(
+            "retained predecessor snapshot cannot mask missing snapshot after transcription ID reuse",
+            "done_transcription_without_raw_snapshot" in warning_codes(reused_base)
+            and "done_transcription_without_raw_snapshot" in warning_codes(reused_hardened),
+            f"base={warning_codes(reused_base)} hardened={warning_codes(reused_hardened)}",
+        )
+        failures += check(
+            "ID-reuse readiness check leaves immutable predecessor bytes unchanged",
+            predecessor_snapshot.read_bytes() == predecessor_bytes,
+        )
+
+        replacement_snapshot = raw_dir / "transcription_1_replacement.json"
+        write_raw_snapshot(
+            replacement_snapshot,
+            transcription_id=1,
+            interview_id=1,
+            created_at_utc="2026-09-13T01:05:00+00:00",
+            text="replacement generation source",
+        )
+        replacement_base = audit_mod.audit(db_path, output_dir, backup_dir)
+        replacement_hardened = hardened_audit_mod.audit(db_path, output_dir, backup_dir)
+        failures += check(
+            "replacement generation requires and accepts its own raw snapshot",
+            "done_transcription_without_raw_snapshot" not in warning_codes(replacement_base)
+            and "done_transcription_without_raw_snapshot" not in warning_codes(replacement_hardened),
+            f"base={warning_codes(replacement_base)} hardened={warning_codes(replacement_hardened)}",
         )
 
     if failures:
