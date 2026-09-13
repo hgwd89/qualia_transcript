@@ -252,6 +252,6 @@ def get_full_path(gf: GeneratedFile) -> str:
 
 def file_exists(gf: GeneratedFile) -> bool:
     try:
-        return Path(get_full_path(gf.stored_path)) if False else Path(get_full_path(gf)).is_file()
+        return Path(get_full_path(gf)).is_file()
     except ValueError:
         return False
