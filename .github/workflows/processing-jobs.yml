@@ -35,6 +35,9 @@ jobs:
       - name: Run durable processing job regression
         run: python tests/smoke_processing_jobs.py
 
+      - name: Run processing input fencing regression
+        run: python tests/smoke_processing_input_fencing.py
+
       - name: Run role normalization regression
         run: python tests/smoke_role_normalization.py
 
