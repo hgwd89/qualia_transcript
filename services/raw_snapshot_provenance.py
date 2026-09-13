@@ -16,6 +16,8 @@ from uuid import uuid4
 
 from sqlalchemy import text
 
+from services.raw_snapshot_storage import read_raw_snapshot_batch
+
 
 TABLE_NAME = "raw_snapshot_tombstones"
 
@@ -60,6 +62,10 @@ def stage_project_raw_snapshot_tombstones(
     already ambiguous because of historical ID reuse; excluding it permanently is
     safer than allowing a later reused ID/generation window to reclassify it as a
     current snapshot.
+
+    Directory enumeration and every JSON read share one pinned raw-directory
+    identity. A linked/reparse directory or pathname replacement therefore aborts
+    deletion rather than silently binding provenance to bytes from another tree.
     """
     project_id = int(project_id)
     ensure_raw_snapshot_tombstone_table(session)
@@ -89,19 +95,15 @@ def stage_project_raw_snapshot_tombstones(
     }
     by_transcription = {int(row["id"]): row for row in rows}
     owner_tokens = {int(row["id"]): uuid4().hex for row in rows}
-    raw_dir = Path(output_dir).resolve() / "raw_transcripts"
-    if not raw_dir.is_dir():
-        return 0
 
     deleted_at_utc = datetime.now(timezone.utc).isoformat()
     inserted = 0
-    for path in sorted(raw_dir.glob("*.json")):
-        if path.name in existing_names or path.is_symlink():
+    for snapshot_name, snapshot_bytes in read_raw_snapshot_batch(output_dir):
+        if snapshot_name in existing_names:
             continue
         try:
-            snapshot_bytes = path.read_bytes()
             payload = json.loads(snapshot_bytes.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        except (UnicodeDecodeError, json.JSONDecodeError):
             # Malformed source remains untouched. Readiness reports it as invalid;
             # without trustworthy owner IDs it cannot be safely attributed here.
             continue
@@ -149,7 +151,7 @@ def stage_project_raw_snapshot_tombstones(
                 """
             ),
             {
-                "snapshot_name": path.name,
+                "snapshot_name": snapshot_name,
                 "snapshot_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
                 "owner_token": owner_tokens[int(transcription_id)],
                 "project_id": project_id,
@@ -161,6 +163,6 @@ def stage_project_raw_snapshot_tombstones(
                 "deleted_at_utc": deleted_at_utc,
             },
         )
-        existing_names.add(path.name)
+        existing_names.add(snapshot_name)
         inserted += 1
     return inserted

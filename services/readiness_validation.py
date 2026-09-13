@@ -8,6 +8,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from services.raw_snapshot_storage import read_raw_snapshot_batch
+
 
 def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], list[dict]]:
     """Load immutable raw text snapshots keyed by transcription id.
@@ -16,27 +18,42 @@ def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], li
     immutable text snapshot required for a completed transcription. Integer IDs
     are only a lookup index; ownership is verified separately against the current
     transcription generation before a snapshot can satisfy readiness.
+
+    Directory enumeration and every JSON read share one pinned raw-directory
+    identity. Unsafe directory/file replacement therefore becomes an explicit
+    readiness defect instead of redirecting validation to different bytes.
     """
     by_transcription: dict[int, list[dict]] = defaultdict(list)
     invalid: list[dict] = []
     raw_dir = output_dir / "raw_transcripts"
-    if not raw_dir.is_dir():
+
+    try:
+        snapshot_batch = read_raw_snapshot_batch(output_dir)
+    except Exception as exc:
+        invalid.append({
+            "path": str(raw_dir),
+            "reason": f"{type(exc).__name__}: {exc}",
+        })
         return by_transcription, invalid
 
-    for path in sorted(raw_dir.glob("*.json")):
+    for snapshot_name, snapshot_bytes in snapshot_batch:
+        display_path = raw_dir / snapshot_name
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(snapshot_bytes.decode("utf-8"))
         except Exception as exc:
-            invalid.append({"path": str(path), "reason": f"{type(exc).__name__}: {exc}"})
+            invalid.append({
+                "path": str(display_path),
+                "reason": f"{type(exc).__name__}: {exc}",
+            })
             continue
 
         if not isinstance(payload, dict):
-            invalid.append({"path": str(path), "reason": "snapshot is not a JSON object"})
+            invalid.append({"path": str(display_path), "reason": "snapshot is not a JSON object"})
             continue
 
         transcription_id = payload.get("transcription_id")
         if not isinstance(transcription_id, int):
-            invalid.append({"path": str(path), "reason": "transcription_id missing/non-integer"})
+            invalid.append({"path": str(display_path), "reason": "transcription_id missing/non-integer"})
             continue
 
         text = payload.get("text")
@@ -44,9 +61,12 @@ def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], li
             actual_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             expected_hash = str(payload.get("sha256") or "").strip()
             if expected_hash and expected_hash != actual_hash:
-                invalid.append({"path": str(path), "reason": "sha256 does not match snapshot text"})
+                invalid.append({"path": str(display_path), "reason": "sha256 does not match snapshot text"})
                 continue
-            by_transcription[transcription_id].append({"path": str(path), "payload": payload})
+            by_transcription[transcription_id].append({
+                "path": str(display_path),
+                "payload": payload,
+            })
             continue
 
         # Chunk manifests are legitimate metadata, but not a raw text snapshot.
@@ -54,7 +74,7 @@ def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], li
             continue
 
         invalid.append({
-            "path": str(path),
+            "path": str(display_path),
             "reason": "snapshot has neither raw text nor recognized chunk-manifest structure",
         })
 
