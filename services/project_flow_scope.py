@@ -141,6 +141,7 @@ def resolve_integrated_analysis_scope(project) -> IntegratedAnalysisScope:
                 .filter(
                     Segment.interview_id == int(interview.id),
                     Segment.speaker_role == "respondent",
+                    UtteranceMapping.is_unclassified.is_(False),
                     UtteranceMapping.question_id.in_(flow_question_ids),
                 )
                 .first()
