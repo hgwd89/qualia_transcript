@@ -49,7 +49,13 @@ def create_fixture(db_path: Path) -> None:
                 status TEXT
             );
             CREATE TABLE media_files (id INTEGER PRIMARY KEY, interview_id INTEGER);
-            CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, media_file_id INTEGER, status TEXT);
+            CREATE TABLE transcriptions (
+                id INTEGER PRIMARY KEY,
+                media_file_id INTEGER,
+                status TEXT,
+                started_at DATETIME,
+                completed_at DATETIME
+            );
             CREATE TABLE segments (
                 id INTEGER PRIMARY KEY,
                 interview_id INTEGER,
