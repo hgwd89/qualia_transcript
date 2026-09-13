@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -50,9 +51,15 @@ def main() -> int:
 
             from app import create_app
             from models import db
-            from models.interview import Interview, MediaFile
+            from models.interview import Interview, MediaFile, Transcription
             from models.project import Project
+            from models.segment import Segment
+            import services.transcription as transcription_service
             import services.upload_manager as upload_manager_service
+            from services.readiness_validation import (
+                load_raw_text_snapshots,
+                missing_raw_snapshot_transcription_ids,
+            )
             from services.upload_manager import (
                 create_media_read_snapshot,
                 get_media_full_path,
@@ -295,6 +302,77 @@ def main() -> int:
                     ),
                 )
 
+                class FakeLocalSegment:
+                    def __init__(self, start, end, text, speaker=None):
+                        self.start = start
+                        self.end = end
+                        self.text = text
+                        self.speaker = speaker
+
+                class FakeLocalModel:
+                    def transcribe(self, *_args, **_kwargs):
+                        return iter([
+                            FakeLocalSegment(0.0, 1.0, " えーっと", "A"),
+                            FakeLocalSegment(1.0, 2.0, " そのままです。 ", "A"),
+                        ]), object()
+
+                local_tr = Transcription(
+                    media_file_id=int(media.id),
+                    whisper_model="tiny",
+                    language="ja",
+                    status="pending",
+                )
+                db.session.add(local_tr)
+                db.session.commit()
+                local_tr_id = int(local_tr.id)
+                expected_raw_text = " えーっと そのままです。 "
+                expected_raw_sha = hashlib.sha256(expected_raw_text.encode("utf-8")).hexdigest()
+
+                with patch.object(
+                    transcription_service,
+                    "_get_model",
+                    return_value=FakeLocalModel(),
+                ):
+                    local_result = transcription_service.run_local_whisper_transcription(local_tr_id)
+
+                local_tr = db.session.get(Transcription, local_tr_id)
+                local_snapshot_path = Path(config.OUTPUT_DIR) / local_result["raw_snapshot_path"]
+                local_payload = json.loads(local_snapshot_path.read_text(encoding="utf-8"))
+                local_segment_texts = [
+                    row.text
+                    for row in Segment.query.filter_by(transcription_id=local_tr_id)
+                    .order_by(Segment.seq)
+                    .all()
+                ]
+                by_transcription, invalid_snapshots = load_raw_text_snapshots(Path(config.OUTPUT_DIR))
+                missing_local = missing_raw_snapshot_transcription_ids(
+                    [{
+                        "id": local_tr_id,
+                        "interview_id": int(interview.id),
+                        "started_at": local_tr.started_at,
+                        "completed_at": local_tr.completed_at,
+                    }],
+                    by_transcription,
+                )
+                failures += check(
+                    "local Whisper success persists exact provider text as current-generation raw evidence",
+                    local_tr.status == "done"
+                    and local_snapshot_path.is_file()
+                    and local_payload.get("text") == expected_raw_text
+                    and local_payload.get("sha256") == expected_raw_sha
+                    and local_payload.get("snapshot_tag") == "local_whisper"
+                    and local_result.get("raw_text_sha256") == expected_raw_sha
+                    and local_result.get("raw_snapshot_files") == [local_result.get("raw_snapshot_path")]
+                    and local_segment_texts == ["えーっと", "そのままです。"]
+                    and not invalid_snapshots
+                    and missing_local == [],
+                    (
+                        f"status={local_tr.status} text={local_payload.get('text')!r} "
+                        f"segments={local_segment_texts!r} invalid={invalid_snapshots!r} "
+                        f"missing={missing_local!r}"
+                    ),
+                )
+
                 db.session.remove()
                 db.engine.dispose()
 
@@ -311,6 +389,12 @@ def main() -> int:
                 and "get_media_full_path(media)" not in transcription_source
                 and transcription_source.count("media_snapshot.close()") == 2
                 and "os.path.join(config.UPLOAD_DIR, media.stored_path)" not in transcription_source,
+            )
+            failures += check(
+                "local Whisper cannot mark success without immutable raw provider evidence",
+                'raw_text = "".join(str(getattr(seg, "text", "") or "") for seg in local_segments)' in transcription_source
+                and 'raise RuntimeError("local Whisper transcription returned empty text")' in transcription_source
+                and 'snapshot_tag="local_whisper"' in transcription_source,
             )
             failures += check(
                 "legacy databases receive the media content identity column additively",
