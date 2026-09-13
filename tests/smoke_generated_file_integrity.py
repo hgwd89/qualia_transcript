@@ -43,6 +43,7 @@ def main() -> int:
                 prepare_output_target,
                 register_generated_file,
                 safe_output_filename,
+                write_output_target,
             )
 
             app = create_app()
@@ -88,7 +89,7 @@ def main() -> int:
                     f"storage_bytes={len(long_storage_name.encode('utf-8'))}",
                 )
 
-                target_path.write_bytes(b"generated")
+                write_output_target(target, lambda stream: stream.write(b"generated"))
                 gf = register_generated_file(
                     target,
                     project_id=project_id,
@@ -96,13 +97,32 @@ def main() -> int:
                     file_format="xlsx",
                 )
                 failures += check(
-                    "successful registration keeps file and DB row aligned",
+                    "successful managed write registration keeps file and DB row aligned",
                     gf.id is not None
                     and gf.original_filename == target.filename
                     and gf.stored_path == target.stored_path
                     and file_exists(gf)
-                    and Path(get_full_path(gf)) == target_path,
+                    and Path(get_full_path(gf)) == target_path
+                    and target_path.read_bytes() == b"generated",
                     f"file_id={gf.id} stored_path={gf.stored_path}",
+                )
+
+                failed_write = prepare_output_target(project_id, "writer-fails.xlsx")
+                failed_write_path = Path(failed_write.full_path)
+
+                def raise_after_partial(stream):
+                    stream.write(b"partial")
+                    raise RuntimeError("simulated report writer failure")
+
+                writer_failed = False
+                try:
+                    write_output_target(failed_write, raise_after_partial)
+                except RuntimeError as exc:
+                    writer_failed = "simulated report writer failure" in str(exc)
+                failures += check(
+                    "failed managed writer removes its partial target",
+                    writer_failed and not failed_write_path.exists(),
+                    f"raised={writer_failed} exists={failed_write_path.exists()}",
                 )
 
                 first_collision = prepare_output_target(project_id, "同時生成.xlsx")
@@ -117,7 +137,10 @@ def main() -> int:
                     f"first={first_collision.stored_path} second={second_collision.stored_path}",
                 )
 
-                first_collision_path.write_bytes(b"first-success")
+                write_output_target(
+                    first_collision,
+                    lambda stream: stream.write(b"first-success"),
+                )
                 first_collision_gf = register_generated_file(
                     first_collision,
                     project_id=project_id,
@@ -126,7 +149,10 @@ def main() -> int:
                 )
                 before_count = GeneratedFile.query.count()
 
-                second_collision_path.write_bytes(b"second-fails")
+                write_output_target(
+                    second_collision,
+                    lambda stream: stream.write(b"second-fails"),
+                )
                 session = db.session()
 
                 def fail_before_commit(_session):
@@ -284,9 +310,12 @@ def main() -> int:
             for relative, marker in wired.items():
                 text = (repo_root / relative).read_text(encoding="utf-8")
                 failures += check(
-                    f"{relative} uses managed generated-file registration",
+                    f"{relative} writes and registers through managed boundaries",
                     "prepare_output_target" in text
+                    and "write_output_target" in text
                     and "register_generated_file" in text
+                    and ".save(target.full_path)" not in text
+                    and "open(target.full_path" not in text
                     and marker in text,
                 )
 
