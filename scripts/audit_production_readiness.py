@@ -367,17 +367,44 @@ def audit(
             if fmt and path.suffix.lower() != f".{fmt}":
                 _issue(warnings, "generated_file_extension_mismatch", "GeneratedFile extension differs from file_format", generated_file_id=row["id"], file_format=fmt, path=str(path))
 
-        raw_by_tid, malformed_raw = _load_raw_snapshots(output_dir)
+        root = _root()
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from services.readiness_validation import (
+            load_raw_snapshot_tombstone_names,
+            load_raw_text_snapshots,
+            missing_raw_snapshot_transcription_ids,
+        )
+
+        raw_by_tid, malformed_raw = load_raw_text_snapshots(output_dir)
+        tombstoned_snapshot_names = load_raw_snapshot_tombstone_names(con)
         info["raw_transcript_snapshot_count"] = sum(len(v) for v in raw_by_tid.values())
+        info["raw_snapshot_tombstone_count"] = len(tombstoned_snapshot_names)
         if malformed_raw:
-            _issue(blockers, "malformed_raw_transcript_snapshot", "Raw transcript snapshot JSON is malformed", files=malformed_raw[:100], count=len(malformed_raw))
+            _issue(blockers, "malformed_raw_transcript_snapshot", "Raw transcript snapshot is structurally invalid", files=malformed_raw[:100], count=len(malformed_raw))
 
         done_transcriptions = con.execute(
-            "SELECT id FROM transcriptions WHERE status='done' ORDER BY id"
+            """
+            SELECT tr.id, mf.interview_id, tr.started_at, tr.completed_at
+            FROM transcriptions tr
+            JOIN media_files mf ON mf.id=tr.media_file_id
+            WHERE tr.status='done'
+            ORDER BY tr.id
+            """
         ).fetchall()
-        missing_raw = [int(r["id"]) for r in done_transcriptions if int(r["id"]) not in raw_by_tid]
+        missing_raw = missing_raw_snapshot_transcription_ids(
+            done_transcriptions,
+            raw_by_tid,
+            tombstoned_snapshot_names,
+        )
         if missing_raw:
-            _issue(warnings, "done_transcription_without_raw_snapshot", "Completed transcriptions have no raw snapshot", transcription_ids=missing_raw[:200], count=len(missing_raw))
+            _issue(
+                warnings,
+                "done_transcription_without_raw_snapshot",
+                "Completed transcriptions have no raw snapshot from their current generation",
+                transcription_ids=missing_raw[:200],
+                count=len(missing_raw),
+            )
 
         backups = sorted(backup_dir.glob("qualia_backup_*.zip")) if backup_dir.is_dir() else []
         info["backup_count"] = len(backups)

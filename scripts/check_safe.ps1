@@ -135,6 +135,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] project deletion lifecycle smoke checks passed."
 
+Write-Host "[INFO] Running raw snapshot provenance smoke check..."
+python tests/smoke_raw_snapshot_provenance.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] raw snapshot provenance smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] raw snapshot provenance smoke checks passed."
+
 Write-Host "[INFO] Running project scope/delete guard smoke check..."
 python tests/smoke_project_scope_delete_guards.py
 if ($LASTEXITCODE -ne 0) {
