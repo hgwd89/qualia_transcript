@@ -17,12 +17,24 @@ from models.speaker_assignment import SpeakerAssignment
 from models.analysis import AIAnalysis
 from services.product_hint import lookup_product_hints, render_inline_hint
 from services.upload_manager import save_and_register_media
+from services.research_input_guard import (
+    ResearchInputWriteBlocked,
+    begin_interview_input_write,
+)
 
 bp = Blueprint("interviews", __name__)
 
 ALLOWED = config.ALLOWED_AUDIO_EXTENSIONS
 FLAG_TYPES = ("favorite", "quote", "exclude", "needs_review")
 SPEAKER_ROLES = ("moderator", "respondent", "observer", "unknown")
+
+
+def _input_write_blocked_response(exc: ResearchInputWriteBlocked):
+    return jsonify({
+        "ok": False,
+        "error": "処理中のジョブが分析入力を使用しているため、完了または失敗後に変更してください。",
+        "active_job_ids": list(exc.active_job_ids),
+    }), 409
 
 
 def _allowed(filename):
@@ -347,7 +359,24 @@ def upsert_segment_mapping(interview_id, segment_id):
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "invalid question_id"}), 400
 
+    try:
+        interview = begin_interview_input_write(interview.id)
+    except ResearchInputWriteBlocked as exc:
+        return _input_write_blocked_response(exc)
+    except ValueError:
+        return jsonify({"ok": False, "error": "interview not found"}), 404
+
+    seg = db.session.get(Segment, int(segment_id))
+    if seg is None:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "segment not found"}), 404
+    if int(seg.interview_id) != int(interview.id):
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "segment does not belong to interview"}), 400
+
+    if question_id is not None:
         if not interview.flow_id:
+            db.session.rollback()
             return jsonify({"ok": False, "error": "interview flow is not set"}), 400
 
         question = (
@@ -358,6 +387,7 @@ def upsert_segment_mapping(interview_id, segment_id):
             .first()
         )
         if not question:
+            db.session.rollback()
             return jsonify({"ok": False, "error": "question does not belong to interview flow"}), 400
 
     mappings = (
@@ -449,24 +479,48 @@ def update_segment_role(interview_id, segment_id):
     if "speaker_role" not in data and "participant_id" not in data:
         return jsonify({"ok": False, "error": "no role fields supplied"}), 400
 
-    speaker_role = seg.speaker_role or "unknown"
+    requested_speaker_role = None
     if "speaker_role" in data:
-        speaker_role = str(data.get("speaker_role") or "").strip()
-    if speaker_role not in SPEAKER_ROLES:
-        return jsonify({"ok": False, "error": "invalid speaker_role"}), 400
+        requested_speaker_role = str(data.get("speaker_role") or "").strip()
+        if requested_speaker_role not in SPEAKER_ROLES:
+            return jsonify({"ok": False, "error": "invalid speaker_role"}), 400
+
+    participant_supplied = "participant_id" in data
+    requested_participant_id = data.get("participant_id") if participant_supplied else None
+    if participant_supplied and requested_participant_id not in (None, ""):
+        try:
+            requested_participant_id = int(requested_participant_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "invalid participant_id"}), 400
+    elif participant_supplied:
+        requested_participant_id = None
+
+    try:
+        interview = begin_interview_input_write(interview.id)
+    except ResearchInputWriteBlocked as exc:
+        return _input_write_blocked_response(exc)
+    except ValueError:
+        return jsonify({"ok": False, "error": "interview not found"}), 404
+
+    seg = db.session.get(Segment, int(segment_id))
+    if seg is None:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "segment not found"}), 404
+    if int(seg.interview_id) != int(interview.id):
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "segment does not belong to interview"}), 400
+
+    speaker_role = seg.speaker_role or "unknown"
+    if requested_speaker_role is not None:
+        speaker_role = requested_speaker_role
 
     participant_id = seg.participant_id
-    if "participant_id" in data:
-        participant_id = data.get("participant_id")
-        if participant_id in (None, ""):
-            participant_id = None
-        else:
-            try:
-                participant_id = int(participant_id)
-            except (TypeError, ValueError):
-                return jsonify({"ok": False, "error": "invalid participant_id"}), 400
-            participant = Participant.query.get(participant_id)
-            if not participant or participant.project_id != interview.project_id:
+    if participant_supplied:
+        participant_id = requested_participant_id
+        if participant_id is not None:
+            participant = db.session.get(Participant, int(participant_id))
+            if not participant or int(participant.project_id) != int(interview.project_id):
+                db.session.rollback()
                 return jsonify({"ok": False, "error": "participant does not belong to project"}), 400
 
     seg.speaker_role = speaker_role
