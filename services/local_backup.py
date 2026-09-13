@@ -65,17 +65,75 @@ def _restrict_permissions(path: Path, mode: int) -> None:
     """Enforce owner-only backup permissions on POSIX and Windows."""
     if os.name == "nt":
         sid = _current_windows_user_sid()
-        grant = f"*{sid}:(OI)(CI)F" if path.is_dir() else f"*{sid}:(F)"
+        script = r"""
+$ErrorActionPreference = 'Stop'
+$target = $env:QUALIA_ACL_TARGET
+$sidText = $env:QUALIA_ACL_SID
+$sid = [System.Security.Principal.SecurityIdentifier]::new($sidText)
+$item = Get-Item -LiteralPath $target -Force
+$acl = Get-Acl -LiteralPath $target
+
+# Protect the DACL and discard inherited ACEs, then remove every explicit ACE.
+# `/grant:r` alone is insufficient because it replaces only ACEs for the named
+# identity and can leave an explicit Everyone/Users grant in place.
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($rule in @($acl.Access)) {
+    [void]$acl.RemoveAccessRuleSpecific($rule)
+}
+
+$inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+if ($item.PSIsContainer) {
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+}
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+    $sid,
+    [System.Security.AccessControl.FileSystemRights]::FullControl,
+    $inheritance,
+    [System.Security.AccessControl.PropagationFlags]::None,
+    [System.Security.AccessControl.AccessControlType]::Allow
+)
+[void]$acl.AddAccessRule($rule)
+Set-Acl -LiteralPath $target -AclObject $acl
+
+# Fail closed if Windows did not persist the intended protected, single-SID DACL.
+$final = Get-Acl -LiteralPath $target
+if (-not $final.AreAccessRulesProtected) {
+    throw 'backup ACL inheritance is still enabled'
+}
+$rules = @($final.Access)
+if ($rules.Count -lt 1) {
+    throw 'backup ACL has no current-user access rule'
+}
+foreach ($candidate in $rules) {
+    try {
+        $candidateSid = $candidate.IdentityReference.Translate(
+            [System.Security.Principal.SecurityIdentifier]
+        ).Value
+    } catch {
+        $candidateSid = $candidate.IdentityReference.Value
+    }
+    if ($candidateSid -ne $sidText -or
+        $candidate.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow) {
+        throw "backup ACL retained an unrelated or deny ACE: $candidateSid"
+    }
+}
+"""
+        env = os.environ.copy()
+        env["QUALIA_ACL_TARGET"] = str(path)
+        env["QUALIA_ACL_SID"] = sid
         result = subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", grant],
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
             check=False,
         )
         if result.returncode != 0:
-            raise OSError(f"could not restrict Windows ACL for backup path: {path}")
+            detail = (result.stderr or result.stdout).strip()
+            raise OSError(f"could not restrict Windows ACL for backup path: {path}: {detail}")
         return
     os.chmod(path, mode)
 
