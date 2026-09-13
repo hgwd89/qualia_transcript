@@ -616,14 +616,29 @@ def run_transcription(
             )
         except Exception:
             if get_fallback_provider() == "local_whisper":
-                return run_local_whisper_transcription(
+                # Long-form OpenAI can already have committed earlier chunks. Fence
+                # cleanup with the durable write reservation before switching the
+                # same Transcription row to a full local result.
+                if result_write_guard is not None:
+                    result_write_guard()
+                elif lease_check is not None:
+                    lease_check()
+                from services.processing_result_guard import discard_transcription_segments
+
+                discarded_openai_segments = discard_transcription_segments(transcription_id)
+                result = run_local_whisper_transcription(
                     transcription_id,
+                    lease_check=lease_check,
                     result_write_guard=result_write_guard,
                 )
+                if isinstance(result, dict):
+                    result["discarded_openai_segment_count"] = discarded_openai_segments
+                return result
             raise
 
     return run_local_whisper_transcription(
         transcription_id,
+        lease_check=lease_check,
         result_write_guard=result_write_guard,
     )
 
@@ -972,6 +987,10 @@ def run_openai_transcription(
         # Never let uncommitted Segment rows hitchhike on the error-state commit.
         # Completed long-audio chunks were committed earlier and remain auditable.
         db.session.rollback()
+        # If this exception reflects durable lease loss, the stale worker must
+        # not write even an error transition after recovery has taken ownership.
+        if lease_check is not None:
+            lease_check()
         tr.status = "error"
         tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()
@@ -984,6 +1003,7 @@ def run_openai_transcription(
 def run_local_whisper_transcription(
     transcription_id: int,
     *,
+    lease_check: LeaseCheck | None = None,
     result_write_guard: ResultWriteGuard | None = None,
 ) -> dict:
     """
@@ -992,6 +1012,11 @@ def run_local_whisper_transcription(
     tr = Transcription.query.get(transcription_id)
     if not tr:
         return {"error": "transcription not found"}
+
+    # A recovered worker must not mutate the transcription row or start local
+    # inference once this durable attempt no longer owns the job lease.
+    if lease_check is not None:
+        lease_check()
 
     tr.status = "running"
     tr.started_at = datetime.now(timezone.utc)
@@ -1032,9 +1057,12 @@ def run_local_whisper_transcription(
             raise RuntimeError("local Whisper transcription returned empty text")
 
         # A recovered/stale worker must not create fresh immutable evidence after
-        # losing the durable result-write reservation.
+        # losing the durable lease. Durable jobs use the stronger write reservation;
+        # direct callers with only a lease callback still revalidate here.
         if result_write_guard is not None:
             result_write_guard()
+        elif lease_check is not None:
+            lease_check()
 
         raw_snapshot_path, raw_text_sha256 = _write_raw_transcript_snapshot(
             transcription_id=transcription_id,
@@ -1084,6 +1112,10 @@ def run_local_whisper_transcription(
         # Never let uncommitted Segment rows hitchhike on the error-state commit.
         # Completed long-audio chunks were committed earlier and remain auditable.
         db.session.rollback()
+        # If this exception reflects durable lease loss, the stale worker must
+        # not write even an error transition after recovery has taken ownership.
+        if lease_check is not None:
+            lease_check()
         tr.status = "error"
         tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()
