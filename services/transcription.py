@@ -657,6 +657,14 @@ def run_openai_transcription(
     if not tr:
         return {"error": "transcription not found"}
 
+    # The running transition is canonical state. Durable callers reserve
+    # the write so recovery cannot supersede this attempt between lease check and
+    # commit. Lease-only direct callers retain the lighter fallback check.
+    if result_write_guard is not None:
+        result_write_guard()
+    elif lease_check is not None:
+        lease_check()
+
     tr.status = "running"
     tr.started_at = datetime.now(timezone.utc)
     tr.error_message = None
@@ -684,6 +692,14 @@ def run_openai_transcription(
             if not text:
                 raise RuntimeError("OpenAI transcription returned empty text")
 
+            # Reserve before immutable evidence publication, not only before
+            # Segment/done writes. Otherwise a recovered stale worker could leave a
+            # fresh source snapshot after losing ownership.
+            if result_write_guard is not None:
+                result_write_guard()
+            elif lease_check is not None:
+                lease_check()
+
             raw_snapshot_path, raw_text_sha256 = _write_raw_transcript_snapshot(
                 transcription_id=transcription_id,
                 interview_id=interview.id,
@@ -695,11 +711,6 @@ def run_openai_transcription(
             diarized_segments: list[dict] = []
             if _is_diarize_model(model_name):
                 diarized_segments = _parse_diarized_segments(resp)
-
-            # External API work is complete. Durable callers acquire the result
-            # write reservation before any canonical Segment/done state is written.
-            if result_write_guard is not None:
-                result_write_guard()
 
             if diarized_segments:
                 speaker_role_map = infer_speaker_roles_from_diarized_segments(diarized_segments)
@@ -945,6 +956,12 @@ def run_openai_transcription(
                     record["error_type"] = err_type
                     record["error_message"] = err_message
                     chunk_records.append(record)
+                    # Error manifests are immutable evidence too. Do not publish one
+                    # after a newer durable attempt has taken ownership.
+                    if result_write_guard is not None:
+                        result_write_guard()
+                    elif lease_check is not None:
+                        lease_check()
                     manifest_path = _write_chunk_manifest(
                         transcription_id=transcription_id,
                         interview_id=interview.id,
@@ -962,6 +979,13 @@ def run_openai_transcription(
 
                 offset += step
 
+        # Reserve the durable attempt before publishing the final chunk manifest.
+        # Keep the same reservation through the canonical done-state commit.
+        if result_write_guard is not None:
+            result_write_guard()
+        elif lease_check is not None:
+            lease_check()
+
         manifest_path = _write_chunk_manifest(
             transcription_id=transcription_id,
             interview_id=interview.id,
@@ -972,11 +996,6 @@ def run_openai_transcription(
             chunks=chunk_records,
             status="done",
         )
-
-        # Partial chunks are auditable/retry-cleanable, but the final canonical
-        # done transition must be fenced against a recovered newer attempt.
-        if result_write_guard is not None:
-            result_write_guard()
 
         tr.status = "done"
         tr.word_count = word_count
@@ -996,9 +1015,11 @@ def run_openai_transcription(
         # Never let uncommitted Segment rows hitchhike on the error-state commit.
         # Completed long-audio chunks were committed earlier and remain auditable.
         db.session.rollback()
-        # If this exception reflects durable lease loss, the stale worker must
-        # not write even an error transition after recovery has taken ownership.
-        if lease_check is not None:
+        # Error status is canonical too. Reserve the write so stale recovery
+        # cannot land between ownership validation and this terminal commit.
+        if result_write_guard is not None:
+            result_write_guard()
+        elif lease_check is not None:
             lease_check()
         tr.status = "error"
         tr.error_message = _sanitize_error_message(str(e))
@@ -1022,9 +1043,11 @@ def run_local_whisper_transcription(
     if not tr:
         return {"error": "transcription not found"}
 
-    # A recovered worker must not mutate the transcription row or start local
-    # inference once this durable attempt no longer owns the job lease.
-    if lease_check is not None:
+    # The local running transition is canonical state just like the OpenAI
+    # path. Durable callers need the DB write reservation, not a check-then-commit.
+    if result_write_guard is not None:
+        result_write_guard()
+    elif lease_check is not None:
         lease_check()
 
     tr.status = "running"
@@ -1032,6 +1055,7 @@ def run_local_whisper_transcription(
     tr.error_message = None
     db.session.commit()
 
+    # Local provider transition marker: the lease/result-write fence is above.
     media_snapshot = None
     try:
         media = tr.media_file
@@ -1121,9 +1145,11 @@ def run_local_whisper_transcription(
         # Never let uncommitted Segment rows hitchhike on the error-state commit.
         # Completed long-audio chunks were committed earlier and remain auditable.
         db.session.rollback()
-        # If this exception reflects durable lease loss, the stale worker must
-        # not write even an error transition after recovery has taken ownership.
-        if lease_check is not None:
+        # Error status is canonical too. Reserve the write so stale recovery
+        # cannot land between ownership validation and this terminal commit.
+        if result_write_guard is not None:
+            result_write_guard()
+        elif lease_check is not None:
             lease_check()
         tr.status = "error"
         tr.error_message = _sanitize_error_message(str(e))

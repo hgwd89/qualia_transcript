@@ -410,8 +410,16 @@ def _perform_transcription(job: ProcessingJob) -> dict:
         }
 
     update_progress(job, "transcribing")
+
+    # Fence cleanup separately. The helper commits internally, so the reservation
+    # must be acquired before it can delete partial Segment rows or supersede an
+    # older incomplete Transcription.
+    begin_job_result_write(job)
     cleanup = discard_incomplete_transcription_segments(media.id)
 
+    # Fence creation of the next canonical transcription attempt as a second
+    # commit boundary. Recovery may have advanced the attempt after cleanup.
+    begin_job_result_write(job)
     tr = Transcription(
         media_file_id=media.id,
         whisper_model=get_default_transcription_model(),
