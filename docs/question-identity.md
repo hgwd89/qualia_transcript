@@ -35,7 +35,7 @@ For a historical integrated analysis that lacks `source_flow_id`, approval may i
 
 ## Readiness
 
-Production readiness reports `duplicate_question_code` as a blocker when a non-empty code occurs more than once inside the same flow. Reusing that code in another flow or flow version remains valid and must not trigger the blocker. The audit is read-only and never rewrites historical question rows.
+Production readiness reports `duplicate_question_code` as a blocker when a non-empty code occurs more than once inside the same flow. Reusing that code in another flow or flow version remains valid and must not trigger the blocker. Project-scoped readiness shadows flow/section/question rows so the blocker appears only for the project that owns the duplicate. The audit is read-only and never rewrites historical question rows.
 
 ## Regression contract
 
@@ -51,4 +51,4 @@ Production readiness reports `duplicate_question_code` as a blocker when a non-e
 - cross-participant generation rejects foreign-project questions before a provider call and persists canonical question identity;
 - integrated generation persists canonical source-flow metadata and discards unknown model-provided question-code labels.
 
-`tests/smoke_question_code_readiness.py` uses a temporary SQLite database to prove historical same-flow duplicates become a readiness blocker while identical codes in another flow remain valid. Both question-identity regressions are providerless and never touch the real research database.
+`tests/smoke_question_code_readiness.py` uses a temporary SQLite database to prove historical same-flow duplicates become a readiness blocker while identical codes in another flow/project remain valid, and that project-scoped readiness excludes another project's blocker. Both question-identity regressions are providerless and never touch the real research database.
