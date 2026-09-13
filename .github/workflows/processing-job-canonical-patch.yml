@@ -31,12 +31,13 @@ jobs:
         shell: bash
         run: |
           python scripts/patch_processing_job_canonical_gate.py
+          python scripts/patch_secondary_retry_generation.py
           python -m py_compile services/processing_jobs.py tests/smoke_processing_jobs.py tests/smoke_secondary_analysis_jobs.py
           python tests/smoke_processing_jobs.py
           python tests/smoke_role_normalization.py
           python tests/smoke_interview_job_ui.py
           python tests/smoke_secondary_analysis_jobs.py
-          git rm scripts/patch_processing_job_canonical_gate.py .github/workflows/processing-job-canonical-patch.yml
+          git rm scripts/patch_processing_job_canonical_gate.py scripts/patch_secondary_retry_generation.py .github/workflows/processing-job-canonical-patch.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add services/processing_jobs.py tests/smoke_processing_jobs.py tests/smoke_secondary_analysis_jobs.py .github/workflows/processing-jobs.yml
