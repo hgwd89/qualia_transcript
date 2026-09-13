@@ -47,6 +47,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] production transcription dispatch fencing smoke checks passed."
 
+Write-Host "[INFO] Running transcription lifecycle write-fencing smoke check..."
+python tests/smoke_transcription_state_fencing.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] transcription lifecycle write-fencing smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] transcription lifecycle write-fencing smoke checks passed."
+
 Write-Host "[INFO] Running OpenAI chunk result-write fencing smoke check..."
 python tests/smoke_openai_chunk_write_fencing.py
 if ($LASTEXITCODE -ne 0) {

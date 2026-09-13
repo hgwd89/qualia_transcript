@@ -168,24 +168,30 @@ def main() -> int:
             result_write_guard=fake_guard,
         )
 
-        first_guard = events.index("guard-1")
+        startup_guard = events.index("guard-1")
+        startup_commit = events.index("commit", startup_guard)
+        first_provider = events.index("provider-1")
+        first_guard = events.index("guard-2")
         first_snapshot = events.index("snapshot-chunk_01")
         first_add = events.index("add", first_snapshot)
         first_commit = events.index("commit", first_add)
-        second_guard = events.index("guard-2")
+        second_provider = events.index("provider-2")
+        second_guard = events.index("guard-3")
         second_snapshot = events.index("snapshot-chunk_02")
         second_add = events.index("add", second_snapshot)
         second_commit = events.index("commit", second_add)
-        final_guard = events.index("guard-3")
-        final_commit = events.index("commit", final_guard)
+        final_guard = events.index("guard-4")
+        final_manifest = events.index("manifest-done")
+        final_commit = events.index("commit", final_manifest)
 
         failures += check(
-            "each long-form OpenAI chunk acquires result-write reservation before evidence and Segment writes",
-            guard_calls == 3
+            "running state, each long-form OpenAI chunk, and final manifest acquire result-write reservation",
+            guard_calls == 4
             and provider_calls == 2
-            and first_guard < first_snapshot < first_add < first_commit
-            and second_guard < second_snapshot < second_add < second_commit
-            and final_guard < final_commit
+            and startup_guard < startup_commit < first_provider
+            and first_provider < first_guard < first_snapshot < first_add < first_commit
+            and second_provider < second_guard < second_snapshot < second_add < second_commit
+            and final_guard < final_manifest < final_commit
             and result.get("chunk_count") == 2
             and result.get("segment_count") == 2
             and tr.status == "done"
