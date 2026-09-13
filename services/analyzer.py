@@ -70,6 +70,21 @@ INTEGRATED_SCHEMA = {
 }
 
 
+def _question_flow_id(question: InterviewFlowQuestion) -> int | None:
+    section = question.section if question else None
+    return int(section.flow_id) if section and section.flow_id is not None else None
+
+
+def _question_project_id(question: InterviewFlowQuestion) -> int | None:
+    section = question.section if question else None
+    flow = section.flow if section else None
+    return int(flow.project_id) if flow and flow.project_id is not None else None
+
+
+def _canonical_question_code(question: InterviewFlowQuestion) -> str:
+    return str(question.question_code or f"Q{question.id}")
+
+
 # ── インタビュー単位の分析 ────────────────────────────────────
 
 def analyze_per_question(
@@ -82,6 +97,10 @@ def analyze_per_question(
     question = InterviewFlowQuestion.query.get(question_id)
     if not interview or not question:
         raise ValueError("interview または question が見つかりません")
+
+    question_flow_id = _question_flow_id(question)
+    if interview.flow_id is None or question_flow_id != int(interview.flow_id):
+        raise ValueError("question が interview の割当フローに属していません")
 
     mappings = (
         UtteranceMapping.query
@@ -113,8 +132,7 @@ def analyze_per_question(
 
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="analysis_result")
 
-    # メタ情報はモデル出力に依存せず、アプリ側で正規化する
-    canonical_q_code = question.question_code or f"Q{question.id}"
+    canonical_q_code = _canonical_question_code(question)
     normalized_findings = []
     for finding in (result.get("findings") or []):
         if not isinstance(finding, dict):
@@ -194,8 +212,6 @@ def analyze_interview_summary(
 
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="summary_result")
 
-    # External AI work is finished. Durable callers now acquire/verify their
-    # result write lease before this analysis becomes canonical DB state.
     if result_write_guard is not None:
         result_write_guard()
 
@@ -233,8 +249,14 @@ def analyze_cross_participants(
     if not project or not question:
         raise ValueError("project または question が見つかりません")
 
+    question_flow_id = _question_flow_id(question)
+    if _question_project_id(question) != int(project_id) or question_flow_id is None:
+        raise ValueError("question が project のインタビューフローに属していません")
+
     utterances_by_participant = []
     for interview in project.interviews:
+        if interview.flow_id is None or int(interview.flow_id) != question_flow_id:
+            continue
         participant = interview.participant
         if not participant:
             continue
@@ -269,6 +291,18 @@ def analyze_cross_participants(
     )
 
     result = call_structured(system, user, CROSS_SCHEMA, schema_name="cross_analysis_result")
+    canonical_q_code = _canonical_question_code(question)
+    normalized_findings = []
+    for finding in (result.get("findings") or []):
+        if not isinstance(finding, dict):
+            continue
+        f = dict(finding)
+        f["question_codes"] = [canonical_q_code]
+        normalized_findings.append(f)
+    normalized_result = dict(result)
+    normalized_result["question_id"] = int(question.id)
+    normalized_result["question_code"] = canonical_q_code
+    normalized_result["findings"] = normalized_findings
 
     if result_write_guard is not None:
         result_write_guard()
@@ -279,8 +313,8 @@ def analyze_cross_participants(
         question_id=question_id,
         analysis_type="cross_participant",
         title=f"横断分析: [{question.question_code}] {question.question_text[:40]}",
-        summary_text=result.get("implications", ""),
-        content_json=json.dumps(result, ensure_ascii=False),
+        summary_text=normalized_result.get("implications", ""),
+        content_json=json.dumps(normalized_result, ensure_ascii=False),
         model_used=MODEL,
     )
     db.session.add(analysis)
@@ -305,12 +339,18 @@ def analyze_project_integrated(
     flow  = flows[0] if flows else None
 
     sections_data = []
+    source_question_ids: list[int] = []
+    allowed_question_codes: set[str] = set()
     if flow:
         for section in flow.sections:
             questions_data = []
             for q in section.questions:
+                source_question_ids.append(int(q.id))
+                allowed_question_codes.add(_canonical_question_code(q))
                 utterances_by_p = []
                 for interview in project.interviews:
+                    if interview.flow_id is None or int(interview.flow_id) != int(flow.id):
+                        continue
                     participant = interview.participant
                     if not participant:
                         continue
@@ -337,7 +377,11 @@ def analyze_project_integrated(
         raise ValueError("分析対象の発言が見つかりません（先にマッピングを実行してください）")
 
     full_text = "\n\n".join(sections_data)
-    p_count = sum(1 for iv in project.interviews if iv.participant)
+    p_count = sum(
+        1
+        for iv in project.interviews
+        if iv.participant and iv.flow_id is not None and int(iv.flow_id) == int(flow.id)
+    )
 
     system = (
         "あなたは定性調査の専門アナリストです。"
@@ -355,6 +399,22 @@ def analyze_project_integrated(
     )
 
     result = call_structured(system, user, INTEGRATED_SCHEMA, schema_name="integrated_result")
+    normalized_findings = []
+    for finding in (result.get("findings") or []):
+        if not isinstance(finding, dict):
+            continue
+        f = dict(finding)
+        raw_codes = [
+            str(code).strip()
+            for code in (finding.get("question_codes") or [])
+            if str(code).strip()
+        ]
+        f["question_codes"] = [code for code in raw_codes if code in allowed_question_codes]
+        normalized_findings.append(f)
+    normalized_result = dict(result)
+    normalized_result["source_flow_id"] = int(flow.id)
+    normalized_result["source_question_ids"] = sorted(set(source_question_ids))
+    normalized_result["findings"] = normalized_findings
 
     if result_write_guard is not None:
         result_write_guard()
@@ -365,8 +425,8 @@ def analyze_project_integrated(
         question_id=None,
         analysis_type="integrated",
         title=f"{project.name} 統合分析",
-        summary_text=result.get("implications", ""),
-        content_json=json.dumps(result, ensure_ascii=False),
+        summary_text=normalized_result.get("implications", ""),
+        content_json=json.dumps(normalized_result, ensure_ascii=False),
         model_used=MODEL,
     )
     db.session.add(analysis)
