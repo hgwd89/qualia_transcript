@@ -7,23 +7,58 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   render-transcription-patch:
     name: render-transcription-patch
     runs-on: ubuntu-latest
+    if: github.head_ref == 'fix/media-transcription-read-fencing'
     steps:
-      - name: Checkout
+      - name: Checkout PR branch
         uses: actions/checkout@v4
+        with:
+          ref: fix/media-transcription-read-fencing
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Render transcription patch
-        run: python scripts/render_transcription_snapshot_patch.py
+      - name: Apply exact transcription patch once
+        shell: bash
+        run: |
+          if grep -q 'get_media_full_path(media)' services/transcription.py; then
+            python scripts/render_transcription_snapshot_patch.py >/dev/null
+            python - <<'PY'
+          from pathlib import Path
+          p = Path('services/transcription.py')
+          source = p.read_text(encoding='utf-8')
+          old_import = 'from services.upload_manager import get_media_full_path'
+          new_import = 'from services.upload_manager import create_media_read_snapshot'
+          old_open = '''    try:\n        media = tr.media_file\n        full_path = get_media_full_path(media)\n'''
+          new_open = '''    media_snapshot = None\n    try:\n        media = tr.media_file\n        media_snapshot = create_media_read_snapshot(media)\n        full_path = media_snapshot.full_path\n'''
+          old_tail = '''    except Exception as e:\n        # Never let uncommitted Segment rows hitchhike on the error-state commit.\n        # Completed long-audio chunks were committed earlier and remain auditable.\n        db.session.rollback()\n        tr.status = "error"\n        tr.error_message = _sanitize_error_message(str(e))\n        db.session.commit()\n        raise\n'''
+          new_tail = old_tail + '''    finally:\n        if media_snapshot is not None:\n            media_snapshot.close()\n'''
+          assert source.count(old_import) == 1
+          assert source.count(old_open) == 2
+          assert source.count(old_tail) == 2
+          source = source.replace(old_import, new_import, 1)
+          source = source.replace(old_open, new_open, 2)
+          source = source.replace(old_tail, new_tail, 2)
+          assert source.count('get_media_full_path(media)') == 0
+          assert source.count('create_media_read_snapshot(media)') == 2
+          assert source.count('media_snapshot.close()') == 2
+          p.write_text(source, encoding='utf-8')
+          PY
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add services/transcription.py
+            git commit -m 'fix: use private media snapshots for transcription'
+            git push origin HEAD:fix/media-transcription-read-fencing
+          else
+            echo 'Transcription snapshot patch already applied; no push needed.'
+          fi
 
   safe-smoke:
     name: safe-smoke
