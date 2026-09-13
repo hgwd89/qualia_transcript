@@ -4,21 +4,22 @@
 行：質問項目、列：インタビュー、セル：該当発言テキスト。
 同一参加者の複数回インタビューを潰さず、複数フローと未マッピング発言も保持する。
 """
-import os
 from datetime import datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-import config
-from models import db
 from models.generated_file import GeneratedFile
 from models.interview import Interview
 from models.project import Project
 from models.segment import Segment, UtteranceMapping
 from models.speaker_assignment import SpeakerAssignment
-from services.file_manager import prepare_output_target, register_generated_file
+from services.file_manager import (
+    prepare_output_target,
+    register_generated_file,
+    write_output_target,
+)
 
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F3864")
@@ -248,7 +249,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"整形シート_{project.name}_{ts}.xlsx"
     target = prepare_output_target(project_id, filename)
-    wb.save(target.full_path)
+    write_output_target(target, wb.save)
     return register_generated_file(
         target,
         project_id=project_id,
