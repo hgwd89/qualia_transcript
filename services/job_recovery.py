@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 
 from models import db
 from models.processing_job import ProcessingJob
+from services.processing_result_guard import find_completed_result_for_active_job
 
 
 ACTIVE_STATUSES = ("pending", "running")
@@ -118,6 +120,21 @@ def stale_reason(
     return None
 
 
+def _unchanged_active_query(job: ProcessingJob):
+    """Return a CAS query for the exact active state recovery inspected."""
+    query = (
+        ProcessingJob.query
+        .filter(ProcessingJob.id == int(job.id))
+        .filter(ProcessingJob.status == str(job.status))
+        .filter(ProcessingJob.attempt_count == int(job.attempt_count or 0))
+    )
+    if job.worker_pid is None:
+        query = query.filter(ProcessingJob.worker_pid.is_(None))
+    else:
+        query = query.filter(ProcessingJob.worker_pid == int(job.worker_pid))
+    return query
+
+
 def _mark_job_failed_if_unchanged(
     job: ProcessingJob,
     reason: str,
@@ -130,28 +147,12 @@ def _mark_job_failed_if_unchanged(
     status/attempt/PID as a compare-and-swap token so an old recovery decision
     cannot overwrite newer durable state.
     """
-    job_id = int(job.id)
-    observed_status = str(job.status)
-    observed_attempt = int(job.attempt_count or 0)
-    observed_pid = job.worker_pid
-
-    if observed_status not in ACTIVE_STATUSES:
+    if str(job.status) not in ACTIVE_STATUSES:
         db.session.expire_all()
-        current = db.session.get(ProcessingJob, job_id)
+        current = db.session.get(ProcessingJob, int(job.id))
         return (current or job), False
 
-    query = (
-        ProcessingJob.query
-        .filter(ProcessingJob.id == job_id)
-        .filter(ProcessingJob.status == observed_status)
-        .filter(ProcessingJob.attempt_count == observed_attempt)
-    )
-    if observed_pid is None:
-        query = query.filter(ProcessingJob.worker_pid.is_(None))
-    else:
-        query = query.filter(ProcessingJob.worker_pid == int(observed_pid))
-
-    updated = query.update(
+    updated = _unchanged_active_query(job).update(
         {
             ProcessingJob.status: "failed",
             ProcessingJob.error_message: f"job recovery: {reason}"[:4000],
@@ -163,7 +164,34 @@ def _mark_job_failed_if_unchanged(
     )
     db.session.commit()
     db.session.expire_all()
-    current = db.session.get(ProcessingJob, job_id)
+    current = db.session.get(ProcessingJob, int(job.id))
+    return (current or job), updated == 1
+
+
+def _mark_job_succeeded_if_unchanged(
+    job: ProcessingJob,
+    result: dict,
+) -> tuple[ProcessingJob, bool]:
+    """Recover a dead worker whose current attempt already committed its result."""
+    if str(job.status) != "running":
+        db.session.expire_all()
+        current = db.session.get(ProcessingJob, int(job.id))
+        return (current or job), False
+
+    updated = _unchanged_active_query(job).update(
+        {
+            ProcessingJob.status: "succeeded",
+            ProcessingJob.result_json: json.dumps(result, ensure_ascii=False, default=str),
+            ProcessingJob.progress_json: '{"stage":"recovered_completed"}',
+            ProcessingJob.error_message: None,
+            ProcessingJob.finished_at: datetime.now(timezone.utc),
+            ProcessingJob.worker_pid: None,
+        },
+        synchronize_session=False,
+    )
+    db.session.commit()
+    db.session.expire_all()
+    current = db.session.get(ProcessingJob, int(job.id))
     return (current or job), updated == 1
 
 
@@ -185,8 +213,14 @@ def recover_stale_jobs(
     recovered = []
     for job in query.order_by(ProcessingJob.id.asc()).all():
         reason = stale_reason(job, pid_checker=pid_checker)
-        if reason:
+        if not reason:
+            continue
+
+        committed_result = find_completed_result_for_active_job(job)
+        if committed_result is not None:
+            current, changed = _mark_job_succeeded_if_unchanged(job, committed_result)
+        else:
             current, changed = _mark_job_failed_if_unchanged(job, reason)
-            if changed:
-                recovered.append(current)
+        if changed:
+            recovered.append(current)
     return recovered
