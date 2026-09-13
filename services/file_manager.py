@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, Callable
 from uuid import uuid4
 
 import config
 from models import db
 from models.generated_file import GeneratedFile
-from services.storage_paths import ensure_managed_id_dir, resolve_managed_path
+from services.managed_storage_write import (
+    open_managed_file_for_write,
+    unlink_managed_file,
+)
+from services.storage_paths import (
+    ensure_managed_id_dir,
+    open_managed_file_for_read,
+    resolve_managed_path,
+)
 
 
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -55,6 +66,17 @@ def _unique_storage_name(filename: str) -> str:
     return f"{uuid4().hex}{suffix}"
 
 
+def _file_generation(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
+    )
+
+
 def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
     """Create a safe project-scoped, collision-resistant generated-file target.
 
@@ -80,6 +102,107 @@ def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
     )
 
 
+def write_output_target(
+    target: OutputTarget,
+    writer: Callable[[BinaryIO], None],
+) -> None:
+    """Low-level managed write helper for temporary/self-contained callers.
+
+    Formal generated outputs should use ``write_and_register_generated_file`` so
+    the same opened file and pinned ancestor chain remain live through DB commit.
+    """
+    opened = open_managed_file_for_write(config.OUTPUT_DIR, target.stored_path)
+    try:
+        writer(opened.stream)
+        opened.finish()
+    except Exception:
+        opened.abort()
+        raise
+
+
+def _verify_current_target(target: OutputTarget, expected: os.stat_result) -> None:
+    """Fail if the logical managed pathname no longer names the created object.
+
+    POSIX permits a descriptor-relative identity check while the writer is still
+    open. On Windows, the retained directory/final handles deliberately deny write
+    and delete sharing, which already prevents rename/replacement for the lifetime
+    of the write transaction; reopening the same file would conflict with those
+    share restrictions and is therefore neither needed nor attempted.
+    """
+    if os.name == "nt":
+        return
+    try:
+        current = open_managed_file_for_read(config.OUTPUT_DIR, target.stored_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError("generated output pathname changed during generation") from exc
+    try:
+        if _file_generation(current.stat_result) != _file_generation(expected):
+            raise ValueError("generated output pathname changed during generation")
+    finally:
+        current.close()
+
+
+def write_and_register_generated_file(
+    target: OutputTarget,
+    writer: Callable[[BinaryIO], None],
+    *,
+    project_id: int,
+    file_type: str,
+    file_format: str,
+    interview_id: int | None = None,
+    generation_params_json: str | None = None,
+) -> GeneratedFile:
+    """Write and register one output without reopening an unpinned pathname.
+
+    The writer receives the exact newly-created regular file while every managed
+    ancestor is pinned. The file is flushed and fsynced; POSIX also verifies that
+    the current logical pathname still names that file generation, while Windows
+    relies on the retained non-write/non-delete-share handles that prevent namespace
+    replacement. The DB row is committed before the write handle/ancestor pins are
+    released. If writing, verification, or DB commit fails, the partial file is
+    removed through the same pinned parent rather than through a later pathname
+    lookup.
+    """
+    opened = open_managed_file_for_write(config.OUTPUT_DIR, target.stored_path)
+    committed = False
+    try:
+        writer(opened.stream)
+        opened.stream.flush()
+        os.fsync(opened.stream.fileno())
+        written = os.fstat(opened.stream.fileno())
+        if not stat.S_ISREG(written.st_mode):
+            raise ValueError("generated output target is not a regular file")
+
+        _verify_current_target(target, written)
+
+        gf = GeneratedFile(
+            project_id=int(project_id),
+            interview_id=interview_id,
+            file_type=file_type,
+            file_format=file_format,
+            original_filename=target.filename,
+            stored_path=target.stored_path,
+            generation_params_json=generation_params_json,
+        )
+        db.session.add(gf)
+        db.session.commit()
+        committed = True
+    except Exception:
+        db.session.rollback()
+        opened.abort()
+        raise
+
+    # The bytes were already flushed/fsynced before the DB commit. Once the row is
+    # committed, never delete the file merely because final handle close reports an
+    # error; that would turn a close anomaly into a committed dangling DB row.
+    try:
+        opened.finish()
+    except Exception:
+        if not committed:
+            raise
+    return gf
+
+
 def register_generated_file(
     target: OutputTarget,
     *,
@@ -89,17 +212,17 @@ def register_generated_file(
     interview_id: int | None = None,
     generation_params_json: str | None = None,
 ) -> GeneratedFile:
-    """Register a generated file; remove only this target if DB registration fails.
+    """Compatibility helper for already-written temporary/self-contained callers.
 
-    Filesystem and database commits cannot be made truly atomic. Each prepared
-    target has a unique internal path, so rollback cleanup cannot delete an older
-    successful generation that has the same user-facing filename.
+    Production report generators must not split writing from registration; they use
+    ``write_and_register_generated_file``. This helper remains only for existing
+    non-racy smoke fixtures and legacy internal callers while migration completes.
     """
-    managed_path = _resolve_stored_path(target.stored_path)
-    if managed_path != Path(target.full_path).resolve():
-        raise ValueError("output target path mismatch")
-    if not managed_path.is_file():
-        raise FileNotFoundError(f"generated output file not found: {managed_path}")
+    try:
+        opened = open_managed_file_for_read(config.OUTPUT_DIR, target.stored_path)
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(f"generated output file not found: {target.stored_path}") from exc
+    opened.close()
 
     gf = GeneratedFile(
         project_id=int(project_id),
@@ -117,8 +240,8 @@ def register_generated_file(
     except Exception:
         db.session.rollback()
         try:
-            managed_path.unlink(missing_ok=True)
-        except OSError:
+            unlink_managed_file(config.OUTPUT_DIR, target.stored_path)
+        except (OSError, ValueError):
             pass
         raise
 

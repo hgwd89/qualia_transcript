@@ -59,3 +59,6 @@ jobs:
 
       - name: Run POSIX managed-storage read fencing regression
         run: python tests/smoke_linked_storage_guards.py
+
+      - name: Run POSIX generated-output write fencing regression
+        run: python tests/smoke_generated_output_write_fencing.py

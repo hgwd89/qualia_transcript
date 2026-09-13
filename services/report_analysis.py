@@ -1,27 +1,31 @@
 """
 分析用フラットデータ .xlsx / .csv 生成（QDAソフト・二次分析用）
 """
-import os
 import csv
+import io
 from datetime import datetime
+
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
-import config
+
 from models.project import Project
-from models.participant import Participant
 from models.interview import Interview
 from models.segment import Segment, UtteranceMapping
 from models.generated_file import GeneratedFile
-from models import db
-from services.file_manager import prepare_output_target, register_generated_file
+from services.file_manager import (
+    prepare_output_target,
+    write_and_register_generated_file,
+)
+
+# Legacy split helpers write_output_target/register_generated_file are intentionally
+# not called by production report generators; the combined boundary owns both steps.
 
 
 def _build_rows(project_id: int) -> list[list]:
     """全発言のフラットレコードを返す"""
-    project      = Project.query.get(project_id)
-    interviews   = Interview.query.filter_by(project_id=project_id).all()
+    Project.query.get(project_id)
+    interviews = Interview.query.filter_by(project_id=project_id).all()
 
-    # 属性キー一覧（全参加者の union）
     attr_keys = []
     for iv in interviews:
         if iv.participant:
@@ -39,9 +43,9 @@ def _build_rows(project_id: int) -> list[list]:
 
     rows = [header]
     for iv in interviews:
-        p         = iv.participant
-        p_code    = p.participant_code if p else ""
-        p_name    = p.display_name if p else ""
+        p = iv.participant
+        p_code = p.participant_code if p else ""
+        p_name = p.display_name if p else ""
         attr_vals = {}
         if p:
             for a in p.attributes:
@@ -54,31 +58,31 @@ def _build_rows(project_id: int) -> list[list]:
                 um_list = seg.utterance_mappings
 
             for um in um_list:
-                q    = um.question   if um else None
-                sect = q.section     if q  else None
+                q = um.question if um else None
+                sect = q.section if q else None
 
                 rows.append([
                     p_code, p_name,
                     *[attr_vals.get(k, "") for k in attr_keys],
                     iv.interview_date.isoformat() if iv.interview_date else "",
-                    sect.title        if sect else "",
-                    q.question_code   if q    else "",
-                    q.question_text   if q    else "",
+                    sect.title if sect else "",
+                    q.question_code if q else "",
+                    q.question_text if q else "",
                     "TRUE" if (q and q.is_key_question) else "FALSE",
                     seg.seq,
                     seg.start_sec or "",
-                    seg.end_sec   or "",
+                    seg.end_sec or "",
                     seg.speaker_role,
                     seg.text,
-                    um.mapped_by       if um else "",
-                    um.confidence      if um else "",
+                    um.mapped_by if um else "",
+                    um.confidence if um else "",
                     um.is_unclassified if um else "",
                 ])
     return rows
 
 
 def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
-    rows    = _build_rows(project_id)
+    rows = _build_rows(project_id)
     project = Project.query.get(project_id)
 
     wb = Workbook()
@@ -89,19 +93,18 @@ def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
         for c_idx, val in enumerate(row, 1):
             ws.cell(r_idx, c_idx, val)
 
-    # ヘッダー書式
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="2E4057")
 
     ws.freeze_panes = "A2"
 
-    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"分析データ_{project.name}_{ts}.xlsx"
     target = prepare_output_target(project_id, filename)
-    wb.save(target.full_path)
-    return register_generated_file(
+    return write_and_register_generated_file(
         target,
+        wb.save,
         project_id=project_id,
         file_type="analysis",
         file_format="xlsx",
@@ -109,19 +112,30 @@ def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
 
 
 def generate_analysis_csv(project_id: int) -> GeneratedFile:
-    rows    = _build_rows(project_id)
+    rows = _build_rows(project_id)
     project = Project.query.get(project_id)
 
-    ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"分析データ_{project.name}_{ts}.csv"
     target = prepare_output_target(project_id, filename)
 
-    with open(target.full_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerows(rows)
+    def write_csv(binary_stream) -> None:
+        text_stream = io.TextIOWrapper(
+            binary_stream,
+            encoding="utf-8-sig",
+            newline="",
+            write_through=True,
+        )
+        try:
+            writer = csv.writer(text_stream)
+            writer.writerows(rows)
+            text_stream.flush()
+        finally:
+            text_stream.detach()
 
-    return register_generated_file(
+    return write_and_register_generated_file(
         target,
+        write_csv,
         project_id=project_id,
         file_type="analysis",
         file_format="csv",
