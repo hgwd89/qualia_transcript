@@ -10,6 +10,13 @@ def check(name: str, ok: bool, detail: str = "") -> int:
     return 0 if ok else 1
 
 
+def blocker_rows(report: dict, code: str) -> list[dict]:
+    for item in report.get("blockers", []):
+        if item.get("code") == code:
+            return list((item.get("context") or {}).get("rows") or [])
+    return []
+
+
 def main() -> int:
     failures = 0
     repo_root = Path(__file__).resolve().parents[1]
@@ -46,24 +53,28 @@ def main() -> int:
             )
             from models.project import Project
             from scripts.audit_production_readiness import audit
+            from scripts.audit_production_readiness_project import audit_project
 
             flask_app = create_app()
             flask_app.config["TESTING"] = True
 
             with flask_app.app_context():
                 project = Project(name="Question readiness")
-                db.session.add(project)
+                clean_project = Project(name="Clean question project")
+                db.session.add_all([project, clean_project])
                 db.session.flush()
 
                 flow1 = InterviewFlow(project_id=project.id, title="Flow v1")
                 flow2 = InterviewFlow(project_id=project.id, title="Flow v2")
-                db.session.add_all([flow1, flow2])
+                clean_flow = InterviewFlow(project_id=clean_project.id, title="Clean flow")
+                db.session.add_all([flow1, flow2, clean_flow])
                 db.session.flush()
 
                 sec1 = InterviewFlowSection(flow_id=flow1.id, title="S1", seq=1)
                 sec1b = InterviewFlowSection(flow_id=flow1.id, title="S2", seq=2)
                 sec2 = InterviewFlowSection(flow_id=flow2.id, title="S1", seq=1)
-                db.session.add_all([sec1, sec1b, sec2])
+                clean_sec = InterviewFlowSection(flow_id=clean_flow.id, title="S1", seq=1)
+                db.session.add_all([sec1, sec1b, sec2, clean_sec])
                 db.session.flush()
 
                 db.session.add_all([
@@ -77,6 +88,12 @@ def main() -> int:
                         section_id=sec2.id,
                         question_code="Q1",
                         question_text="same code in another flow is valid",
+                        seq=1,
+                    ),
+                    InterviewFlowQuestion(
+                        section_id=clean_sec.id,
+                        question_code="Q1",
+                        question_text="same code in another project is valid",
                         seq=1,
                     ),
                 ])
@@ -98,7 +115,9 @@ def main() -> int:
                 db.session.commit()
                 app_module._install_question_code_guards()
 
-                flow1_id = flow1.id
+                project_id = int(project.id)
+                clean_project_id = int(clean_project.id)
+                flow1_id = int(flow1.id)
                 db.session.remove()
                 db.engine.dispose()
 
@@ -108,24 +127,46 @@ def main() -> int:
                 for item in report.get("blockers", [])
                 if item.get("code") == "duplicate_question_code"
             ]
-            rows = (
-                duplicate_blockers[0].get("context", {}).get("rows", [])
-                if duplicate_blockers
-                else []
-            )
+            rows = blocker_rows(report, "duplicate_question_code")
             failures += check(
                 "readiness blocks historical same-flow duplicate question codes",
                 len(duplicate_blockers) == 1
                 and len(rows) == 1
-                and int(rows[0].get("flow_id")) == int(flow1_id)
+                and int(rows[0].get("flow_id")) == flow1_id
                 and rows[0].get("question_code") == "Q1"
                 and int(rows[0].get("duplicate_count")) == 2,
                 f"blockers={duplicate_blockers}",
             )
             failures += check(
-                "same code in another flow is not treated as a duplicate",
+                "same code in another flow/project is not treated as a duplicate",
                 len(rows) == 1,
                 f"rows={rows}",
+            )
+
+            scoped_bad = audit_project(
+                db_path,
+                output_dir,
+                backup_dir,
+                project_id,
+            )
+            scoped_clean = audit_project(
+                db_path,
+                output_dir,
+                backup_dir,
+                clean_project_id,
+            )
+            bad_rows = blocker_rows(scoped_bad, "duplicate_question_code")
+            clean_rows = blocker_rows(scoped_clean, "duplicate_question_code")
+            failures += check(
+                "project readiness keeps duplicate question blocker in owning project",
+                len(bad_rows) == 1
+                and int(bad_rows[0].get("flow_id")) == flow1_id,
+                f"rows={bad_rows}",
+            )
+            failures += check(
+                "project readiness excludes another project's duplicate question blocker",
+                clean_rows == [],
+                f"rows={clean_rows}",
             )
         finally:
             config.DATABASE_URI = original["DATABASE_URI"]
