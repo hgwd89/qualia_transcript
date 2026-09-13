@@ -25,7 +25,7 @@ def xattr_unsupported(exc: OSError) -> bool:
 def windows_acl_sids(path: Path) -> set[str]:
     script = r"""
 $ErrorActionPreference = 'Stop'
-$acl = Get-Acl -LiteralPath $args[0]
+$acl = Get-Acl -LiteralPath $env:QUALIA_ACL_INSPECT_TARGET
 foreach ($rule in @($acl.Access)) {
     try {
         $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
@@ -34,12 +34,15 @@ foreach ($rule in @($acl.Access)) {
     }
 }
 """
+    env = os.environ.copy()
+    env["QUALIA_ACL_INSPECT_TARGET"] = str(path)
     result = subprocess.run(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script, str(path)],
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=env,
         check=False,
     )
     if result.returncode != 0:
