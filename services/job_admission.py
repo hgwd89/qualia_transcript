@@ -10,7 +10,7 @@ from models.interview_flow import InterviewFlowQuestion
 from models.processing_job import ProcessingJob
 from models.project import Project
 from services.job_recovery import recover_stale_jobs
-from services.processing_jobs import ACTIVE_STATUSES, JOB_TYPES, _json_dump
+from services.processing_jobs import ACTIVE_STATUSES, JOB_TYPES, _json_dump, _utcnow
 from services.project_flow_scope import ProjectFlowScopeError, resolve_integrated_analysis_scope
 
 
@@ -257,7 +257,10 @@ def admit_retry_job(job_id: int) -> JobAdmission:
         target.result_json = None
         target.error_message = None
         target.worker_pid = None
-        target.started_at = None
+        # `created_at` is historical identity and may be hours/days old. While a
+        # retry is pending, `started_at` temporarily anchors the *current* launch
+        # grace. `_claim_pending_job()` overwrites it with the real worker start.
+        target.started_at = _utcnow()
         target.finished_at = None
         db.session.commit()
         return JobAdmission(job_id=target.id, created=True)
