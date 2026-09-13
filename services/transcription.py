@@ -829,6 +829,15 @@ def run_openai_transcription(
                     if not text:
                         raise RuntimeError("empty transcription text")
 
+                    # Each successful long-audio chunk publishes immutable raw
+                    # evidence and canonical Segment rows. Durable workers must
+                    # reserve the attempt before either publication so recovery
+                    # cannot clean the stale attempt and then have it reappear.
+                    if result_write_guard is not None:
+                        result_write_guard()
+                    elif lease_check is not None:
+                        lease_check()
+
                     raw_snapshot_path, _ = _write_raw_transcript_snapshot(
                         transcription_id=transcription_id,
                         interview_id=interview.id,
@@ -925,7 +934,7 @@ def run_openai_transcription(
                     chunk_records.append(record)
                     seg_count += chunk_seg_count
                     word_count += int(record["word_count"])
-                    if lease_check is not None:
+                    if result_write_guard is None and lease_check is not None:
                         lease_check()
                     db.session.commit()
 
