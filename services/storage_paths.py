@@ -2,8 +2,18 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
+
+
+@dataclass
+class ManagedReadFile:
+    stream: BinaryIO
+    stat_result: os.stat_result
+
+    def close(self) -> None:
+        self.stream.close()
 
 
 def is_link_or_reparse(path: Path) -> bool:
@@ -40,13 +50,18 @@ def _assert_unlinked_components(root: Path, relative: Path) -> None:
             raise ValueError("managed storage path contains a linked/reparse entry")
 
 
-def _file_identity(info) -> tuple[int, int, int, int, int]:
+def _directory_identity(info: os.stat_result) -> tuple[int, int, int]:
+    return int(info.st_dev), int(info.st_ino), int(info.st_mode)
+
+
+def _file_generation(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
-        int(getattr(info, "st_dev", 0) or 0),
-        int(getattr(info, "st_ino", 0) or 0),
-        int(getattr(info, "st_size", 0) or 0),
-        int(getattr(info, "st_mtime_ns", 0) or 0),
-        int(getattr(info, "st_ctime_ns", 0) or 0),
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
     )
 
 
@@ -66,48 +81,311 @@ def resolve_managed_path(root_value: str | Path, stored_path: str) -> Path:
     return candidate
 
 
-def open_managed_file_for_read(root_value: str | Path, stored_path: str) -> BinaryIO:
-    """Open a regular managed file and return the validated open handle."""
+def _supports_pinned_posix_read() -> bool:
+    return (
+        os.name != "nt"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in getattr(os, "supports_dir_fd", set())
+        and os.stat in getattr(os, "supports_dir_fd", set())
+    )
+
+
+def _open_posix_directory_component(
+    parent_fd: int,
+    name: str,
+    display_path: Path,
+) -> int:
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(f"managed storage directory is unreadable: {display_path}") from exc
+    if not stat.S_ISDIR(before.st_mode):
+        raise ValueError(f"managed storage path contains a non-directory component: {display_path}")
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        child_fd = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        raise ValueError(f"managed storage directory could not be opened safely: {display_path}") from exc
+    try:
+        opened = os.fstat(child_fd)
+        after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(opened.st_mode)
+            or _directory_identity(before) != _directory_identity(opened)
+            or _directory_identity(after) != _directory_identity(opened)
+        ):
+            raise ValueError(f"managed storage directory changed during open: {display_path}")
+        return child_fd
+    except Exception:
+        os.close(child_fd)
+        raise
+
+
+def _open_posix_directory_chain(path: Path) -> int:
+    if not path.is_absolute():
+        raise ValueError("managed storage root must be absolute")
+    anchor = Path(path.anchor)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        current_fd = os.open(anchor, flags)
+    except OSError as exc:
+        raise ValueError(f"managed storage root is unreadable: {path}") from exc
+
+    current_path = anchor
+    try:
+        for part in path.parts[1:]:
+            next_path = current_path / part
+            child_fd = _open_posix_directory_component(current_fd, part, next_path)
+            os.close(current_fd)
+            current_fd = child_fd
+            current_path = next_path
+        return current_fd
+    except Exception:
+        os.close(current_fd)
+        raise
+
+
+def _open_managed_file_posix(root: Path, relative: Path) -> ManagedReadFile:
+    parent_fd = _open_posix_directory_chain(root)
+    display_parent = root
+    try:
+        for part in relative.parts[:-1]:
+            display_parent = display_parent / part
+            child_fd = _open_posix_directory_component(parent_fd, part, display_parent)
+            os.close(parent_fd)
+            parent_fd = child_fd
+
+        name = relative.parts[-1]
+        display_path = display_parent / name
+        try:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError(f"managed storage file is unreadable: {display_path}") from exc
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"managed storage path is not a regular file: {display_path}")
+
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0) or 0) | os.O_NOFOLLOW
+        try:
+            fd = os.open(name, flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ValueError(f"managed storage file could not be opened safely: {display_path}") from exc
+        try:
+            opened = os.fstat(fd)
+            after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _file_generation(before) != _file_generation(opened)
+                or _file_generation(after) != _file_generation(opened)
+            ):
+                raise ValueError(f"managed storage file changed during open: {display_path}")
+            stream = os.fdopen(fd, "rb", closefd=True)
+            fd = -1
+            return ManagedReadFile(stream=stream, stat_result=opened)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _windows_kernel32():
+    import ctypes
+
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
+def _windows_close_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    close_handle = _windows_kernel32().CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+    close_handle(handle)
+
+
+def _windows_open_path_handle(path: Path, *, directory: bool, read_data: bool = False) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    file_read_attributes = 0x00000080
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+
+    desired_access = generic_read if read_data else file_read_attributes
+    flags = file_flag_open_reparse_point
+    if directory:
+        flags |= file_flag_backup_semantics
+
+    create_file = _windows_kernel32().CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+
+    # Deliberately omit FILE_SHARE_DELETE. Once opened, a directory component
+    # cannot be renamed/deleted/replaced while this handle is retained.
+    handle = create_file(
+        str(path),
+        desired_access,
+        file_share_read | file_share_write,
+        None,
+        open_existing,
+        flags,
+        None,
+    )
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    if handle == invalid_handle_value:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, "managed storage path could not be opened safely", str(path))
+    return int(handle)
+
+
+def _windows_handle_attributes(handle: int) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    get_info = _windows_kernel32().GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation)]
+    get_info.restype = wintypes.BOOL
+    info = ByHandleFileInformation()
+    if not get_info(handle, ctypes.byref(info)):
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, "could not inspect managed storage handle")
+    return int(info.dwFileAttributes)
+
+
+def _windows_validate_handle_type(handle: int, *, directory: bool, display_path: Path) -> None:
+    file_attribute_directory = 0x00000010
+    file_attribute_reparse_point = 0x00000400
+    attributes = _windows_handle_attributes(handle)
+    if attributes & file_attribute_reparse_point:
+        raise ValueError(f"managed storage path contains a linked/reparse entry: {display_path}")
+    is_directory = bool(attributes & file_attribute_directory)
+    if directory != is_directory:
+        expected = "directory" if directory else "regular file"
+        raise ValueError(f"managed storage path is not a {expected}: {display_path}")
+
+
+def _open_windows_directory_chain(path: Path) -> list[int]:
+    if not path.is_absolute():
+        raise ValueError("managed storage root must be absolute")
+
+    handles: list[int] = []
+    current = Path(path.anchor)
+    try:
+        anchor_handle = _windows_open_path_handle(current, directory=True)
+        _windows_validate_handle_type(anchor_handle, directory=True, display_path=current)
+        handles.append(anchor_handle)
+
+        for part in path.parts[1:]:
+            current = current / part
+            child_handle = _windows_open_path_handle(current, directory=True)
+            try:
+                _windows_validate_handle_type(child_handle, directory=True, display_path=current)
+            except Exception:
+                _windows_close_handle(child_handle)
+                raise
+            handles.append(child_handle)
+        return handles
+    except Exception:
+        for handle in reversed(handles):
+            _windows_close_handle(handle)
+        raise
+
+
+def _open_managed_file_windows(root: Path, relative: Path) -> ManagedReadFile:
+    import msvcrt
+
+    pinned = _open_windows_directory_chain(root)
+    current = root
+    final_handle: int | None = None
+    try:
+        for part in relative.parts[:-1]:
+            current = current / part
+            child_handle = _windows_open_path_handle(current, directory=True)
+            try:
+                _windows_validate_handle_type(child_handle, directory=True, display_path=current)
+            except Exception:
+                _windows_close_handle(child_handle)
+                raise
+            pinned.append(child_handle)
+
+        display_path = current / relative.parts[-1]
+        final_handle = _windows_open_path_handle(
+            display_path,
+            directory=False,
+            read_data=True,
+        )
+        _windows_validate_handle_type(final_handle, directory=False, display_path=display_path)
+
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0) or 0)
+        fd = msvcrt.open_osfhandle(final_handle, flags)
+        final_handle = None  # ownership transferred to the CRT file descriptor
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError(f"managed storage path is not a regular file: {display_path}")
+            stream = os.fdopen(fd, "rb", closefd=True)
+            fd = -1
+            return ManagedReadFile(stream=stream, stat_result=opened)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+    except OSError as exc:
+        raise ValueError("managed storage file could not be opened safely") from exc
+    finally:
+        if final_handle is not None:
+            _windows_close_handle(final_handle)
+        for handle in reversed(pinned):
+            _windows_close_handle(handle)
+
+
+def open_managed_file_for_read(root_value: str | Path, stored_path: str) -> ManagedReadFile:
+    """Open a managed regular file while pinning every ancestor during acquisition.
+
+    The returned stream is bound to the exact file object opened beneath the resolved
+    managed root. POSIX walks with descriptor-relative ``open/stat`` and
+    ``O_NOFOLLOW``. Windows retains non-delete-sharing directory handles opened with
+    ``FILE_FLAG_OPEN_REPARSE_POINT`` while descending, preventing a component from
+    being renamed/replaced between validation and final-file acquisition.
+    """
     root = _managed_root(root_value)
     relative = _validated_relative(stored_path)
-    lexical = root / relative
+    if not relative.parts:
+        raise ValueError("managed storage path is invalid")
 
-    _assert_unlinked_components(root, relative)
-    try:
-        candidate = lexical.resolve()
-        candidate.relative_to(root)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ValueError("managed storage path escapes root") from exc
-
-    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0) or 0)
-    fd = os.open(os.fspath(lexical), flags)
-    try:
-        opened_info = os.fstat(fd)
-        if not stat.S_ISREG(opened_info.st_mode):
-            raise ValueError("managed storage path is not a regular file")
-
-        _assert_unlinked_components(root, relative)
-        try:
-            current_info = lexical.lstat()
-        except FileNotFoundError as exc:
-            raise ValueError("managed storage file disappeared during open") from exc
-        if not stat.S_ISREG(current_info.st_mode):
-            raise ValueError("managed storage path is not a regular file")
-        if _file_identity(opened_info) != _file_identity(current_info):
-            raise ValueError("managed storage file changed during open")
-
-        try:
-            current_resolved = lexical.resolve()
-            current_resolved.relative_to(root)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise ValueError("managed storage path escapes root") from exc
-
-        file_obj = os.fdopen(fd, "rb", closefd=True)
-        fd = -1
-        return file_obj
-    finally:
-        if fd >= 0:
-            os.close(fd)
+    if os.name == "nt":
+        return _open_managed_file_windows(root, relative)
+    if _supports_pinned_posix_read():
+        return _open_managed_file_posix(root, relative)
+    raise ValueError("platform cannot safely pin managed storage reads")
 
 
 def ensure_managed_id_dir(root_value: str | Path, value: int) -> Path:
