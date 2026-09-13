@@ -134,6 +134,7 @@ def main() -> int:
                 db.session.commit()
 
                 project_id = int(project.id)
+                flow_id = int(flow.id)
                 missing_id = int(without_evidence.id)
                 cross_id = int(cross.id)
                 original_title = str(cross.title)
@@ -152,18 +153,54 @@ def main() -> int:
                     f"error={getattr(scope_error, 'code', None)} ids={getattr(scope_error, 'interview_ids', None)}",
                 )
 
+                # Duplicate title/version pairs are allowed. The UI must therefore
+                # expose stable flow IDs, not rely on human labels alone.
+                duplicate_flow = InterviewFlow(
+                    project_id=project.id,
+                    title="Guide A",
+                    version="2.0",
+                )
+                db.session.add(duplicate_flow)
+                db.session.flush()
+                duplicate_section = InterviewFlowSection(
+                    flow_id=duplicate_flow.id,
+                    title="Section",
+                    seq=1,
+                )
+                db.session.add(duplicate_section)
+                db.session.flush()
+                db.session.add(InterviewFlowQuestion(
+                    section_id=duplicate_section.id,
+                    question_code="Q1",
+                    question_text="Same question text",
+                    seq=1,
+                ))
+                db.session.commit()
+                duplicate_flow_id = int(duplicate_flow.id)
+
             analysis_page = client.get(f"/projects/{project_id}/analysis")
             review_page = client.get(f"/projects/{project_id}/analysis/review")
-            expected_label = "Guide A v2.0".encode("utf-8")
-            failures += check(
-                "cross-analysis result renders flow identity on analysis page",
-                analysis_page.status_code == 200 and expected_label in analysis_page.data,
-                f"status={analysis_page.status_code}",
+            result_label = f"Guide A v2.0 [flow_id:{flow_id}]".encode("utf-8")
+            chooser_label = f"Guide A [flow_id:{flow_id}] (2.0)".encode("utf-8")
+            duplicate_chooser_label = (
+                f"Guide A [flow_id:{duplicate_flow_id}] (2.0)".encode("utf-8")
             )
             failures += check(
-                "cross-analysis result renders flow identity on review page",
-                review_page.status_code == 200 and expected_label in review_page.data,
-                f"status={review_page.status_code}",
+                "cross-analysis chooser distinguishes duplicate flow labels by stable id",
+                analysis_page.status_code == 200
+                and chooser_label in analysis_page.data
+                and duplicate_chooser_label in analysis_page.data,
+                f"status={analysis_page.status_code} flow_ids={flow_id},{duplicate_flow_id}",
+            )
+            failures += check(
+                "cross-analysis result renders stable flow identity on analysis page",
+                analysis_page.status_code == 200 and result_label in analysis_page.data,
+                f"status={analysis_page.status_code} flow_id={flow_id}",
+            )
+            failures += check(
+                "cross-analysis result renders stable flow identity on review page",
+                review_page.status_code == 200 and result_label in review_page.data,
+                f"status={review_page.status_code} flow_id={flow_id}",
             )
 
             with app.app_context():
@@ -171,7 +208,7 @@ def main() -> int:
                 failures += check(
                     "render-only flow label does not persistently rewrite analysis title",
                     persisted_title == original_title,
-                    f"persisted={persisted_title!r} original={original_title!r}",
+                    f"same={persisted_title == original_title}",
                 )
                 db.session.remove()
                 db.engine.dispose()
