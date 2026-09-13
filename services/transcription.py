@@ -1027,8 +1027,23 @@ def run_local_whisper_transcription(
         # faster-whisper yields lazily. Materialize inference first so the
         # durable SQLite write reservation is not held during CPU-heavy decoding.
         local_segments = list(segments_gen)
+        raw_text = "".join(str(getattr(seg, "text", "") or "") for seg in local_segments)
+        if not raw_text.strip():
+            raise RuntimeError("local Whisper transcription returned empty text")
+
+        # A recovered/stale worker must not create fresh immutable evidence after
+        # losing the durable result-write reservation.
         if result_write_guard is not None:
             result_write_guard()
+
+        raw_snapshot_path, raw_text_sha256 = _write_raw_transcript_snapshot(
+            transcription_id=transcription_id,
+            interview_id=interview.id,
+            model_name=model_name,
+            language=tr.language or "ja",
+            text=raw_text,
+            snapshot_tag="local_whisper",
+        )
 
         speaker_labels: dict[str, str] = {}
         for seg in local_segments:
@@ -1057,7 +1072,13 @@ def run_local_whisper_transcription(
         tr.completed_at = datetime.now(timezone.utc)
         interview.status = "transcribed"
         db.session.commit()
-        return {"segment_count": seg_count, "word_count": word_count}
+        return {
+            "segment_count": seg_count,
+            "word_count": word_count,
+            "raw_snapshot_path": raw_snapshot_path,
+            "raw_text_sha256": raw_text_sha256,
+            "raw_snapshot_files": [raw_snapshot_path],
+        }
 
     except Exception as e:
         # Never let uncommitted Segment rows hitchhike on the error-state commit.
