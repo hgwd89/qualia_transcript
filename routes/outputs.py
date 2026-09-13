@@ -1,4 +1,3 @@
-import os
 from flask import Blueprint, jsonify, request, send_file, abort, render_template
 import config
 from models.project import Project
@@ -9,7 +8,7 @@ from services.report_verbatim import generate_verbatim
 from services.report_formatted import generate_formatted_sheet
 from services.report_analysis import generate_analysis_xlsx, generate_analysis_csv
 from services.report_approved_analysis import generate_approved_analysis_xlsx
-from services.file_manager import get_full_path
+from services.storage_paths import open_managed_file_for_read
 
 bp = Blueprint("outputs", __name__)
 
@@ -101,13 +100,19 @@ def gen_approved_analysis(project_id):
 def download(file_id):
     gf = GeneratedFile.query.get_or_404(file_id)
     try:
-        full_path = get_full_path(gf)
-    except ValueError:
+        file_obj = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
+    except (OSError, ValueError):
         abort(404)
-    if not os.path.isfile(full_path):
-        abort(404)
-    return send_file(
-        full_path,
-        as_attachment=True,
-        download_name=gf.original_filename,
-    )
+
+    try:
+        response = send_file(
+            file_obj,
+            as_attachment=True,
+            download_name=gf.original_filename,
+        )
+    except Exception:
+        file_obj.close()
+        raise
+
+    response.call_on_close(file_obj.close)
+    return response
