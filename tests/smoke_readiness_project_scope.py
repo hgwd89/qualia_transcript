@@ -100,19 +100,53 @@ def create_fixture(db_path: Path) -> None:
 
         con.execute("INSERT INTO projects VALUES (1, 'Delivery Project')")
         con.execute("INSERT INTO projects VALUES (2, 'Unrelated Draft')")
+        con.execute("INSERT INTO participants VALUES (1, 1)")
         con.execute("INSERT INTO participants VALUES (2, 2)")
+
+        con.execute("INSERT INTO interview_flows VALUES (1, 1)")
         con.execute("INSERT INTO interview_flows VALUES (2, 2)")
+        con.execute("INSERT INTO interview_flows VALUES (3, 1)")
+        con.execute("INSERT INTO interview_flow_sections VALUES (1, 1)")
         con.execute("INSERT INTO interview_flow_sections VALUES (2, 2)")
+        con.execute("INSERT INTO interview_flow_sections VALUES (3, 3)")
+        con.execute("INSERT INTO interview_flow_questions VALUES (1, 1)")
         con.execute("INSERT INTO interview_flow_questions VALUES (2, 2)")
+        con.execute("INSERT INTO interview_flow_questions VALUES (3, 3)")
+
+        con.execute("INSERT INTO interviews VALUES (1, 1, 1, 1, 'transcribed')")
+        # Keep project 2's interview flow unset so the existing mapping-flow
+        # isolation regression remains meaningful.
         con.execute("INSERT INTO interviews VALUES (2, 2, 2, NULL, 'pending')")
         con.execute("INSERT INTO segments VALUES (2, 2, 2, 'unknown', 'draft response')")
         con.execute("INSERT INTO utterance_mappings VALUES (2, 2, 2, 0)")
         con.execute(
             "INSERT INTO generated_files VALUES (2, 2, 2, 'analysis', 'xlsx', '2/missing.xlsx')"
         )
+
+        # Valid active row owned by project 2; project 1 readiness must not see it.
         con.execute(
             "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status, progress_json) "
             "VALUES (2, 2, 2, NULL, 'analyze', 'running', '{\"stage\":\"analyzing\"}')"
+        )
+
+        # Fill the global diagnostic sample with 205 FK-valid semantic violations
+        # from project 2. Project 1's invalid rows are intentionally assigned
+        # larger IDs so they sort beyond the global 200-row display cap.
+        for job_id in range(10, 215):
+            con.execute(
+                "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status) "
+                "VALUES (?, 2, NULL, 1, 'analyze_cross', 'succeeded')",
+                (job_id,),
+            )
+
+        # Both rows are project 1 semantic violations whose referenced IDs exist.
+        con.execute(
+            "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status) "
+            "VALUES (300, 1, 1, 3, 'analyze_question', 'succeeded')"
+        )
+        con.execute(
+            "INSERT INTO processing_jobs(id, project_id, interview_id, question_id, job_type, status) "
+            "VALUES (301, 1, 2, NULL, 'map', 'succeeded')"
         )
         con.commit()
     finally:
@@ -121,6 +155,14 @@ def create_fixture(db_path: Path) -> None:
 
 def codes(items: list[dict]) -> set[str]:
     return {str(item.get("code")) for item in items}
+
+
+def issue_jobs(items: list[dict], code: str) -> list[dict]:
+    jobs: list[dict] = []
+    for item in items:
+        if item.get("code") == code:
+            jobs.extend(dict(job) for job in (item.get("context") or {}).get("jobs", []))
+    return jobs
 
 
 def main() -> int:
@@ -140,12 +182,19 @@ def main() -> int:
         before = sha256(db_path)
         global_report = audit_mod.readiness_v2.audit(db_path, output_dir, backup_dir)
         target_report = audit_mod.audit_project(db_path, output_dir, backup_dir, 1)
+        other_report = audit_mod.audit_project(db_path, output_dir, backup_dir, 2)
         after = sha256(db_path)
 
         global_blockers = codes(global_report["blockers"])
         global_warnings = codes(global_report["warnings"])
         target_blockers = codes(target_report["blockers"])
         target_warnings = codes(target_report["warnings"])
+        other_blockers = codes(other_report["blockers"])
+        other_warnings = codes(other_report["warnings"])
+
+        global_scope_jobs = issue_jobs(global_report["blockers"], "processing_job_scope_invalid")
+        target_scope_jobs = issue_jobs(target_report["blockers"], "processing_job_scope_invalid")
+        other_scope_jobs = issue_jobs(other_report["blockers"], "processing_job_scope_invalid")
 
         failures += check(
             "database-wide audit sees unrelated draft project defects",
@@ -156,12 +205,53 @@ def main() -> int:
             f"blockers={global_blockers} warnings={global_warnings}",
         )
         failures += check(
+            "database-wide audit keeps exact scope count while capping diagnostic rows",
+            "processing_job_scope_invalid" in global_blockers
+            and global_report.get("info", {}).get("processing_job_scope_invalid_count") == 207
+            and len(global_scope_jobs) == 200
+            and all(int(job["project_id"]) == 2 for job in global_scope_jobs)
+            and not ({300, 301} & {int(job["id"]) for job in global_scope_jobs}),
+            f"count={global_report.get('info', {}).get('processing_job_scope_invalid_count')} sample_tail={global_scope_jobs[-3:]}",
+        )
+        failures += check(
+            "project-scoped audit keeps target blockers beyond global display cap",
+            "processing_job_scope_invalid" in target_blockers
+            and target_report.get("info", {}).get("processing_job_scope_invalid_count") == 2
+            and {int(job["id"]) for job in target_scope_jobs} == {300, 301}
+            and all(int(job["project_id"]) == 1 for job in target_scope_jobs),
+            str(target_scope_jobs),
+        )
+        failures += check(
+            "target scope preserves wrong-flow and cross-project ownership reasons",
+            any(
+                int(job["id"]) == 300
+                and "question_wrong_interview_flow" in job.get("reasons", [])
+                for job in target_scope_jobs
+            )
+            and any(
+                int(job["id"]) == 301
+                and "interview_cross_project" in job.get("reasons", [])
+                for job in target_scope_jobs
+            ),
+            str(target_scope_jobs),
+        )
+        failures += check(
             "project-scoped audit excludes unrelated project content defects",
             "mapping_flow_mismatch" not in target_blockers
             and "generated_file_missing" not in target_blockers
             and "unknown_speakers" not in target_warnings
             and "active_processing_jobs" not in target_warnings,
             f"blockers={target_blockers} warnings={target_warnings}",
+        )
+        failures += check(
+            "second project keeps exact scope count with bounded samples",
+            "processing_job_scope_invalid" in other_blockers
+            and other_report.get("info", {}).get("processing_job_scope_invalid_count") == 205
+            and {int(job["id"]) for job in other_scope_jobs} == {10, 11, 12, 13, 14}
+            and all(int(job["project_id"]) == 2 for job in other_scope_jobs)
+            and "active_processing_jobs" in other_warnings
+            and other_report.get("info", {}).get("active_processing_job_count") == 1,
+            f"scope_jobs={other_scope_jobs} warnings={other_warnings}",
         )
         failures += check(
             "project-scoped audit reports selected scope",
