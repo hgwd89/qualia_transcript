@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from flask import Blueprint, jsonify
 
 from models import db
@@ -8,25 +6,14 @@ from models.processing_job import ProcessingJob
 from models.project import Project
 from services.job_admission import admit_processing_job, admit_retry_job
 from services.job_recovery import recover_stale_jobs
-from services.processing_jobs import launch_job_worker
+from services.worker_launch_guard import launch_job_or_preserve_active
 
 bp = Blueprint("transcribe", __name__)
 
 
 def _launch_or_fail(job: ProcessingJob):
-    try:
-        pid = launch_job_worker(job.id)
-        return None, pid
-    except Exception as exc:
-        db.session.rollback()
-        job = db.session.get(ProcessingJob, job.id)
-        job.status = "failed"
-        job.error_message = f"worker launch failed: {exc}"[:4000]
-        job.finished_at = datetime.now(timezone.utc)
-        job.worker_pid = None
-        db.session.add(job)
-        db.session.commit()
-        return str(exc), None
+    pid, launch_error = launch_job_or_preserve_active(job)
+    return (str(launch_error) if launch_error is not None else None), pid
 
 
 def _queued_response(job: ProcessingJob, created: bool, pid: int | None = None):
