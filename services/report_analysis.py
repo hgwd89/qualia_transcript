@@ -17,6 +17,9 @@ from services.file_manager import (
     write_and_register_generated_file,
 )
 
+# Legacy split helpers write_output_target/register_generated_file are intentionally
+# not called by production report generators; the combined boundary owns both steps.
+
 
 def _build_rows(project_id: int) -> list[list]:
     """全発言のフラットレコードを返す"""
