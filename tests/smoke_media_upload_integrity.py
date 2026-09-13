@@ -2,6 +2,7 @@ import io
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 def check(name: str, ok: bool, detail: str = "") -> int:
@@ -50,7 +51,9 @@ def main() -> int:
             from models import db
             from models.interview import Interview, MediaFile
             from models.project import Project
+            import services.upload_manager as upload_manager_service
             from services.upload_manager import (
+                create_media_read_snapshot,
                 get_media_full_path,
                 media_extension,
                 media_file_exists,
@@ -91,6 +94,76 @@ def main() -> int:
                     and "\\" not in media.stored_path,
                     f"media_id={media.id} stored_path={media.stored_path}",
                 )
+
+                snapshot = create_media_read_snapshot(media)
+                snapshot_path = Path(snapshot.full_path)
+                snapshot_outside_uploads = upload_root.resolve() not in snapshot_path.resolve().parents
+                snapshot_initial = snapshot_path.read_bytes()
+                id_dir = media_path.parent
+                saved_id_dir = id_dir.with_name(f"{id_dir.name}.snapshot-original")
+                snapshot_survived_replacement = False
+                snapshot_removed = False
+                try:
+                    id_dir.rename(saved_id_dir)
+                    id_dir.mkdir()
+                    (id_dir / media_path.name).write_bytes(b"replacement-media")
+                    snapshot_survived_replacement = snapshot_path.read_bytes() == b"fake-media-bytes"
+                finally:
+                    snapshot.close()
+                    snapshot_removed = not snapshot_path.exists()
+                    replacement = id_dir / media_path.name
+                    if replacement.exists():
+                        replacement.unlink()
+                    if id_dir.exists():
+                        id_dir.rmdir()
+                    if saved_id_dir.exists():
+                        saved_id_dir.rename(id_dir)
+                failures += check(
+                    "transcription media snapshot is private stable input and cleans up",
+                    snapshot_initial == b"fake-media-bytes"
+                    and snapshot_outside_uploads
+                    and snapshot_survived_replacement
+                    and snapshot_removed,
+                    (
+                        f"outside={snapshot_outside_uploads} "
+                        f"stable={snapshot_survived_replacement} removed={snapshot_removed}"
+                    ),
+                )
+
+                tracked_open: dict[str, object] = {}
+                real_open_managed_file = upload_manager_service.open_managed_file_for_read
+
+                def tracking_open(root_value, stored_path):
+                    opened = real_open_managed_file(root_value, stored_path)
+                    tracked_open["value"] = opened
+                    return opened
+
+                tempdir_failure_raised = False
+                with patch.object(
+                    upload_manager_service,
+                    "open_managed_file_for_read",
+                    side_effect=tracking_open,
+                ), patch.object(
+                    upload_manager_service.tempfile,
+                    "TemporaryDirectory",
+                    side_effect=RuntimeError("simulated media snapshot tempdir failure"),
+                ):
+                    try:
+                        create_media_read_snapshot(media)
+                    except RuntimeError as exc:
+                        tempdir_failure_raised = "simulated media snapshot tempdir failure" in str(exc)
+
+                opened_after_failure = tracked_open.get("value")
+                source_stream_closed = bool(
+                    opened_after_failure is not None
+                    and getattr(opened_after_failure.stream, "closed", False)
+                )
+                failures += check(
+                    "snapshot temp-directory failure closes pinned source handle",
+                    tempdir_failure_raised and source_stream_closed,
+                    f"raised={tempdir_failure_raised} source_closed={source_stream_closed}",
+                )
+
                 failures += check(
                     "Japanese media filename preserves allowed extension",
                     media_extension("インタビュー音声.MP3") == ".mp3",
@@ -185,8 +258,10 @@ def main() -> int:
                 "save_and_register_media(" in interviews_source,
             )
             failures += check(
-                "transcription resolves media through upload path guard",
-                transcription_source.count("get_media_full_path(media)") == 2
+                "transcription uses stable managed-media snapshots instead of reopening upload paths",
+                transcription_source.count("create_media_read_snapshot(media)") == 2
+                and "get_media_full_path(media)" not in transcription_source
+                and transcription_source.count("media_snapshot.close()") == 2
                 and "os.path.join(config.UPLOAD_DIR, media.stored_path)" not in transcription_source,
             )
 

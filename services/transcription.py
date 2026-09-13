@@ -23,7 +23,7 @@ from models import db
 from models.interview import Transcription
 from models.segment import Segment
 from services.secret_store import get_secret_setting
-from services.upload_manager import get_media_full_path
+from services.upload_manager import create_media_read_snapshot
 
 _model_cache: dict = {}
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
@@ -672,9 +672,11 @@ def run_openai_transcription(
     tr.error_message = None
     db.session.commit()
 
+    media_snapshot = None
     try:
         media = tr.media_file
-        full_path = get_media_full_path(media)
+        media_snapshot = create_media_read_snapshot(media)
+        full_path = media_snapshot.full_path
         model_name = tr.whisper_model or config.OPENAI_TRANSCRIBE_MODEL
         interview = media.interview
         seq = Segment.query.filter_by(interview_id=interview.id).count()
@@ -999,6 +1001,9 @@ def run_openai_transcription(
         tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()
         raise
+    finally:
+        if media_snapshot is not None:
+            media_snapshot.close()
 
 
 def run_local_whisper_transcription(
@@ -1018,9 +1023,11 @@ def run_local_whisper_transcription(
     tr.error_message = None
     db.session.commit()
 
+    media_snapshot = None
     try:
         media = tr.media_file
-        full_path = get_media_full_path(media)
+        media_snapshot = create_media_read_snapshot(media)
+        full_path = media_snapshot.full_path
 
         model_name = tr.whisper_model or config.WHISPER_MODEL
         # OpenAI用モデル名が入っていた場合はローカルWhisperモデルにフォールバック
@@ -1085,6 +1092,9 @@ def run_local_whisper_transcription(
         tr.error_message = _sanitize_error_message(str(e))
         db.session.commit()
         raise
+    finally:
+        if media_snapshot is not None:
+            media_snapshot.close()
 
 
 def auto_assign_speaker_roles(interview_id: int) -> None:
