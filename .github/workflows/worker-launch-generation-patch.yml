@@ -19,6 +19,14 @@ jobs:
           ref: fix/worker-launch-reservation-generation
           fetch-depth: 2
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
       - name: Apply and validate launch-generation patch
         shell: bash
         run: |
