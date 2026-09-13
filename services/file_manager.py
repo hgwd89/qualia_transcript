@@ -9,6 +9,7 @@ from uuid import uuid4
 import config
 from models import db
 from models.generated_file import GeneratedFile
+from services.managed_write_commit_guard import open_managed_write_commit_guard
 from services.storage_paths import (
     ManagedWriteFile,
     ensure_managed_id_dir,
@@ -108,19 +109,26 @@ def _file_generation(info: os.stat_result) -> tuple[int, int, int, int, int, int
 
 
 def _discard_output_target_if_same_generation(target: OutputTarget) -> None:
-    """Best-effort cleanup without deleting a pathname-replacement successor."""
+    """Best-effort cleanup through a re-pinned exact-generation guard."""
     expected = target.written_stat
     if expected is None:
         return
+    guard = None
     try:
-        managed_path = _resolve_stored_path(target.stored_path)
-        if managed_path != Path(target.full_path).resolve() or not managed_path.is_file():
-            return
-        if _file_generation(managed_path.stat()) != _file_generation(expected):
-            return
-        managed_path.unlink(missing_ok=True)
+        guard = open_managed_write_commit_guard(
+            config.OUTPUT_DIR,
+            target.stored_path,
+            expected,
+        )
+        guard.discard()
     except (OSError, ValueError):
+        # If the public namespace no longer names the written generation, leave
+        # both the successor and any unreachable predecessor untouched rather than
+        # risk deleting the wrong file.
         pass
+    finally:
+        if guard is not None:
+            guard.close()
 
 
 def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
@@ -157,6 +165,18 @@ def open_output_target_for_write(target: OutputTarget) -> OutputWriteFile:
     return OutputWriteFile(managed=managed, target=target)
 
 
+def _compensate_committed_generated_file(gf: GeneratedFile, cause: Exception) -> None:
+    """Remove a just-committed row when post-commit namespace verification fails."""
+    try:
+        db.session.delete(gf)
+        db.session.commit()
+    except Exception as cleanup_exc:
+        db.session.rollback()
+        raise RuntimeError(
+            "generated output namespace changed during DB commit and compensating row deletion failed"
+        ) from cleanup_exc
+
+
 def register_generated_file(
     target: OutputTarget,
     *,
@@ -168,23 +188,28 @@ def register_generated_file(
 ) -> GeneratedFile:
     """Register only the exact file generation produced by the managed writer.
 
-    Filesystem and database commits cannot be truly atomic. The final writer
-    ``fstat`` is therefore carried into this boundary so a pathname replacement
-    after close cannot cause a different file to be registered or deleted during
-    rollback cleanup.
+    A second guard is acquired after the report library closes its writer. That
+    guard re-pins the current exact file generation and its ancestor chain, stays
+    live through DB commit, and verifies the public managed pathname again after
+    commit. If pathname replacement occurs during the commit window, the newly
+    committed row is compensated before this function returns an error. Rollback
+    cleanup is performed through the pinned guard rather than check-then-unlink on
+    the mutable pathname.
     """
     expected = target.written_stat
     if expected is None:
         raise ValueError("generated output writer did not record final file identity")
 
+    guard = None
+    gf = None
+    committed = False
     try:
-        managed_path = _resolve_stored_path(target.stored_path)
-        if managed_path != Path(target.full_path).resolve():
-            raise ValueError("output target path mismatch")
-        if not managed_path.is_file():
-            raise FileNotFoundError(f"generated output file not found: {managed_path}")
-        if _file_generation(managed_path.stat()) != _file_generation(expected):
-            raise ValueError("generated output target changed after write")
+        guard = open_managed_write_commit_guard(
+            config.OUTPUT_DIR,
+            target.stored_path,
+            expected,
+        )
+        guard.verify_namespace()
 
         gf = GeneratedFile(
             project_id=int(project_id),
@@ -197,11 +222,32 @@ def register_generated_file(
         )
         db.session.add(gf)
         db.session.commit()
+        committed = True
+
+        try:
+            guard.verify_namespace()
+        except Exception as namespace_exc:
+            _compensate_committed_generated_file(gf, namespace_exc)
+            try:
+                guard.discard()
+            except (OSError, ValueError):
+                pass
+            raise namespace_exc
         return gf
     except Exception:
-        db.session.rollback()
-        _discard_output_target_if_same_generation(target)
+        if not committed:
+            db.session.rollback()
+            if guard is not None:
+                try:
+                    guard.discard()
+                except (OSError, ValueError):
+                    pass
+            else:
+                _discard_output_target_if_same_generation(target)
         raise
+    finally:
+        if guard is not None:
+            guard.close()
 
 
 def get_full_path(gf: GeneratedFile) -> str:
