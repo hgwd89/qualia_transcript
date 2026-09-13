@@ -42,11 +42,13 @@ def main() -> int:
             from models.processing_job import ProcessingJob
             from models.project import Project
             from models.segment import Segment
-            from services.job_admission import admit_processing_job
+            from services.job_admission import admit_processing_job, admit_retry_job
             from services.processing_jobs import execute_job
             from services.processing_result_guard import find_completed_result_for_active_job
             import services.processing_jobs as processing_jobs
             import services.semantic_analysis as semantic_analysis
+
+            readiness_source = (repo_root / "scripts" / "audit_production_readiness_v2.py").read_text(encoding="utf-8")
 
             app = create_app()
             app.config["TESTING"] = True
@@ -111,11 +113,47 @@ def main() -> int:
                     project.id,
                     "analyze_semantic",
                     interview.id,
+                    request_payload={"max_segments": 1, "no_ai": True},
+                )
+                durable_job = db.session.get(ProcessingJob, int(admission.job_id))
+                failures += check(
+                    "semantic analysis is admitted with durable request parameters",
+                    admission.created
+                    and admission.job_id is not None
+                    and admission.error is None
+                    and durable_job.to_dict().get("request") == {"max_segments": 1, "no_ai": True},
+                    f"admission={admission} job={durable_job.to_dict()}",
                 )
                 failures += check(
-                    "semantic analysis is admitted as a durable interview job",
-                    admission.created and admission.job_id is not None and admission.error is None,
-                    str(admission),
+                    "semantic job type is accepted by readiness scope audit",
+                    '"analyze_semantic": (True, False)' in readiness_source,
+                    "rule source present=" + str('"analyze_semantic": (True, False)' in readiness_source),
+                )
+
+                duplicate_same_request = admit_processing_job(
+                    project.id,
+                    "analyze_semantic",
+                    interview.id,
+                    request_payload={"max_segments": 1, "no_ai": True},
+                )
+                failures += check(
+                    "same semantic scope and request deduplicates",
+                    duplicate_same_request.job_id == admission.job_id
+                    and not duplicate_same_request.created
+                    and duplicate_same_request.conflict_job_id is None,
+                    str(duplicate_same_request),
+                )
+
+                mismatched_request = admit_processing_job(
+                    project.id,
+                    "analyze_semantic",
+                    interview.id,
+                    request_payload={"max_segments": 2, "no_ai": True},
+                )
+                failures += check(
+                    "same semantic scope with different request is a conflict",
+                    mismatched_request.conflict_job_id == admission.job_id,
+                    str(mismatched_request),
                 )
 
                 conflicting = admit_processing_job(project.id, "analyze", interview.id)
@@ -132,12 +170,6 @@ def main() -> int:
                 try:
                     completed = execute_job(
                         int(admission.job_id),
-                        handlers={
-                            "analyze_semantic": lambda job: processing_jobs._perform_semantic_analysis(
-                                job,
-                                no_ai=True,
-                            )
-                        },
                         worker_pid=4242,
                     )
                 finally:
@@ -155,10 +187,36 @@ def main() -> int:
                     .first()
                 )
                 failures += check(
-                    "durable semantic handler saves through current job lease",
-                    completed.status == "succeeded" and semantic_row is not None,
-                    f"job={completed.to_dict()} analysis_id={getattr(semantic_row, 'id', None)}",
+                    "durable semantic handler restores persisted request parameters",
+                    completed.status == "succeeded"
+                    and semantic_row is not None
+                    and semantic_row.model_used.endswith("no-ai-summary")
+                    and completed.to_dict().get("request") == {"max_segments": 1, "no_ai": True},
+                    f"job={completed.to_dict()} analysis_id={getattr(semantic_row, 'id', None)} model={getattr(semantic_row, 'model_used', None)}",
                 )
+
+                retry_source = ProcessingJob(
+                    project_id=project.id,
+                    interview_id=interview.id,
+                    job_type="analyze_semantic",
+                    status="failed",
+                    request_json='{"max_segments":3,"no_ai":true}',
+                    error_message="retry smoke",
+                )
+                db.session.add(retry_source)
+                db.session.commit()
+                retry_admission = admit_retry_job(retry_source.id)
+                retried = db.session.get(ProcessingJob, retry_source.id)
+                failures += check(
+                    "failed semantic retry preserves durable request parameters",
+                    retry_admission.created
+                    and retried.status == "pending"
+                    and retried.to_dict().get("request") == {"max_segments": 3, "no_ai": True},
+                    f"admission={retry_admission} job={retried.to_dict()}",
+                )
+                retried.status = "failed"
+                retried.finished_at = datetime.now(timezone.utc)
+                db.session.commit()
 
                 recovery_job = ProcessingJob(
                     project_id=project.id,
@@ -192,6 +250,28 @@ def main() -> int:
                         and recovery_result.get("recovered_committed_result") is True
                     ),
                     str(recovery_result),
+                )
+
+                empty_interview = Interview(
+                    project_id=project.id,
+                    participant_id=participant.id,
+                    status="mapped",
+                )
+                db.session.add(empty_interview)
+                db.session.commit()
+                empty_admission = admit_processing_job(
+                    project.id,
+                    "analyze_semantic",
+                    empty_interview.id,
+                    request_payload={"max_segments": None, "no_ai": True},
+                )
+                empty_result = execute_job(int(empty_admission.job_id), worker_pid=5252)
+                failures += check(
+                    "semantic empty-input failure preserves actionable diagnostics",
+                    empty_result.status == "failed"
+                    and "no_fragments_after_filter" in str(empty_result.error_message)
+                    and "candidate_segment_count" in str(empty_result.error_message),
+                    str(empty_result.error_message),
                 )
 
                 active = ProcessingJob(

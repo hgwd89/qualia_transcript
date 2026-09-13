@@ -617,12 +617,30 @@ def _perform_integrated_analysis(job: ProcessingJob) -> dict:
     return {"analysis_id": analysis.id}
 
 
-def _perform_semantic_analysis(
-    job: ProcessingJob,
-    *,
-    max_segments: int | None = None,
-    no_ai: bool = False,
-) -> dict:
+def _semantic_job_request(job: ProcessingJob) -> dict:
+    raw = None
+    if job.request_json:
+        try:
+            raw = json.loads(job.request_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid semantic job request_json for job_id={job.id}") from exc
+    if raw is None:
+        raw = {"max_segments": None, "no_ai": False}
+    if not isinstance(raw, dict):
+        raise ValueError(f"invalid semantic job request payload for job_id={job.id}")
+
+    max_segments = raw.get("max_segments")
+    if max_segments is not None:
+        max_segments = int(max_segments)
+        if max_segments <= 0:
+            raise ValueError(f"invalid semantic max_segments for job_id={job.id}")
+    no_ai = raw.get("no_ai", False)
+    if not isinstance(no_ai, bool):
+        raise ValueError(f"invalid semantic no_ai for job_id={job.id}")
+    return {"max_segments": max_segments, "no_ai": no_ai}
+
+
+def _perform_semantic_analysis(job: ProcessingJob) -> dict:
     from models.interview import Interview
     from services.processing_result_guard import find_completed_analysis_for_scope
     from services.semantic_analysis import run_semantic_cluster_analysis
@@ -636,14 +654,32 @@ def _perform_semantic_analysis(
         update_progress(job, "analyzing_semantic", analysis_id=existing.id, already_done=True)
         return {"analysis_id": existing.id, "already_done": True}
 
-    update_progress(job, "analyzing_semantic")
+    request_payload = _semantic_job_request(job)
+    update_progress(job, "analyzing_semantic", **request_payload)
     result = run_semantic_cluster_analysis(
         interview.id,
         save=True,
-        max_segments=max_segments,
-        no_ai=no_ai,
+        max_segments=request_payload["max_segments"],
+        no_ai=request_payload["no_ai"],
         result_write_guard=lambda: begin_job_result_write(job),
     )
+    if not result.get("ok", False):
+        diagnostic = {
+            key: result.get(key)
+            for key in (
+                "reason",
+                "candidate_segment_count",
+                "fragment_count",
+                "excluded_count",
+                "excluded_counts",
+            )
+            if key in result
+        }
+        raise RuntimeError(
+            "semantic analysis produced no savable result: "
+            + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True)
+        )
+
     analysis_id = result.get("saved_analysis_id")
     if not analysis_id:
         raise RuntimeError("semantic analysis completed without a saved AIAnalysis row")

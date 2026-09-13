@@ -84,7 +84,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `SegmentFlag`: derived flags for review and output behavior.
 - `SpeakerAssignment`: derived mapping from speaker label to role and participant.
 - `AIAnalysis`: derived structured analysis payload plus human review state (`review_status`, `review_note`, `reviewed_at`).
-- `ProcessingJob`: durable background-work record for transcription, mapping, analysis, and project pipelines; question-scoped jobs may reference `InterviewFlowQuestion`.
+- `ProcessingJob`: durable background-work record for transcription, mapping, semantic analysis, other AI analysis, and project pipelines; question-scoped jobs may reference `InterviewFlowQuestion`, while `request_json` preserves immutable execution options needed by retries.
 - `GeneratedFile`: generated output metadata, including `approved_analysis` XLSX outputs.
 - `AppSetting`: local application settings. Secret values are storage records and must be consumed through the secret-store service rather than read as plaintext directly.
 
@@ -134,11 +134,11 @@ The settings UI exposes only configured/not-configured state for password fields
 
 ## Durable Processing Job Contract
 
-Long-running transcription, mapping, participant analysis, question analysis, cross-participant analysis, integrated analysis, and project-pipeline work use `ProcessingJob` rather than executing the expensive operation inside the initiating request. The API route admits a durable job, launches a worker, returns a job ID, and the UI polls the job status endpoint. A browser reload can therefore resume observation of an existing `pending` or `running` job instead of starting the work again.
+Long-running transcription, mapping, semantic analysis saves, participant analysis, question analysis, cross-participant analysis, integrated analysis, and project-pipeline work use `ProcessingJob` rather than publishing expensive results outside the durable-job contract. The API/CLI entry point admits a durable job, a worker claims an attempt, and callers observe the durable state instead of treating an active duplicate as completed. Semantic dry-runs remain non-persistent; `run_semantic_analysis.py --save` is a durable-job producer.
 
 `services/job_admission.py` is the authoritative boundary for both admission concurrency and durable-job scope. On SQLite it acquires `BEGIN IMMEDIATE` before validating ownership or deciding whether a job may be admitted, so project deletion and job creation observe one serialized database snapshot. The service verifies that the project exists, that required/forbidden `interview_id` and `question_id` fields match the job type, that referenced interviews and questions belong to the job project, and, for `analyze_question`, that the question belongs to the interview's assigned flow. Failed-job retry revalidates the stored scope under the same reservation; malformed or cross-project legacy rows remain failed rather than being requeued. Operational routes/services/scripts must use this boundary rather than the legacy `create_or_get_active_job()` helper, and the required safe smoke checks that invariant through Python AST inspection.
 
-After scope validation, same-scope active work is reused where appropriate, incompatible active work is rejected, and a new `pending` row is created only while the write reservation is held. Retry admission uses the same serialization. This prevents two requests from independently observing an empty slot and both creating conflicting durable jobs.
+After scope validation, same-scope active work is reused only when its durable request parameters are identical, incompatible active work is rejected, and a new `pending` row is created only while the write reservation is held. Retry admission uses the same serialization and retains `request_json`, so semantic `max_segments` and `no_ai` cannot silently change on retry or detached-worker execution. This prevents two requests from independently observing an empty slot and both creating conflicting durable jobs.
 
 `services/processing_jobs.py` treats `status='running'` plus `attempt_count` as the worker lease. Claiming a pending job increments the attempt token. Progress updates and terminal writes are conditional on the same immutable attempt number; if stale recovery or retry has moved ownership to a later attempt, the older worker raises `JobLeaseLost` rather than continuing to publish progress or success.
 

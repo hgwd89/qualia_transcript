@@ -12,7 +12,7 @@ from models import db
 from models.interview import Interview
 from models.processing_job import ProcessingJob
 from services.job_admission import admit_processing_job
-from services.processing_jobs import _perform_semantic_analysis, execute_job
+from services.processing_jobs import execute_job
 from services.runtime_lock import RuntimeLockError, runtime_lock
 from services.semantic_analysis import run_semantic_cluster_analysis
 
@@ -55,6 +55,10 @@ def main() -> int:
                         int(interview.project_id),
                         "analyze_semantic",
                         int(interview.id),
+                        request_payload={
+                            "max_segments": args.max_segments,
+                            "no_ai": bool(args.no_ai),
+                        },
                     )
                     if admission.error:
                         result = {
@@ -72,20 +76,15 @@ def main() -> int:
                     elif not admission.created:
                         job = db.session.get(ProcessingJob, int(admission.job_id))
                         result = {
-                            "ok": True,
-                            "deduplicated": True,
+                            "ok": False,
+                            "in_progress": True,
+                            "error_type": "JobAlreadyActive",
+                            "error_message": "same-scope semantic analysis is still pending or running",
                             "job": job.to_dict() if job else None,
                         }
                     else:
                         completed = execute_job(
                             int(admission.job_id),
-                            handlers={
-                                "analyze_semantic": lambda job: _perform_semantic_analysis(
-                                    job,
-                                    max_segments=args.max_segments,
-                                    no_ai=bool(args.no_ai),
-                                )
-                            },
                             worker_pid=os.getpid(),
                         )
                         result = {
@@ -108,6 +107,8 @@ def main() -> int:
         return 1
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if result.get("in_progress"):
+        return 2
     if not result.get("ok", False):
         return 1
     return 0
