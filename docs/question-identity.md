@@ -27,11 +27,14 @@ The current integrated-analysis implementation uses one project flow as its sour
 
 - `source_flow_id` — the exact flow used to construct the prompt;
 - `source_question_ids` — the exact question IDs from that flow;
+- `source_interview_ids` — the exact participant interviews included when the prompt was constructed;
 - normalized finding `question_codes` limited to codes that actually exist in that source flow.
 
-Approval evidence resolution uses `source_flow_id` as the boundary before applying any question-code qualifier. A segment from another flow with the same code is therefore not eligible evidence.
+Approval evidence resolution uses both the persisted source flow and, when present, the persisted source interview set before applying any question-code qualifier. A segment from another flow, or from an interview added after the analysis was generated, is therefore not eligible evidence merely because its text and question code match.
 
-For a historical integrated analysis that lacks `source_flow_id`, approval may infer the flow only when the project has exactly one flow. If multiple flows exist, the source is ambiguous and approval fails closed rather than guessing.
+For a historical integrated analysis that lacks `source_flow_id`, approval may infer the flow only when the project has exactly one flow. If multiple flows exist, the source is ambiguous and approval fails closed rather than guessing. Historical analyses that predate `source_interview_ids` retain their older compatibility boundary.
+
+The flow-resolution contract for pipeline and integrated analysis is documented in `docs/project-flow-scope.md`.
 
 ## Readiness
 
@@ -46,9 +49,9 @@ Production readiness reports `duplicate_question_code` as a blocker when a non-e
 - route-level duplicate rejection without mutation;
 - historical duplicates remain intact when guards are installed and future duplicates are still blocked;
 - exact `question_id` prevents same-code evidence from another flow being accepted;
-- integrated evidence stays inside persisted `source_flow_id`;
+- integrated evidence stays inside persisted source provenance;
 - ambiguous legacy integrated analysis cannot be approved by rebinding to an arbitrary flow;
 - cross-participant generation rejects foreign-project questions before a provider call and persists canonical question identity;
-- integrated generation persists canonical source-flow metadata and discards unknown model-provided question-code labels.
+- integrated generation persists canonical source metadata and discards unknown model-provided question-code labels.
 
-`tests/smoke_question_code_readiness.py` uses a temporary SQLite database to prove historical same-flow duplicates become a readiness blocker while identical codes in another flow/project remain valid, and that project-scoped readiness excludes another project's blocker. Both question-identity regressions are providerless and never touch the real research database.
+`tests/smoke_question_code_readiness.py` uses a temporary SQLite database to prove historical same-flow duplicates become a readiness blocker while identical codes in another flow/project remain valid, and that project-scoped readiness excludes another project's blocker. `tests/smoke_project_flow_scope.py` separately verifies integrated source-flow/interview provenance and pipeline flow ambiguity. These regressions are providerless and never touch the real research database.
