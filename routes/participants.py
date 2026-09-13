@@ -9,6 +9,10 @@ from models.participant import Participant, ParticipantAttribute
 from models.interview import Interview
 from models.segment import Segment
 from models.speaker_assignment import SpeakerAssignment
+from services.research_input_guard import (
+    ResearchInputWriteBlocked,
+    begin_participant_input_write,
+)
 
 bp = Blueprint("participants", __name__)
 _PARTICIPANT_AUTO_CODE_RE = re.compile(r"^P(\d+)$")
@@ -69,6 +73,15 @@ def _duplicate_code_response(project, *, participant=None):
     ), 409
 
 
+def _participant_input_write_blocked_response(project_id: int, exc: ResearchInputWriteBlocked):
+    ids = ", ".join(f"#{value}" for value in exc.active_job_ids)
+    flash(
+        f"処理中の分析ジョブ（{ids}）が参加者情報を使用しているため、完了または失敗後に更新してください",
+        "error",
+    )
+    return redirect(url_for("participants.index", project_id=project_id))
+
+
 @bp.route("/projects/<int:project_id>/participants")
 def index(project_id):
     project = Project.query.get_or_404(project_id)
@@ -123,20 +136,34 @@ def edit(project_id, participant_id):
     if request.method == "POST":
         requested_code = request.form.get("participant_code", "").strip()
         proposed_code = requested_code or participant.participant_code
+        display_name = request.form.get("display_name", "").strip() or None
+        keys = request.form.getlist("attr_key")
+        values = request.form.getlist("attr_value")
+
+        try:
+            participant = begin_participant_input_write(project_id, participant_id)
+        except ResearchInputWriteBlocked as exc:
+            return _participant_input_write_blocked_response(project_id, exc)
+        except ValueError:
+            db.session.rollback()
+            return redirect(url_for("participants.index", project_id=project_id))
+
+        project = db.session.get(Project, int(project_id))
         if _participant_code_conflict(
             project_id,
             proposed_code,
             exclude_participant_id=participant.id,
         ):
+            db.session.rollback()
+            participant = _get_project_participant_or_404(project_id, participant_id)
+            project = Project.query.get_or_404(project_id)
             return _duplicate_code_response(project, participant=participant)
 
         participant.participant_code = proposed_code
-        participant.display_name = request.form.get("display_name", "").strip() or None
+        participant.display_name = display_name
 
         try:
             ParticipantAttribute.query.filter_by(participant_id=participant_id).delete()
-            keys = request.form.getlist("attr_key")
-            values = request.form.getlist("attr_value")
             for i, (k, v) in enumerate(zip(keys, values)):
                 k = k.strip()
                 if k:
@@ -150,6 +177,7 @@ def edit(project_id, participant_id):
         except IntegrityError:
             db.session.rollback()
             participant = _get_project_participant_or_404(project_id, participant_id)
+            project = Project.query.get_or_404(project_id)
             return _duplicate_code_response(project, participant=participant)
 
         flash("参加者情報を更新しました", "success")
