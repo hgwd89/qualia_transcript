@@ -159,8 +159,9 @@ def create_media_read_snapshot(media: MediaFile) -> MediaReadSnapshot:
     managed pathname cannot redirect an in-flight transcription.
     """
     opened = open_managed_file_for_read(config.UPLOAD_DIR, media.stored_path)
-    temporary_directory = tempfile.TemporaryDirectory(prefix="qualia_media_read_")
+    temporary_directory = None
     try:
+        temporary_directory = tempfile.TemporaryDirectory(prefix="qualia_media_read_")
         temp_root = Path(temporary_directory.name)
         try:
             os.chmod(temp_root, 0o700)
@@ -198,7 +199,8 @@ def create_media_read_snapshot(media: MediaFile) -> MediaReadSnapshot:
             _temporary_directory=temporary_directory,
         )
     except Exception:
-        temporary_directory.cleanup()
+        if temporary_directory is not None:
+            temporary_directory.cleanup()
         raise
     finally:
         opened.close()
