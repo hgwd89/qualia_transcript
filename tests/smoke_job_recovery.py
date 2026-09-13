@@ -219,6 +219,23 @@ def main() -> int:
                 f"before={before} after={after}",
             )
 
+            retry_row = {
+                "status": "pending",
+                "worker_pid": None,
+                "created_at": (now - timedelta(days=1)).isoformat(),
+                "started_at": (now - timedelta(minutes=1)).isoformat(),
+            }
+            failures += check(
+                "recovery CLI uses fresh retry started_at instead of historical created_at",
+                recovery_cli._stale_reason_from_row(retry_row) is None,
+            )
+            retry_row["started_at"] = (now - timedelta(minutes=6)).isoformat()
+            failures += check(
+                "recovery CLI marks retry stale after current-attempt grace expires",
+                recovery_cli._stale_reason_from_row(retry_row)
+                == "active job has no worker after launch grace period",
+            )
+
             original_checker = recovery.worker_pid_liveness
             recovery.worker_pid_liveness = fake_pid_checker
             try:
