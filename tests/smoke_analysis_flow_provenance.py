@@ -120,6 +120,24 @@ def main() -> int:
                     is_unclassified=False,
                 ))
 
+                unclassified_segment = Segment(
+                    interview_id=without_evidence.id,
+                    participant_id=p2.id,
+                    speaker_label="RESP_UNCLASSIFIED",
+                    speaker_role="respondent",
+                    text="unclassified answer",
+                    seq=1,
+                )
+                db.session.add(unclassified_segment)
+                db.session.flush()
+                db.session.add(UtteranceMapping(
+                    segment_id=unclassified_segment.id,
+                    question_id=None,
+                    mapped_by="manual",
+                    confidence=1.0,
+                    is_unclassified=True,
+                ))
+
                 cross = AIAnalysis(
                     project_id=project.id,
                     interview_id=None,
@@ -146,7 +164,7 @@ def main() -> int:
                     scope_error = exc
 
                 failures += check(
-                    "mapped interview with zero prompt evidence blocks integrated scope",
+                    "mapped interview with only unclassified evidence blocks integrated scope",
                     scope_error is not None
                     and scope_error.code == "integrated_interview_no_mapped_evidence"
                     and scope_error.interview_ids == [missing_id],
