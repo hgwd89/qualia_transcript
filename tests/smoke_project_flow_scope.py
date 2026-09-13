@@ -330,6 +330,11 @@ def main() -> int:
                     f"error={getattr(incomplete_error, 'code', None)}, calls={len(provider_calls)}",
                 )
 
+                # SQLite keeps file handles open through the engine pool on Windows.
+                # Release the scoped session and pool before TemporaryDirectory cleanup.
+                db.session.remove()
+                db.engine.dispose()
+
         finally:
             config.DATABASE_URI = original_config["DATABASE_URI"]
             config.UPLOAD_DIR = original_config["UPLOAD_DIR"]
