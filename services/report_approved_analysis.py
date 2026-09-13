@@ -14,6 +14,9 @@ from services.file_manager import (
     write_and_register_generated_file,
 )
 
+# Legacy split helpers write_output_target/register_generated_file are intentionally
+# not called by production report generators; the combined boundary owns both steps.
+
 
 SUMMARY_HEADERS = [
     "analysis_id",
