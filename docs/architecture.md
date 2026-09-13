@@ -53,6 +53,14 @@ Derived data includes speaker assignments, utterance mappings, segment flags, se
 
 Derived data may reference raw data by IDs and source quotes, but must not overwrite raw data. Any code path that changes `Segment.text` must be treated as high risk and requires explicit approval.
 
+## Raw Transcript Evidence Durability Contract
+
+Raw transcript JSON snapshots are immutable source evidence. `services/raw_snapshot_storage.py` must not report a successful write until both the bytes and the filesystem namespace needed to find those bytes have crossed the platform durability barrier. Canonical transcription success is committed only after this evidence-write boundary returns.
+
+On POSIX, evidence creation uses ancestry-pinned exclusive create, flushes and `fsync`s the file, then pins and revalidates the `raw_transcripts` directory while `fsync`ing that directory and the managed output root. When the output root itself was created by the write, its parent directory is also identity-checked and `fsync`ed so the new root entry is durable. Namespace or file-generation replacement during this barrier fails closed.
+
+On Windows, raw evidence is created with `CREATE_NEW` plus `FILE_FLAG_WRITE_THROUGH`, followed by the normal file flush. After close, the file is reopened through the ancestry-pinned managed-read boundary and its exact bytes are SHA-256 verified against the serialized payload; same-size in-place replacement therefore cannot pass merely by preserving file identity/length metadata.
+
 ## AI Analysis Review Contract
 
 `AIAnalysis.review_status` is one of `draft`, `approved`, or `rejected`. Existing and newly generated analyses default to `draft`; model generation never implies human approval.
@@ -95,7 +103,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 ## Core Services
 
 - `services/transcription.py`: OpenAI or Whisper transcription and raw transcript snapshot writing.
-- `services/raw_snapshot_storage.py`: ancestry-pinned exclusive creation and batch reads for immutable raw transcript JSON evidence.
+- `services/raw_snapshot_storage.py`: ancestry-pinned exclusive creation, crash-durable publication, byte verification, and batch reads for immutable raw transcript JSON evidence.
 - `services/mapper.py`: OpenAI-backed mapping of respondent utterances to questions.
 - `services/analyzer.py`: OpenAI-backed interview, question, cross-participant, and integrated AI analysis.
 - `services/analysis_review.py`: human review transitions and evidence-quote → respondent source-segment resolution.

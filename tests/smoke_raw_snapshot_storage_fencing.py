@@ -63,6 +63,7 @@ def main() -> int:
     original_file_generation = storage._file_generation
     original_fsync = storage.os.fsync
     original_managed_create = storage.open_managed_file_for_create
+    original_managed_read = storage.open_managed_file_for_read
 
     with tempfile.TemporaryDirectory(prefix="qualia_raw_snapshot_fencing_") as tmp:
         root = Path(tmp)
@@ -105,13 +106,43 @@ def main() -> int:
                     durability_ok
                     and durability_write_through == [True]
                     and "file" in durability_sync_modes
-                    and durability_sync_modes.count("dir") >= 2
+                    and durability_sync_modes.count("dir") >= 3
                 )
             failures += check(
                 "raw evidence crosses the platform durability barrier before returning",
                 durability_ok,
                 f"write_through={durability_write_through!r} sync_modes={durability_sync_modes!r}",
             )
+
+            if os.name == "nt":
+                tamper_root = root / "windows-byte-tamper"
+                tamper_attempted = False
+
+                def tampering_managed_read(output_dir, stored_path):
+                    nonlocal tamper_attempted
+                    if not tamper_attempted:
+                        tamper_attempted = True
+                        path = Path(output_dir) / stored_path
+                        original_bytes = path.read_bytes()
+                        path.write_bytes(b"X" * len(original_bytes))
+                    return original_managed_read(output_dir, stored_path)
+
+                storage.open_managed_file_for_read = tampering_managed_read
+                try:
+                    same_length_tamper_rejected = raises_value_error(
+                        lambda: storage.write_raw_snapshot_json(
+                            tamper_root,
+                            "same_length_tamper",
+                            {"text": "must-remain-exact"},
+                        )
+                    )
+                finally:
+                    storage.open_managed_file_for_read = original_managed_read
+                failures += check(
+                    "Windows durable reopen rejects same-length byte replacement",
+                    tamper_attempted and same_length_tamper_rejected,
+                    f"attempted={tamper_attempted} rejected={same_length_tamper_rejected}",
+                )
 
             payload = {
                 "transcription_id": 1,
@@ -357,6 +388,7 @@ def main() -> int:
             storage._file_generation = original_file_generation
             storage.os.fsync = original_fsync
             storage.open_managed_file_for_create = original_managed_create
+            storage.open_managed_file_for_read = original_managed_read
             config.OUTPUT_DIR = original_output
 
     storage_source = (repo_root / "services" / "raw_snapshot_storage.py").read_text(encoding="utf-8")
@@ -369,7 +401,10 @@ def main() -> int:
         "write_through=True" in storage_source
         and "os.fsync(opened.stream.fileno())" in storage_source
         and "os.fsync(raw_fd)" in storage_source
-        and "os.fsync(root_fd)" in storage_source,
+        and "os.fsync(root_fd)" in storage_source
+        and "os.fsync(parent_fd)" in storage_source
+        and "hashlib.sha256" in storage_source
+        and "raw snapshot bytes changed after durable write" in storage_source,
     )
     failures += check(
         "raw evidence batch reader pins or identity-revalidates the directory namespace",

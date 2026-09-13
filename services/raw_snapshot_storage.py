@@ -1,6 +1,7 @@
 """Hardened storage boundary for immutable raw transcript JSON evidence."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -332,6 +333,8 @@ def _sync_raw_snapshot_parent_posix(
     root: Path,
     filename: str,
     expected_file_stat: os.stat_result,
+    *,
+    sync_root_parent: bool,
 ) -> None:
     opened = _open_raw_dir_posix(root)
     if opened is None:
@@ -360,6 +363,40 @@ def _sync_raw_snapshot_parent_posix(
             or _directory_identity(public_raw) != pinned_raw_identity
         ):
             raise ValueError("raw snapshot namespace changed during durability sync")
+
+        if sync_root_parent and root.parent != root:
+            parent_fd = _open_posix_directory_chain(root.parent)
+            try:
+                pinned_root_identity = _directory_identity(os.fstat(root_fd))
+                try:
+                    before_root = os.stat(
+                        root.name,
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise ValueError(
+                        "raw snapshot output root disappeared before parent durability sync"
+                    ) from exc
+                if (
+                    not stat.S_ISDIR(before_root.st_mode)
+                    or _directory_identity(before_root) != pinned_root_identity
+                ):
+                    raise ValueError(
+                        "raw snapshot output root changed before parent durability sync"
+                    )
+                os.fsync(parent_fd)
+                after_root = os.stat(
+                    root.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if _directory_identity(after_root) != pinned_root_identity:
+                    raise ValueError(
+                        "raw snapshot output root changed during parent durability sync"
+                    )
+            finally:
+                os.close(parent_fd)
     finally:
         os.close(raw_fd)
         os.close(root_fd)
@@ -369,11 +406,22 @@ def _verify_written_snapshot_windows(
     output_dir: str | Path,
     stored_path: str,
     expected_file_stat: os.stat_result,
+    expected_sha256: bytes,
 ) -> None:
     opened = open_managed_file_for_read(output_dir, stored_path)
     try:
-        if _stable_written_identity(opened.stat_result) != _stable_written_identity(expected_file_stat):
+        expected_identity = _stable_written_identity(expected_file_stat)
+        if _stable_written_identity(opened.stat_result) != expected_identity:
             raise ValueError("raw snapshot changed after durable write")
+
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: opened.stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        after_read = os.fstat(opened.stream.fileno())
+        if _stable_written_identity(after_read) != expected_identity:
+            raise ValueError("raw snapshot changed during durable verification")
+        if digest.digest() != expected_sha256:
+            raise ValueError("raw snapshot bytes changed after durable write")
     finally:
         opened.close()
 
@@ -386,11 +434,14 @@ def write_raw_snapshot_json(
     """Exclusively create one immutable JSON snapshot and return its stored path."""
     if not isinstance(payload, dict):
         raise ValueError("raw snapshot payload must be a JSON object")
+    root = _root(output_dir)
+    root_existed = root.exists()
     ensure_raw_snapshot_dir(output_dir)
     base = _validate_base_name(base_name)
     filename = f"{base}_{uuid4().hex}.json"
     stored_path = f"{RAW_SNAPSHOT_DIR}/{filename}"
     encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    expected_sha256 = hashlib.sha256(encoded).digest()
 
     opened = open_managed_file_for_create(
         output_dir,
@@ -409,7 +460,17 @@ def write_raw_snapshot_json(
     if final_stat is None:
         raise ValueError("raw snapshot durability state is unavailable")
     if os.name == "nt":
-        _verify_written_snapshot_windows(output_dir, stored_path, final_stat)
+        _verify_written_snapshot_windows(
+            output_dir,
+            stored_path,
+            final_stat,
+            expected_sha256,
+        )
     else:
-        _sync_raw_snapshot_parent_posix(_root(output_dir), filename, final_stat)
+        _sync_raw_snapshot_parent_posix(
+            root,
+            filename,
+            final_stat,
+            sync_root_parent=not root_existed,
+        )
     return stored_path
