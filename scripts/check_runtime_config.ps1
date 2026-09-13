@@ -84,6 +84,39 @@ Assert-Bool -Name "app.py path mentioned inside another argument is rejected" `
     -Actual (Test-QualiaProcessCommandLine -CommandLine ("python -c `"print('$appScript')`"") -ProjectDir $projectRoot -ProcessName "python") `
     -Expected $false
 
+$spaceProjectDir = Join-Path $env:TEMP ("Qualia Launcher Space " + [guid]::NewGuid().ToString("N"))
+try {
+    New-Item -Path $spaceProjectDir -ItemType Directory -Force | Out-Null
+    $spaceAppScript = Join-Path $spaceProjectDir "app.py"
+    Set-Content -LiteralPath $spaceAppScript -Value "# launcher identity fixture" -Encoding UTF8
+    $resolvedSpaceApp = (Resolve-Path $spaceAppScript).Path
+
+    Assert-Bool -Name "quoted app.py path with spaces is one exact argv element" `
+        -Actual (Test-QualiaProcessCommandLine `
+            -CommandLine ("`"C:\Python\python.exe`" `"$resolvedSpaceApp`"") `
+            -ProjectDir $spaceProjectDir `
+            -ProcessName "python") `
+        -Expected $true
+
+    Assert-Bool -Name "unquoted path split across argv elements is rejected" `
+        -Actual (Test-QualiaProcessCommandLine `
+            -CommandLine ("`"C:\Python\python.exe`" $resolvedSpaceApp") `
+            -ProjectDir $spaceProjectDir `
+            -ProcessName "python") `
+        -Expected $false
+
+    Assert-Bool -Name "separate arguments that concatenate visually to app path are rejected" `
+        -Actual (Test-QualiaProcessCommandLine `
+            -CommandLine ("python other.py `"$($spaceProjectDir.Substring(0, $spaceProjectDir.LastIndexOf(' ')))`" `"$($spaceProjectDir.Substring($spaceProjectDir.LastIndexOf(' ') + 1))\app.py`"") `
+            -ProjectDir $spaceProjectDir `
+            -ProcessName "python") `
+        -Expected $false
+} finally {
+    if (Test-Path $spaceProjectDir) {
+        Remove-Item -LiteralPath $spaceProjectDir -Recurse -Force
+    }
+}
+
 $initialProcess = [PSCustomObject]@{
     Pid = 4242
     Name = "python"
@@ -109,19 +142,27 @@ Assert-Bool -Name "reused PID with a different start time is rejected" `
     -Actual (Test-QualiaSameProcessInstance -Candidate $reusedPid -Initial $initialProcess -ProjectDir $projectRoot) `
     -Expected $false
 
-Assert-Bool -Name "Qualia settings content requires service identity and marker" `
-    -Actual (Test-QualiaSettingsContent -Content '<title>設定 | Qualia Transcript</title><div>Whisperモデル</div>' -ServiceName "Qualia Transcript") `
+Assert-Bool -Name "Qualia settings content requires service identity and fixed product markers" `
+    -Actual (Test-QualiaSettingsContent -Content '<title>設定 | Qualia Transcript</title><div>Whisperモデル</div><div>MVP v0.1</div>' -ServiceName "Qualia Transcript") `
     -Expected $true
 
 Assert-Bool -Name "HTML-escaped service name is decoded before identity comparison" `
-    -Actual (Test-QualiaSettingsContent -Content '<title>Research &amp; Insights</title><div>Whisperモデル</div>' -ServiceName "Research & Insights") `
+    -Actual (Test-QualiaSettingsContent -Content '<title>Research &amp; Insights</title><div>Whisperモデル</div><div>MVP v0.1</div>' -ServiceName "Research & Insights") `
     -Expected $true
 
-Assert-Bool -Name "generic settings page is not accepted as Qualia" `
-    -Actual (Test-QualiaSettingsContent -Content '<title>設定</title><div>Whisperモデル</div>' -ServiceName "Qualia Transcript") `
+Assert-Bool -Name "empty configured service name falls back to fixed Qualia product markers" `
+    -Actual (Test-QualiaSettingsContent -Content '<title>設定 | </title><div>Whisperモデル</div><div>MVP v0.1</div>' -ServiceName "") `
+    -Expected $true
+
+Assert-Bool -Name "empty service name does not accept a generic settings marker alone" `
+    -Actual (Test-QualiaSettingsContent -Content '<title>設定</title><div>Whisperモデル</div>' -ServiceName "") `
     -Expected $false
 
-Assert-Bool -Name "service name alone is insufficient without a Qualia settings marker" `
+Assert-Bool -Name "generic settings page is not accepted as Qualia" `
+    -Actual (Test-QualiaSettingsContent -Content '<title>設定</title><div>Whisperモデル</div><div>MVP v0.1</div>' -ServiceName "Qualia Transcript") `
+    -Expected $false
+
+Assert-Bool -Name "service name alone is insufficient without fixed Qualia product markers" `
     -Actual (Test-QualiaSettingsContent -Content '<title>Qualia Transcript</title>' -ServiceName "Qualia Transcript") `
     -Expected $false
 
@@ -131,8 +172,12 @@ Assert-Equal -Name "expired readiness deadline refuses another request" `
 
 $startScriptText = Get-Content (Join-Path $projectRoot "start_app.ps1") -Raw
 $stopScriptText = Get-Content (Join-Path $projectRoot "stop_app.ps1") -Raw
+$runtimeScriptText = Get-Content (Join-Path $scriptDir "runtime_config.ps1") -Raw
 Assert-Bool -Name "launcher passes absolute app.py identity to Python" `
     -Actual ($startScriptText.Contains("Get-QualiaAppScriptPath") -and $startScriptText.Contains('$AppArgument')) `
+    -Expected $true
+Assert-Bool -Name "process identity uses Windows argv parsing instead of raw path regex matching" `
+    -Actual ($runtimeScriptText.Contains("CommandLineToArgvW") -and -not $runtimeScriptText.Contains('$argumentPattern =')) `
     -Expected $true
 Assert-Bool -Name "readiness loop uses one wall-clock UTC deadline" `
     -Actual ($startScriptText.Contains('[DateTime]::UtcNow.AddSeconds($MaxSeconds)') -and $startScriptText.Contains('-DeadlineUtc $deadlineUtc')) `
