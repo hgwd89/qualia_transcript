@@ -53,10 +53,15 @@ def main() -> int:
         backups = success_root / "backups"
 
         original_validate = local_backup.validate_backup
+        original_sync_file = local_backup._sync_file_data
+        original_replace = local_backup._atomic_replace_same_filesystem
+        original_sync_directory = local_backup._sync_publish_directory
         validation_observation = {"called": False, "private": False, "official_absent": False}
+        publish_events: list[tuple[str, str]] = []
 
         def observe_validation(path):
             candidate = Path(path)
+            publish_events.append(("validate", candidate.name))
             validation_observation["called"] = True
             validation_observation["private"] = (
                 candidate.parent == backups.resolve()
@@ -66,7 +71,23 @@ def main() -> int:
             validation_observation["official_absent"] = not list(backups.glob("qualia_backup_*.zip"))
             return original_validate(candidate)
 
+        def observe_sync_file(path):
+            candidate = Path(path)
+            publish_events.append(("sync_file", candidate.name))
+            return original_sync_file(candidate)
+
+        def observe_replace(source, destination):
+            publish_events.append(("replace", f"{Path(source).name}->{Path(destination).name}"))
+            return original_replace(Path(source), Path(destination))
+
+        def observe_sync_directory(path):
+            publish_events.append(("sync_directory", Path(path).name))
+            return original_sync_directory(Path(path))
+
         local_backup.validate_backup = observe_validation
+        local_backup._sync_file_data = observe_sync_file
+        local_backup._atomic_replace_same_filesystem = observe_replace
+        local_backup._sync_publish_directory = observe_sync_directory
         try:
             archive = local_backup.create_backup(
                 backups,
@@ -77,6 +98,9 @@ def main() -> int:
             )
         finally:
             local_backup.validate_backup = original_validate
+            local_backup._sync_file_data = original_sync_file
+            local_backup._atomic_replace_same_filesystem = original_replace
+            local_backup._sync_publish_directory = original_sync_directory
 
         failures += check(
             "backup is validated while only the private partial archive exists",
@@ -106,6 +130,24 @@ def main() -> int:
                 (archive_mode & 0o077) == 0,
                 oct(archive_mode),
             )
+
+        event_names = [name for name, _detail in publish_events]
+        try:
+            validate_index = event_names.index("validate")
+            first_sync_index = event_names.index("sync_file", validate_index + 1)
+            replace_index = event_names.index("replace", first_sync_index + 1)
+            if os.name == "nt":
+                durability_index = event_names.index("sync_file", replace_index + 1)
+            else:
+                durability_index = event_names.index("sync_directory", replace_index + 1)
+            durable_order = validate_index < first_sync_index < replace_index < durability_index
+        except ValueError:
+            durable_order = False
+        failures += check(
+            "validated bytes are flushed before rename and publication is durability-fenced before success",
+            durable_order,
+            str(publish_events),
+        )
 
         validation_fail_root = root / "validation-failure"
         validation_fail_root.mkdir()
@@ -141,7 +183,6 @@ def main() -> int:
         publish_fail_root.mkdir()
         database, uploads, outputs, database_uri = build_fixture(publish_fail_root)
         publish_fail_backups = publish_fail_root / "backups"
-        original_replace = local_backup.os.replace
         replace_seen = {"called": False, "validated": False}
 
         def fail_replace(source, destination):
@@ -149,7 +190,7 @@ def main() -> int:
             replace_seen["validated"] = original_validate(source).get("format_version") == 1
             raise OSError("forced atomic publish failure")
 
-        local_backup.os.replace = fail_replace
+        local_backup._atomic_replace_same_filesystem = fail_replace
         publish_failed = False
         try:
             local_backup.create_backup(
@@ -162,7 +203,7 @@ def main() -> int:
         except OSError as exc:
             publish_failed = "forced atomic publish failure" in str(exc)
         finally:
-            local_backup.os.replace = original_replace
+            local_backup._atomic_replace_same_filesystem = original_replace
         failures += check(
             "publish failure occurs only after validation and leaves no official or partial artifact",
             publish_failed
@@ -174,13 +215,56 @@ def main() -> int:
             str(replace_seen),
         )
 
+        post_rename_fail_root = root / "post-rename-failure"
+        post_rename_fail_root.mkdir()
+        database, uploads, outputs, database_uri = build_fixture(post_rename_fail_root)
+        post_rename_backups = post_rename_fail_root / "backups"
+        original_publish = local_backup._publish_validated_archive
+
+        def fail_after_rename(partial, archive_path):
+            os.replace(partial, archive_path)
+            raise OSError("forced post-rename durability failure")
+
+        local_backup._publish_validated_archive = fail_after_rename
+        post_rename_failed = False
+        try:
+            local_backup.create_backup(
+                post_rename_backups,
+                database_uri=database_uri,
+                upload_dir=uploads,
+                output_dir=outputs,
+                label="post_rename_failure",
+            )
+        except OSError as exc:
+            post_rename_failed = "forced post-rename durability failure" in str(exc)
+        finally:
+            local_backup._publish_validated_archive = original_publish
+        failures += check(
+            "a durability failure after rename removes the not-successfully-published official artifact",
+            post_rename_failed
+            and not list(post_rename_backups.glob("qualia_backup_*.zip"))
+            and not list(post_rename_backups.glob("*.partial"))
+            and not list(post_rename_backups.glob(".*.partial")),
+        )
+
         source_text = (repo_root / "services" / "local_backup.py").read_text(encoding="utf-8")
         failures += check(
-            "backup implementation publishes only after validation using same-filesystem os.replace",
+            "backup implementation crash-durably publishes only validated same-filesystem bytes",
             "validate_backup(partial_archive)" in source_text
-            and "os.replace(partial_archive, archive)" in source_text
+            and "_publish_validated_archive(partial_archive, archive)" in source_text
+            and "_sync_file_data(partial)" in source_text
+            and "_atomic_replace_same_filesystem(partial, archive)" in source_text
+            and "_sync_publish_directory(archive.parent)" in source_text
+            and "movefile_write_through" in source_text
             and "partial_archive.unlink(missing_ok=True)" in source_text
+            and "archive.unlink(missing_ok=True)" in source_text
             and "zipfile.ZipFile(partial_archive" in source_text,
+        )
+        failures += check(
+            "Windows backup privacy is enforced with an owner SID ACL before partial creation",
+            "whoami\", \"/user\", \"/fo\", \"csv\", \"/nh" in source_text
+            and "\"icacls\", str(path), \"/inheritance:r\", \"/grant:r\"" in source_text
+            and "_restrict_permissions(destination, 0o700)" in source_text,
         )
 
     if failures:

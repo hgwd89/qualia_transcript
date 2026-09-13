@@ -6,12 +6,15 @@ and restores from those same staged bytes before touching targets.
 """
 from __future__ import annotations
 
+import csv
+import ctypes
 import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import stat
+import subprocess
 import tempfile
 import uuid
 import zipfile
@@ -36,11 +39,99 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _current_windows_user_sid() -> str:
+    """Return the current Windows logon SID without depending on localized account names."""
+    result = subprocess.run(
+        ["whoami", "/user", "/fo", "csv", "/nh"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise OSError("could not resolve the current Windows user SID")
+    rows = list(csv.reader(result.stdout.splitlines()))
+    if len(rows) != 1 or len(rows[0]) < 2:
+        raise OSError("could not parse the current Windows user SID")
+    sid = rows[0][1].strip()
+    if not sid.startswith("S-1-"):
+        raise OSError("current Windows user SID is invalid")
+    return sid
+
+
 def _restrict_permissions(path: Path, mode: int) -> None:
-    """Enforce owner-only backup permissions where POSIX mode bits are meaningful."""
+    """Enforce owner-only backup permissions on POSIX and Windows."""
     if os.name == "nt":
+        sid = _current_windows_user_sid()
+        grant = f"*{sid}:(OI)(CI)F" if path.is_dir() else f"*{sid}:(F)"
+        result = subprocess.run(
+            ["icacls", str(path), "/inheritance:r", "/grant:r", grant],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if result.returncode != 0:
+            raise OSError(f"could not restrict Windows ACL for backup path: {path}")
         return
     os.chmod(path, mode)
+
+
+def _sync_file_data(path: Path) -> None:
+    """Force validated archive bytes to stable storage before publication."""
+    flags = os.O_RDWR | int(getattr(os, "O_BINARY", 0))
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _sync_publish_directory(path: Path) -> None:
+    """Persist a POSIX rename in its parent directory."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | int(getattr(os, "O_DIRECTORY", 0))
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _atomic_replace_same_filesystem(source: Path, destination: Path) -> None:
+    """Atomically rename a validated archive, using write-through semantics on Windows."""
+    if os.name == "nt":
+        movefile_replace_existing = 0x00000001
+        movefile_write_through = 0x00000008
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        move_file_ex = kernel32.MoveFileExW
+        move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        move_file_ex.restype = ctypes.c_int
+        ok = move_file_ex(
+            str(source),
+            str(destination),
+            movefile_replace_existing | movefile_write_through,
+        )
+        if not ok:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "write-through atomic backup publish failed", str(source))
+        return
+    os.replace(source, destination)
+
+
+def _publish_validated_archive(partial: Path, archive: Path) -> None:
+    """Crash-durably publish already validated bytes under the official backup name."""
+    _sync_file_data(partial)
+    _atomic_replace_same_filesystem(partial, archive)
+    if os.name == "nt":
+        # MoveFileExW(MOVEFILE_WRITE_THROUGH) persists the rename; flush the final
+        # file handle as an additional data barrier before reporting success.
+        _sync_file_data(archive)
+    else:
+        _sync_publish_directory(archive.parent)
 
 
 def _sqlite_path(database_uri: str | None = None) -> Path:
@@ -314,6 +405,9 @@ def _create_backup_unlocked(
     outputs = Path(output_dir or config.OUTPUT_DIR).resolve()
     destination = Path(destination_dir or config.BACKUP_DIR).resolve()
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Tighten the destination before the unpublished archive is created. On
+    # Windows this is the privacy boundary that the child file inherits even if
+    # the process dies before the file-specific ACL call can run.
     _restrict_permissions(destination, 0o700)
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -355,12 +449,13 @@ def _create_backup_unlocked(
 
         _restrict_permissions(partial_archive, 0o600)
         validate_backup(partial_archive)
-        os.replace(partial_archive, archive)
+        _publish_validated_archive(partial_archive, archive)
         published = True
         return archive
     finally:
         if not published:
             partial_archive.unlink(missing_ok=True)
+            archive.unlink(missing_ok=True)
 
 
 def create_backup(

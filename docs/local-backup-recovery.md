@@ -19,7 +19,9 @@ From the repository root:
 python scripts/backup_local_data.py --label before_major_change
 ```
 
-The default destination is `backups/`. The command does not merely copy the live SQLite file: it creates a SQLite-consistent snapshot, builds the archive into an owner-private hidden `.partial` file in the destination directory, reopens and fully validates those exact bytes, and only then atomically publishes the file under the official `qualia_backup_....zip` name. A write, validation, or publish failure therefore cannot leave an unverified archive looking like a completed backup.
+The default destination is `backups/`. The command does not merely copy the live SQLite file: it first tightens the backup destination to the current user (POSIX owner modes or a Windows current-user SID ACL), creates the archive under an owner-private dot-prefixed `.partial` name on that same filesystem, reopens and fully validates those exact bytes, flushes the validated archive to stable storage, and only then atomically publishes the official `qualia_backup_....zip` name. POSIX publication fsyncs the destination directory after the rename; Windows uses `MoveFileExW(..., MOVEFILE_WRITE_THROUGH)` and flushes the final file before reporting success. A write, validation, durability, or publish failure therefore does not return a completed backup, and normal failure cleanup removes both unpublished partials and any official name exposed before the durability barrier completed.
+
+The leading dot is only a naming convention on Windows; privacy there comes from the explicit current-user ACL rather than from the Windows Hidden file attribute.
 
 A backup is considered valid only when:
 
@@ -58,7 +60,7 @@ The `--apply --yes` pair is intentionally required. `--apply` without `--yes` is
 - Keep at least one verified backup outside the working repository/device for projects that cannot be reconstructed from source media.
 - After restore, run `scripts/check_local_data_integrity.ps1` before resuming production work.
 - If a restore fails after changes begin, the restore service attempts to roll the DB/uploads/outputs back to the state captured immediately before replacement; the pre-restore ZIP is an additional recovery point.
-- Hidden `.partial` files are never valid backups. They are private construction artifacts from interrupted/failed creation and must not be treated as recovery points.
+- Dot-prefixed `.partial` files are never valid backups. They are private construction artifacts from interrupted/failed creation and must not be treated as recovery points.
 
 ## Regression check
 
@@ -69,4 +71,4 @@ powershell -ExecutionPolicy Bypass -File scripts/check_local_production.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
 
-They verify runtime defaults, portable launcher behavior, backup creation, validation-only behavior, DB/file round-trip restore, removal of stale files, tamper detection, rejection of files not declared in the manifest, and the atomic-publish contract that no official backup name is exposed before complete validation. They do not call OpenAI, Whisper, or any external API.
+They verify runtime defaults, portable launcher behavior, backup creation, validation-only behavior, DB/file round-trip restore, removal of stale files, tamper detection, rejection of files not declared in the manifest, Windows/POSIX privacy fencing, and the crash-durable atomic-publish contract that no official backup is reported successful before validation plus the platform durability barrier. They do not call OpenAI, Whisper, or any external API.
