@@ -44,30 +44,32 @@ def create_or_get_active_job(
     *,
     question_id: int | None = None,
 ):
-    if job_type not in JOB_TYPES:
-        raise ValueError(f"unsupported job_type: {job_type}")
+    """Compatibility shim around canonical serialized job admission.
 
-    query = ProcessingJob.query.filter_by(
-        project_id=project_id,
-        interview_id=interview_id,
-        question_id=question_id,
-        job_type=job_type,
-    ).filter(ProcessingJob.status.in_(ACTIVE_STATUSES))
-    existing = query.order_by(ProcessingJob.id.desc()).first()
-    if existing:
-        return existing, False
+    Keep the historical tuple interface for callers that still import this
+    helper, but do not maintain a second admission implementation here.
+    """
+    from services.job_admission import admit_processing_job
 
-    job = ProcessingJob(
-        project_id=project_id,
-        interview_id=interview_id,
+    admission = admit_processing_job(
+        project_id,
+        job_type,
+        interview_id,
         question_id=question_id,
-        job_type=job_type,
-        status="pending",
-        progress_json=_json_dump({"stage": "queued"}),
     )
-    db.session.add(job)
-    db.session.commit()
-    return job, True
+    if admission.error:
+        raise ValueError(admission.error)
+    if admission.conflict_job_id is not None:
+        raise ValueError(
+            f"processing job conflicts with active job_id={admission.conflict_job_id}"
+        )
+    if admission.job_id is None:
+        raise RuntimeError("processing job admission returned no job")
+
+    job = db.session.get(ProcessingJob, int(admission.job_id))
+    if job is None:
+        raise RuntimeError("processing job not found after admission")
+    return job, bool(admission.created)
 
 
 def _attempt_number(job: ProcessingJob) -> int:
@@ -341,29 +343,20 @@ def launch_job_worker(
 
 
 def retry_failed_job(job: ProcessingJob) -> ProcessingJob:
+    """Compatibility shim around canonical serialized retry admission."""
+    from services.job_admission import admit_retry_job
+
     job_id = int(job.id)
-    retried = (
-        ProcessingJob.query
-        .filter(ProcessingJob.id == job_id)
-        .filter(ProcessingJob.status == "failed")
-        .update(
-            {
-                ProcessingJob.status: "pending",
-                ProcessingJob.progress_json: _json_dump({"stage": "retry_queued"}),
-                ProcessingJob.result_json: None,
-                ProcessingJob.error_message: None,
-                ProcessingJob.worker_pid: None,
-                ProcessingJob.started_at: None,
-                ProcessingJob.finished_at: None,
-            },
-            synchronize_session=False,
+    admission = admit_retry_job(job_id)
+    if admission.conflict_job_id is not None:
+        raise ValueError(
+            f"processing job retry conflicts with active job_id={admission.conflict_job_id}"
         )
-    )
-    db.session.commit()
-    current = _refresh_job(job_id)
-    if retried != 1:
-        raise ValueError("only failed jobs can be retried")
-    return current
+    if admission.error:
+        raise ValueError(admission.error)
+    if admission.job_id != job_id:
+        raise RuntimeError("processing job retry admission returned an unexpected job")
+    return _refresh_job(job_id)
 
 
 def _claim_pending_job(

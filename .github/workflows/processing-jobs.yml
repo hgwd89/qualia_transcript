@@ -1,0 +1,45 @@
+name: Durable Processing Jobs
+
+on:
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  processing-jobs:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"
+      PYTHONIOENCODING: "utf-8"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run durable processing job regression
+        run: python tests/smoke_processing_jobs.py
+
+      - name: Run role normalization regression
+        run: python tests/smoke_role_normalization.py
+
+      - name: Run durable interview job UI regression
+        run: python tests/smoke_interview_job_ui.py
+
+      - name: Run durable secondary analysis job regression
+        run: python tests/smoke_secondary_analysis_jobs.py

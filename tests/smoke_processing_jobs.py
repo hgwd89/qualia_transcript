@@ -123,7 +123,14 @@ def main() -> int:
                     and duplicate_reservation_job.worker_pid == 0,
                     str(duplicate_reservation_job.to_dict()),
                 )
-                recorded = _record_worker_launch(launch_job_id, 5555)
+                launch_attempt = int(reserved_job.attempt_count or 0)
+                launch_started_at = reserved_job.started_at
+                recorded = _record_worker_launch(
+                    launch_job_id,
+                    5555,
+                    expected_attempt_count=launch_attempt,
+                    expected_started_at=launch_started_at,
+                )
                 launch_after_record = db.session.get(ProcessingJob, launch_job_id)
                 failures += check(
                     "reserved launcher persists worker pid",
@@ -137,7 +144,12 @@ def main() -> int:
                 launch_after_record.finished_at = datetime.now(timezone.utc)
                 launch_after_record.progress_json = '{"stage":"completed"}'
                 db.session.commit()
-                late_record = _record_worker_launch(launch_job_id, 5555)
+                late_record = _record_worker_launch(
+                    launch_job_id,
+                    5555,
+                    expected_attempt_count=launch_attempt,
+                    expected_started_at=launch_started_at,
+                )
                 terminal_launch = db.session.get(ProcessingJob, launch_job_id)
                 failures += check(
                     "late launcher write cannot resurrect terminal pid",
@@ -158,9 +170,21 @@ def main() -> int:
                 db.session.add(child_first_job)
                 db.session.commit()
                 child_first_id = child_first_job.id
-                _, child_reserved = _reserve_worker_launch(child_first_id)
-                child_claim, child_claimed = _claim_pending_job(child_first_id, worker_pid=6666)
-                parent_late_record = _record_worker_launch(child_first_id, 6666)
+                child_reserved_job, child_reserved = _reserve_worker_launch(child_first_id)
+                child_attempt = int(child_reserved_job.attempt_count or 0)
+                child_started_at = child_reserved_job.started_at
+                child_claim, child_claimed = _claim_pending_job(
+                    child_first_id,
+                    worker_pid=6666,
+                    expected_attempt_count=child_attempt,
+                    expected_started_at=child_started_at,
+                )
+                parent_late_record = _record_worker_launch(
+                    child_first_id,
+                    6666,
+                    expected_attempt_count=child_attempt,
+                    expected_started_at=child_started_at,
+                )
                 child_after = db.session.get(ProcessingJob, child_first_id)
                 failures += check(
                     "child claim wins safely before parent pid write",
@@ -185,8 +209,14 @@ def main() -> int:
                 db.session.add(release_job)
                 db.session.commit()
                 release_id = release_job.id
-                _, release_reserved = _reserve_worker_launch(release_id)
-                _release_worker_launch_reservation(release_id)
+                release_reserved_job, release_reserved = _reserve_worker_launch(release_id)
+                release_attempt = int(release_reserved_job.attempt_count or 0)
+                release_started_at = release_reserved_job.started_at
+                _release_worker_launch_reservation(
+                    release_id,
+                    expected_attempt_count=release_attempt,
+                    expected_started_at=release_started_at,
+                )
                 released = db.session.get(ProcessingJob, release_id)
                 failures += check(
                     "failed spawn releases launch reservation",
@@ -216,17 +246,19 @@ def main() -> int:
                     second_retry_rejected = True
                 failures += check(
                     "failed job can be atomically requeued only once",
-                    first_retry.status == "pending" and second_retry_rejected,
+                    first_retry.status == "pending"
+                    and first_retry.started_at is not None
+                    and second_retry_rejected,
                     str(first_retry.to_dict()),
                 )
                 first_retry.status = "succeeded"
                 first_retry.finished_at = datetime.now(timezone.utc)
                 db.session.commit()
 
-            old_transcribe_launcher = transcribe_routes.launch_job_worker
-            old_analyze_launcher = analyze_routes.launch_job_worker
-            transcribe_routes.launch_job_worker = lambda job_id: 4242
-            analyze_routes.launch_job_worker = lambda job_id: 4343
+            old_transcribe_launcher = transcribe_routes.launch_job_or_preserve_active
+            old_analyze_launcher = analyze_routes.launch_job_or_preserve_active
+            transcribe_routes.launch_job_or_preserve_active = lambda _job: (4242, None)
+            analyze_routes.launch_job_or_preserve_active = lambda _job: (4343, None)
             try:
                 response = client.post(f"/api/interviews/{interview_id}/transcribe", json={})
                 data = response.get_json() or {}
@@ -246,6 +278,17 @@ def main() -> int:
                     and duplicate_data.get("created") is False,
                     str(duplicate_data),
                 )
+
+                with app.app_context():
+                    legacy_conflict_rejected = False
+                    try:
+                        create_or_get_active_job(project_id, "map", interview_id)
+                    except ValueError:
+                        legacy_conflict_rejected = True
+                    failures += check(
+                        "legacy create helper delegates canonical conflict policy",
+                        legacy_conflict_rejected,
+                    )
 
                 status_response = client.get(f"/api/processing-jobs/{first_job_id}")
                 status_data = status_response.get_json() or {}
@@ -370,8 +413,8 @@ def main() -> int:
                     f"status={detail_response.status_code}",
                 )
             finally:
-                transcribe_routes.launch_job_worker = old_transcribe_launcher
-                analyze_routes.launch_job_worker = old_analyze_launcher
+                transcribe_routes.launch_job_or_preserve_active = old_transcribe_launcher
+                analyze_routes.launch_job_or_preserve_active = old_analyze_launcher
 
             with app.app_context():
                 failures += check(

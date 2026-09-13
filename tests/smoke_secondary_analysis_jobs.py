@@ -401,7 +401,10 @@ def main() -> int:
                         f"guards={handler_guard_calls}",
                     )
 
-                    # Crash-window idempotency for project-wide analysis.
+                    # Explicit failed -> retry starts a new result generation. A
+                    # result committed by the failed attempt must not be adopted by
+                    # the retry. Running crash-window recovery is covered separately
+                    # by smoke_job_recovery_result_generation.py.
                     crash_job = ProcessingJob(
                         project_id=project_id,
                         question_id=q2_id,
@@ -409,7 +412,7 @@ def main() -> int:
                         status="failed",
                         attempt_count=1,
                         created_at=datetime.now(timezone.utc) - timedelta(seconds=5),
-                        error_message="worker disappeared after AIAnalysis commit",
+                        error_message="explicitly failed after prior analysis commit",
                     )
                     db.session.add(crash_job)
                     db.session.flush()
@@ -418,7 +421,7 @@ def main() -> int:
                         interview_id=None,
                         question_id=q2_id,
                         analysis_type="cross_participant",
-                        title="already committed cross",
+                        title="prior attempt cross",
                         summary_text="existing",
                         content_json='{"findings":[]}',
                         model_used="fake",
@@ -430,22 +433,42 @@ def main() -> int:
                     committed_id = int(committed.id)
 
                     retry = admit_retry_job(crash_job_id)
-                    unexpected_calls = {"count": 0}
+                    retry_calls = {"count": 0}
 
-                    def should_not_call(*_args, **_kwargs):
-                        unexpected_calls["count"] += 1
-                        raise AssertionError("committed cross analysis should be reused")
+                    def retry_cross(
+                        target_project_id,
+                        target_question_id,
+                        *,
+                        result_write_guard=None,
+                    ):
+                        retry_calls["count"] += 1
+                        if result_write_guard is not None:
+                            result_write_guard()
+                        analysis = AIAnalysis(
+                            project_id=target_project_id,
+                            interview_id=None,
+                            question_id=target_question_id,
+                            analysis_type="cross_participant",
+                            title="fresh retry cross",
+                            summary_text="retry",
+                            content_json='{"findings":[]}',
+                            model_used="fake",
+                        )
+                        db.session.add(analysis)
+                        db.session.commit()
+                        return analysis
 
-                    analyzer_service.analyze_cross_participants = should_not_call
+                    analyzer_service.analyze_cross_participants = retry_cross
                     retried = execute_job(retry.job_id, worker_pid=8104)
                     retry_result = retried.to_dict().get("result") or {}
                     failures += check(
-                        "secondary analysis retry reuses committed crash-window result",
+                        "secondary analysis retry rejects prior-attempt committed result",
                         retried.status == "succeeded"
-                        and retry_result.get("analysis_id") == committed_id
-                        and retry_result.get("already_done") is True
-                        and unexpected_calls["count"] == 0,
-                        f"result={retry_result} calls={unexpected_calls['count']}",
+                        and retry_result.get("analysis_id") is not None
+                        and retry_result.get("analysis_id") != committed_id
+                        and retry_result.get("already_done") is not True
+                        and retry_calls["count"] == 1,
+                        f"result={retry_result} calls={retry_calls['count']}",
                     )
                 finally:
                     analyzer_service.analyze_per_question = saved_question
@@ -453,10 +476,10 @@ def main() -> int:
                     analyzer_service.analyze_project_integrated = saved_integrated
 
                 # Route contract: APIs only enqueue durable work and return 202.
-                saved_analyze_launch = analyze_route.launch_job_worker
-                saved_view_launch = analysis_view_route.launch_job_worker
-                analyze_route.launch_job_worker = lambda _job_id: 9101
-                analysis_view_route.launch_job_worker = lambda _job_id: 9102
+                saved_analyze_launch = analyze_route.launch_job_or_preserve_active
+                saved_view_launch = analysis_view_route.launch_job_or_preserve_active
+                analyze_route.launch_job_or_preserve_active = lambda _job: (9101, None)
+                analysis_view_route.launch_job_or_preserve_active = lambda _job: (9102, None)
                 try:
                     client = app.test_client()
                     before_route_analyses = AIAnalysis.query.count()
@@ -527,8 +550,8 @@ def main() -> int:
                         f"body={status_json}",
                     )
                 finally:
-                    analyze_route.launch_job_worker = saved_analyze_launch
-                    analysis_view_route.launch_job_worker = saved_view_launch
+                    analyze_route.launch_job_or_preserve_active = saved_analyze_launch
+                    analysis_view_route.launch_job_or_preserve_active = saved_view_launch
 
                 template_text = (
                     repo_root / "templates" / "analysis" / "index.html"
