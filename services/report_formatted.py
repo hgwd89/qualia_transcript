@@ -17,8 +17,7 @@ from models.segment import Segment, UtteranceMapping
 from models.speaker_assignment import SpeakerAssignment
 from services.file_manager import (
     prepare_output_target,
-    register_generated_file,
-    write_output_target,
+    write_and_register_generated_file,
 )
 
 
@@ -249,9 +248,9 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"整形シート_{project.name}_{ts}.xlsx"
     target = prepare_output_target(project_id, filename)
-    write_output_target(target, wb.save)
-    return register_generated_file(
+    return write_and_register_generated_file(
         target,
+        wb.save,
         project_id=project_id,
         file_type="formatted_sheet",
         file_format="xlsx",
