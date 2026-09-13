@@ -23,6 +23,7 @@ from models import db
 from models.interview import Transcription
 from models.segment import Segment
 from services.secret_store import get_secret_setting
+from services.raw_snapshot_storage import write_raw_snapshot_json
 from services.upload_manager import create_media_read_snapshot
 
 _model_cache: dict = {}
@@ -99,13 +100,7 @@ def _write_raw_transcript_snapshot(
     snapshot_tag: str = "",
     extra_meta: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
-    """
-    API返却の全文テキストを不変スナップショットとして保存する。
-    既存ファイルは上書きしない（immutable）。
-    """
-    raw_dir = os.path.join(config.OUTPUT_DIR, "raw_transcripts")
-    os.makedirs(raw_dir, exist_ok=True)
-
+    """Persist the immutable provider text through the pinned evidence boundary."""
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     digest = hashlib.sha256((text or "").encode("utf-8")).hexdigest()
     payload = {
@@ -124,17 +119,8 @@ def _write_raw_transcript_snapshot(
 
     tag = f"_{snapshot_tag}" if snapshot_tag else ""
     base_name = f"transcription_{transcription_id}{tag}_{ts}"
-    suffix = 0
-    while True:
-        file_name = f"{base_name}.json" if suffix == 0 else f"{base_name}_{suffix}.json"
-        abs_path = os.path.join(raw_dir, file_name)
-        try:
-            with open(abs_path, "x", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            rel_path = os.path.relpath(abs_path, config.OUTPUT_DIR)
-            return rel_path, digest
-        except FileExistsError:
-            suffix += 1
+    stored_path = write_raw_snapshot_json(config.OUTPUT_DIR, base_name, payload)
+    return stored_path, digest
 
 
 def _write_chunk_manifest(
@@ -148,8 +134,6 @@ def _write_chunk_manifest(
     status: str,
     error_message: str = "",
 ) -> str:
-    raw_dir = os.path.join(config.OUTPUT_DIR, "raw_transcripts")
-    os.makedirs(raw_dir, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     payload = {
         "transcription_id": transcription_id,
@@ -165,16 +149,7 @@ def _write_chunk_manifest(
     }
 
     base_name = f"transcription_{transcription_id}_manifest_{ts}"
-    suffix = 0
-    while True:
-        file_name = f"{base_name}.json" if suffix == 0 else f"{base_name}_{suffix}.json"
-        abs_path = os.path.join(raw_dir, file_name)
-        try:
-            with open(abs_path, "x", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            return os.path.relpath(abs_path, config.OUTPUT_DIR)
-        except FileExistsError:
-            suffix += 1
+    return write_raw_snapshot_json(config.OUTPUT_DIR, base_name, payload)
 
 
 def _get_model(model_name: str) -> WhisperModel:

@@ -40,6 +40,9 @@ jobs:
       - name: Run managed write commit-window regression
         run: python tests/smoke_managed_write_commit_window.py
 
+      - name: Run raw snapshot storage fencing regression
+        run: python tests/smoke_raw_snapshot_storage_fencing.py
+
   posix-backup-snapshot:
     name: posix-backup-snapshot
     runs-on: ubuntu-latest
@@ -71,3 +74,6 @@ jobs:
 
       - name: Run managed write commit-window regression
         run: python tests/smoke_managed_write_commit_window.py
+
+      - name: Run raw snapshot storage fencing regression
+        run: python tests/smoke_raw_snapshot_storage_fencing.py
