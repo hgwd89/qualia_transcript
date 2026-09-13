@@ -40,10 +40,18 @@ def main() -> int:
             from services.file_manager import (
                 file_exists,
                 get_full_path,
+                open_output_target_for_write,
                 prepare_output_target,
                 register_generated_file,
                 safe_output_filename,
             )
+
+            def write_managed_target(target, data: bytes) -> None:
+                opened = open_output_target_for_write(target)
+                try:
+                    opened.stream.write(data)
+                finally:
+                    opened.close()
 
             app = create_app()
             app.config["TESTING"] = True
@@ -88,7 +96,7 @@ def main() -> int:
                     f"storage_bytes={len(long_storage_name.encode('utf-8'))}",
                 )
 
-                target_path.write_bytes(b"generated")
+                write_managed_target(target, b"generated")
                 gf = register_generated_file(
                     target,
                     project_id=project_id,
@@ -96,12 +104,14 @@ def main() -> int:
                     file_format="xlsx",
                 )
                 failures += check(
-                    "successful registration keeps file and DB row aligned",
-                    gf.id is not None
+                    "successful registration keeps exact managed write and DB row aligned",
+                    target.written_stat is not None
+                    and gf.id is not None
                     and gf.original_filename == target.filename
                     and gf.stored_path == target.stored_path
                     and file_exists(gf)
-                    and Path(get_full_path(gf)) == target_path,
+                    and Path(get_full_path(gf)) == target_path
+                    and target_path.read_bytes() == b"generated",
                     f"file_id={gf.id} stored_path={gf.stored_path}",
                 )
 
@@ -117,7 +127,7 @@ def main() -> int:
                     f"first={first_collision.stored_path} second={second_collision.stored_path}",
                 )
 
-                first_collision_path.write_bytes(b"first-success")
+                write_managed_target(first_collision, b"first-success")
                 first_collision_gf = register_generated_file(
                     first_collision,
                     project_id=project_id,
@@ -126,7 +136,7 @@ def main() -> int:
                 )
                 before_count = GeneratedFile.query.count()
 
-                second_collision_path.write_bytes(b"second-fails")
+                write_managed_target(second_collision, b"second-fails")
                 session = db.session()
 
                 def fail_before_commit(_session):
@@ -148,7 +158,7 @@ def main() -> int:
                         event.remove(session, "before_commit", fail_before_commit)
 
                 failures += check(
-                    "failed colliding registration removes only its own orphan",
+                    "failed colliding registration removes only its own managed generation",
                     raised
                     and first_collision_path.is_file()
                     and first_collision_path.read_bytes() == b"first-success"
@@ -286,6 +296,7 @@ def main() -> int:
                 failures += check(
                     f"{relative} uses managed generated-file registration",
                     "prepare_output_target" in text
+                    and "open_output_target_for_write" in text
                     and "register_generated_file" in text
                     and marker in text,
                 )

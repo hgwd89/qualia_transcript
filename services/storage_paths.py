@@ -16,6 +16,15 @@ class ManagedReadFile:
         self.stream.close()
 
 
+@dataclass
+class ManagedWriteFile:
+    stream: BinaryIO
+    stat_result: os.stat_result
+
+    def close(self) -> None:
+        self.stream.close()
+
+
 def is_link_or_reparse(path: Path) -> bool:
     """Return True for symlinks and Windows reparse-point entries/junctions."""
     try:
@@ -190,6 +199,47 @@ def _open_managed_file_posix(root: Path, relative: Path) -> ManagedReadFile:
         os.close(parent_fd)
 
 
+def _create_managed_file_posix(root: Path, relative: Path) -> ManagedWriteFile:
+    parent_fd = _open_posix_directory_chain(root)
+    display_parent = root
+    try:
+        for part in relative.parts[:-1]:
+            display_parent = display_parent / part
+            child_fd = _open_posix_directory_component(parent_fd, part, display_parent)
+            os.close(parent_fd)
+            parent_fd = child_fd
+
+        name = relative.parts[-1]
+        display_path = display_parent / name
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | os.O_NOFOLLOW
+            | int(getattr(os, "O_BINARY", 0) or 0)
+        )
+        try:
+            fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
+        except OSError as exc:
+            raise ValueError(f"managed storage file could not be created safely: {display_path}") from exc
+        try:
+            opened = os.fstat(fd)
+            after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _file_generation(after) != _file_generation(opened)
+            ):
+                raise ValueError(f"managed storage file changed during create: {display_path}")
+            stream = os.fdopen(fd, "wb", closefd=True)
+            fd = -1
+            return ManagedWriteFile(stream=stream, stat_result=opened)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+    finally:
+        os.close(parent_fd)
+
+
 def _windows_kernel32():
     import ctypes
 
@@ -250,6 +300,45 @@ def _windows_open_path_handle(path: Path, *, directory: bool, read_data: bool = 
     if handle == invalid_handle_value:
         error_code = ctypes.get_last_error()
         raise OSError(error_code, "managed storage path could not be opened safely", str(path))
+    return int(handle)
+
+
+def _windows_create_file_handle(path: Path) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    generic_write = 0x40000000
+    file_read_attributes = 0x00000080
+    file_share_read = 0x00000001
+    create_new = 1
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+
+    create_file = _windows_kernel32().CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+
+    handle = create_file(
+        str(path),
+        generic_write | file_read_attributes,
+        file_share_read,
+        None,
+        create_new,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    if handle == invalid_handle_value:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, "managed storage file could not be created safely", str(path))
     return int(handle)
 
 
@@ -367,6 +456,49 @@ def _open_managed_file_windows(root: Path, relative: Path) -> ManagedReadFile:
             _windows_close_handle(handle)
 
 
+def _create_managed_file_windows(root: Path, relative: Path) -> ManagedWriteFile:
+    import msvcrt
+
+    pinned = _open_windows_directory_chain(root)
+    current = root
+    final_handle: int | None = None
+    try:
+        for part in relative.parts[:-1]:
+            current = current / part
+            child_handle = _windows_open_path_handle(current, directory=True)
+            try:
+                _windows_validate_handle_type(child_handle, directory=True, display_path=current)
+            except Exception:
+                _windows_close_handle(child_handle)
+                raise
+            pinned.append(child_handle)
+
+        display_path = current / relative.parts[-1]
+        final_handle = _windows_create_file_handle(display_path)
+        _windows_validate_handle_type(final_handle, directory=False, display_path=display_path)
+
+        flags = os.O_WRONLY | int(getattr(os, "O_BINARY", 0) or 0)
+        fd = msvcrt.open_osfhandle(final_handle, flags)
+        final_handle = None  # ownership transferred to the CRT file descriptor
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError(f"managed storage path is not a regular file: {display_path}")
+            stream = os.fdopen(fd, "wb", closefd=True)
+            fd = -1
+            return ManagedWriteFile(stream=stream, stat_result=opened)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+    except OSError as exc:
+        raise ValueError("managed storage file could not be created safely") from exc
+    finally:
+        if final_handle is not None:
+            _windows_close_handle(final_handle)
+        for handle in reversed(pinned):
+            _windows_close_handle(handle)
+
+
 def open_managed_file_for_read(root_value: str | Path, stored_path: str) -> ManagedReadFile:
     """Open a managed regular file while pinning every ancestor during acquisition.
 
@@ -386,6 +518,27 @@ def open_managed_file_for_read(root_value: str | Path, stored_path: str) -> Mana
     if _supports_pinned_posix_read():
         return _open_managed_file_posix(root, relative)
     raise ValueError("platform cannot safely pin managed storage reads")
+
+
+def open_managed_file_for_create(root_value: str | Path, stored_path: str) -> ManagedWriteFile:
+    """Create a new managed regular file through an ancestry-pinned boundary.
+
+    The destination basename is created exclusively, so an existing entry is never
+    truncated or followed. POSIX creates descriptor-relative beneath a pinned parent
+    with ``O_EXCL|O_NOFOLLOW``. Windows retains read-share-only ancestor handles and
+    uses ``CREATE_NEW`` with ``FILE_FLAG_OPEN_REPARSE_POINT`` for the final file.
+    The returned stream remains bound to the created file object after acquisition.
+    """
+    root = _managed_root(root_value)
+    relative = _validated_relative(stored_path)
+    if not relative.parts:
+        raise ValueError("managed storage path is invalid")
+
+    if os.name == "nt":
+        return _create_managed_file_windows(root, relative)
+    if _supports_pinned_posix_read():
+        return _create_managed_file_posix(root, relative)
+    raise ValueError("platform cannot safely pin managed storage writes")
 
 
 def ensure_managed_id_dir(root_value: str | Path, value: int) -> Path:

@@ -1,8 +1,9 @@
 """
 分析用フラットデータ .xlsx / .csv 生成（QDAソフト・二次分析用）
 """
-import os
 import csv
+import io
+import os
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
@@ -13,7 +14,11 @@ from models.interview import Interview
 from models.segment import Segment, UtteranceMapping
 from models.generated_file import GeneratedFile
 from models import db
-from services.file_manager import prepare_output_target, register_generated_file
+from services.file_manager import (
+    open_output_target_for_write,
+    prepare_output_target,
+    register_generated_file,
+)
 
 
 def _build_rows(project_id: int) -> list[list]:
@@ -99,7 +104,11 @@ def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
     ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"分析データ_{project.name}_{ts}.xlsx"
     target = prepare_output_target(project_id, filename)
-    wb.save(target.full_path)
+    opened = open_output_target_for_write(target)
+    try:
+        wb.save(opened.stream)
+    finally:
+        opened.close()
     return register_generated_file(
         target,
         project_id=project_id,
@@ -116,9 +125,18 @@ def generate_analysis_csv(project_id: int) -> GeneratedFile:
     filename = f"分析データ_{project.name}_{ts}.csv"
     target = prepare_output_target(project_id, filename)
 
-    with open(target.full_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.writer(f)
+    opened = open_output_target_for_write(target)
+    text_stream = io.TextIOWrapper(opened.stream, encoding="utf-8-sig", newline="")
+    try:
+        writer = csv.writer(text_stream)
         writer.writerows(rows)
+        text_stream.flush()
+    finally:
+        try:
+            text_stream.detach()
+        except (OSError, ValueError):
+            pass
+        opened.close()
 
     return register_generated_file(
         target,

@@ -12,7 +12,11 @@ from models import db
 from models.analysis import AIAnalysis
 from models.generated_file import GeneratedFile
 from models.project import Project
-from services.file_manager import prepare_output_target, register_generated_file
+from services.file_manager import (
+    open_output_target_for_write,
+    prepare_output_target,
+    register_generated_file,
+)
 
 
 SUMMARY_HEADERS = [
@@ -182,7 +186,11 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"承認済AI分析_{project.name}_{ts}.xlsx"
     target = prepare_output_target(project_id, filename)
-    wb.save(target.full_path)
+    opened = open_output_target_for_write(target)
+    try:
+        wb.save(opened.stream)
+    finally:
+        opened.close()
 
     params = {
         "approved_only": True,
