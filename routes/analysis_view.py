@@ -2,7 +2,6 @@
 分析結果表示・プロジェクトレベル AI 分析トリガー・人手レビュー。
 """
 import json
-from datetime import datetime, timezone
 
 from flask import Blueprint, render_template, jsonify, request
 
@@ -14,8 +13,8 @@ from models.processing_job import ProcessingJob
 from services.analysis_review import set_analysis_review_status
 from services.job_admission import admit_processing_job
 from services.job_recovery import recover_stale_jobs
-from services.processing_jobs import launch_job_worker
 from services.project_flow_scope import ProjectFlowScopeError, resolve_integrated_analysis_scope
+from services.worker_launch_guard import launch_job_or_preserve_active
 
 bp = Blueprint("analysis_view", __name__)
 _PROJECT_ANALYSIS_JOB_TYPES = {"analyze_cross", "analyze_integrated"}
@@ -69,19 +68,7 @@ def _queued_response(job: ProcessingJob, *, created: bool, worker_pid=None):
 
 
 def _launch_or_fail(job: ProcessingJob):
-    try:
-        return launch_job_worker(job.id), None
-    except Exception as exc:
-        db.session.rollback()
-        current = db.session.get(ProcessingJob, job.id)
-        if current:
-            current.status = "failed"
-            current.error_message = f"worker launch failed: {exc}"[:4000]
-            current.finished_at = datetime.now(timezone.utc)
-            current.worker_pid = None
-            db.session.add(current)
-            db.session.commit()
-        return None, exc
+    return launch_job_or_preserve_active(job)
 
 
 def _queue_project_analysis(project_id: int, job_type: str, *, question_id: int | None = None):
