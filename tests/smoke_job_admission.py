@@ -19,6 +19,24 @@ def main() -> int:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
+    legacy_callers = []
+    for folder_name in ("routes", "services", "scripts"):
+        folder = repo_root / folder_name
+        for source_path in folder.rglob("*.py"):
+            if source_path == repo_root / "services" / "processing_jobs.py":
+                continue
+            try:
+                source_text = source_path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if "create_or_get_active_job" in source_text:
+                legacy_callers.append(source_path.relative_to(repo_root).as_posix())
+    failures += check(
+        "operational code does not bypass authoritative job admission",
+        not legacy_callers,
+        ", ".join(legacy_callers),
+    )
+
     import config
 
     original = {
