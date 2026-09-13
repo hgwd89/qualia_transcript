@@ -104,8 +104,6 @@ def main() -> int:
                         swapped = True
                     return original_os_open(path, flags, *args, **kwargs)
 
-                # Monkeypatching storage_paths.os.open mutates the shared os module,
-                # so preserve the capability decision made with the real os.open.
                 storage_paths._supports_pinned_posix_read = lambda: supports_pinned_posix
                 storage_paths.os.open = racing_open
                 try:
@@ -267,10 +265,12 @@ def main() -> int:
 
     upload_source = (repo_root / "services" / "upload_manager.py").read_text(encoding="utf-8")
     failures += check(
-        "media upload writes through the pinned create boundary",
+        "media upload copies and hashes through the pinned create boundary",
         "open_managed_file_for_create(config.UPLOAD_DIR, target.stored_path)" in upload_source
-        and "file_storage.save(opened.stream)" in upload_source
-        and "file_storage.save(target.full_path)" not in upload_source,
+        and "file_storage.stream.read(1024 * 1024)" in upload_source
+        and "opened.stream.write(chunk)" in upload_source
+        and "hasher.update(chunk)" in upload_source
+        and "file_storage.save(" not in upload_source,
     )
 
     route_source = (repo_root / "routes" / "outputs.py").read_text(encoding="utf-8")
