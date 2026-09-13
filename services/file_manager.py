@@ -3,12 +3,21 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO, Callable
 from uuid import uuid4
 
 import config
 from models import db
 from models.generated_file import GeneratedFile
-from services.storage_paths import ensure_managed_id_dir, resolve_managed_path
+from services.managed_storage_write import (
+    open_managed_file_for_write,
+    unlink_managed_file,
+)
+from services.storage_paths import (
+    ensure_managed_id_dir,
+    open_managed_file_for_read,
+    resolve_managed_path,
+)
 
 
 _INVALID_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -80,6 +89,27 @@ def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
     )
 
 
+def write_output_target(
+    target: OutputTarget,
+    writer: Callable[[BinaryIO], None],
+) -> None:
+    """Create one generated output through the ancestry-pinned write boundary.
+
+    The callback receives an already-opened seekable binary stream. It must write
+    to that stream rather than reopening ``target.full_path``. Ancestors remain
+    pinned until the callback finishes and the exact created file is flushed and
+    closed. A failed writer removes the partial file through the same pinned
+    ancestry boundary.
+    """
+    opened = open_managed_file_for_write(config.OUTPUT_DIR, target.stored_path)
+    try:
+        writer(opened.stream)
+        opened.finish()
+    except Exception:
+        opened.abort()
+        raise
+
+
 def register_generated_file(
     target: OutputTarget,
     *,
@@ -92,14 +122,20 @@ def register_generated_file(
     """Register a generated file; remove only this target if DB registration fails.
 
     Filesystem and database commits cannot be made truly atomic. Each prepared
-    target has a unique internal path, so rollback cleanup cannot delete an older
-    successful generation that has the same user-facing filename.
+    target has a unique internal path. Registration reopens the file through the
+    ancestry-pinned read boundary rather than trusting a check-then-reopen path.
+    If the DB commit fails, cleanup uses pinned ancestry deletion rather than a
+    pathname unlink that could be redirected by an ID-directory replacement.
     """
-    managed_path = _resolve_stored_path(target.stored_path)
-    if managed_path != Path(target.full_path).resolve():
-        raise ValueError("output target path mismatch")
-    if not managed_path.is_file():
-        raise FileNotFoundError(f"generated output file not found: {managed_path}")
+    try:
+        opened = open_managed_file_for_read(config.OUTPUT_DIR, target.stored_path)
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(f"generated output file not found: {target.stored_path}") from exc
+    try:
+        if opened.stat_result.st_size < 0:
+            raise ValueError("generated output file has invalid size")
+    finally:
+        opened.close()
 
     gf = GeneratedFile(
         project_id=int(project_id),
@@ -117,8 +153,8 @@ def register_generated_file(
     except Exception:
         db.session.rollback()
         try:
-            managed_path.unlink(missing_ok=True)
-        except OSError:
+            unlink_managed_file(config.OUTPUT_DIR, target.stored_path)
+        except (OSError, ValueError):
             pass
         raise
 
