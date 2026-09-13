@@ -166,7 +166,9 @@ def main() -> int:
     failures += check(
         "Windows managed reads deny write/delete sharing while pinning components",
         "file_flag_open_reparse_point = 0x00200000" in helper_source
-        and "Omitting both FILE_SHARE_WRITE and FILE_SHARE_DELETE" in helper_source
+        and "file_share_read = 0x00000001" in helper_source
+        and "file_share_write =" not in helper_source
+        and "file_share_delete =" not in helper_source
         and "_open_windows_directory_chain" in helper_source,
     )
 
