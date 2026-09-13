@@ -163,6 +163,39 @@ def audit(
             counts[table] = int(con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
         info["table_counts"] = counts
 
+        participant_columns = {
+            str(row["name"])
+            for row in con.execute("PRAGMA table_info(participants)").fetchall()
+        }
+        duplicate_participant_codes = []
+        participant_identity_checked = "participant_code" in participant_columns
+        if participant_identity_checked:
+            duplicate_participant_codes = con.execute(
+                """
+                SELECT
+                    project_id,
+                    participant_code,
+                    COUNT(*) AS duplicate_count,
+                    GROUP_CONCAT(id, ',') AS participant_ids
+                FROM participants
+                GROUP BY project_id, participant_code
+                HAVING COUNT(*) > 1
+                ORDER BY project_id, participant_code
+                """
+            ).fetchall()
+        info["participant_code_identity_check"] = (
+            "checked" if participant_identity_checked else "skipped_missing_column"
+        )
+        info["duplicate_participant_code_count"] = len(duplicate_participant_codes)
+        if duplicate_participant_codes:
+            _issue(
+                blockers,
+                "duplicate_participant_code",
+                "Participant codes must be unique within each project for traceable evidence",
+                rows=[dict(row) for row in duplicate_participant_codes[:100]],
+                count=len(duplicate_participant_codes),
+            )
+
         integrity = con.execute("PRAGMA integrity_check").fetchone()
         if not integrity or integrity[0] != "ok":
             _issue(blockers, "sqlite_integrity", "SQLite integrity_check failed", result=integrity[0] if integrity else None)

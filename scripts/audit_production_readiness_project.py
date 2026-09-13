@@ -37,6 +37,9 @@ def _install_project_views(con: sqlite3.Connection, project_id: int) -> None:
         CREATE TEMP VIEW projects AS
             SELECT * FROM main.projects WHERE id={pid};
 
+        CREATE TEMP VIEW participants AS
+            SELECT * FROM main.participants WHERE project_id={pid};
+
         CREATE TEMP VIEW interview_flows AS
             SELECT * FROM main.interview_flows WHERE project_id={pid};
 
@@ -252,7 +255,7 @@ def audit_project(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Project-scoped hardened production readiness audit")
+    parser = argparse.ArgumentParser(description="Project-scoped hardened production-readiness audit")
     parser.add_argument("--project-id", type=int, required=True, help="Project ID whose business rows should be audited")
     parser.add_argument("--db", help="SQLite DB path; defaults to config.DATABASE_URI")
     parser.add_argument("--output-dir", help="outputs directory; defaults to config.OUTPUT_DIR")
