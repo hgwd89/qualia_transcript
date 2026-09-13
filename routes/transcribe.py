@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from flask import Blueprint, jsonify
 
 from models import db
@@ -8,57 +6,14 @@ from models.processing_job import ProcessingJob
 from models.project import Project
 from services.job_admission import admit_processing_job, admit_retry_job
 from services.job_recovery import recover_stale_jobs
-from services.processing_jobs import launch_job_worker
+from services.worker_launch_guard import launch_job_or_preserve_active
 
 bp = Blueprint("transcribe", __name__)
 
 
 def _launch_or_fail(job: ProcessingJob):
-    job_id = int(job.id)
-    observed_attempt = int(job.attempt_count or 0)
-    try:
-        pid = launch_job_worker(job_id)
-        return None, pid
-    except Exception as exc:
-        db.session.rollback()
-
-        # A launcher exception is authoritative only while the exact admitted job
-        # is still pending and no launch reservation/PID has been attached. Once a
-        # child has been spawned, it may claim the durable job before the parent can
-        # record the PID. Never let parent-side bookkeeping overwrite that newer
-        # running/succeeded state with `failed`.
-        updated = (
-            ProcessingJob.query
-            .filter(ProcessingJob.id == job_id)
-            .filter(ProcessingJob.status == "pending")
-            .filter(ProcessingJob.attempt_count == observed_attempt)
-            .filter(ProcessingJob.worker_pid.is_(None))
-            .update(
-                {
-                    ProcessingJob.status: "failed",
-                    ProcessingJob.error_message: f"worker launch failed: {exc}"[:4000],
-                    ProcessingJob.finished_at: datetime.now(timezone.utc),
-                    ProcessingJob.worker_pid: None,
-                },
-                synchronize_session=False,
-            )
-        )
-        db.session.commit()
-        db.session.expire_all()
-        current = db.session.get(ProcessingJob, job_id)
-
-        if updated == 1:
-            return str(exc), None
-
-        # `worker_pid == 0` is the launch-reservation sentinel. A pending sentinel,
-        # a running worker, or an already-succeeded worker means the launch may have
-        # crossed the process-spawn boundary even though parent bookkeeping raised.
-        # Treat it as accepted and let the child/recovery path own durable state.
-        if current and current.status in {"pending", "running", "succeeded"}:
-            current_pid = int(current.worker_pid or 0)
-            return None, current_pid if current_pid > 0 else None
-
-        return str(exc), None
+    pid, launch_error = launch_job_or_preserve_active(job)
+    return (str(launch_error) if launch_error is not None else None), pid
 
 
 def _queued_response(job: ProcessingJob, created: bool, pid: int | None = None):
