@@ -54,7 +54,13 @@ def create_fixture(db_path: Path, output_dir: Path) -> None:
                 status TEXT
             );
             CREATE TABLE media_files (id INTEGER PRIMARY KEY, interview_id INTEGER);
-            CREATE TABLE transcriptions (id INTEGER PRIMARY KEY, media_file_id INTEGER, status TEXT);
+            CREATE TABLE transcriptions (
+                id INTEGER PRIMARY KEY,
+                media_file_id INTEGER,
+                status TEXT,
+                started_at DATETIME,
+                completed_at DATETIME
+            );
             CREATE TABLE segments (
                 id INTEGER PRIMARY KEY,
                 interview_id INTEGER,
@@ -115,7 +121,10 @@ def create_fixture(db_path: Path, output_dir: Path) -> None:
         con.execute("INSERT INTO interview_flow_questions VALUES (1, 1)")
         con.execute("INSERT INTO interviews VALUES (1, 1, 1, 1, 'done')")
         con.execute("INSERT INTO media_files VALUES (1, 1)")
-        con.execute("INSERT INTO transcriptions VALUES (1, 1, 'done')")
+        con.execute(
+            "INSERT INTO transcriptions VALUES (1, 1, 'done', ?, ?)",
+            ("2026-09-13 00:00:00", "2026-09-13 00:10:00"),
+        )
         con.execute("INSERT INTO segments VALUES (1, 1, NULL, 'moderator', '質問です。')")
         con.execute("INSERT INTO segments VALUES (2, 1, 1, 'respondent', '保湿すると安心します。')")
         con.execute("INSERT INTO utterance_mappings VALUES (1, 2, 1, 0)")
@@ -159,6 +168,7 @@ def create_fixture(db_path: Path, output_dir: Path) -> None:
             {
                 "transcription_id": 1,
                 "interview_id": 1,
+                "created_at_utc": "2026-09-13T00:05:00+00:00",
                 "text": raw_text,
                 "sha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest(),
             },

@@ -27,7 +27,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.readiness_validation import (
+    load_raw_snapshot_tombstone_names,
     load_raw_text_snapshots,
+    missing_raw_snapshot_transcription_ids,
     validate_generated_artifact,
     validate_latest_backup,
 )
@@ -333,7 +335,9 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 )
 
         raw_by_transcription, invalid_raw = load_raw_text_snapshots(output_dir)
+        tombstoned_snapshot_names = load_raw_snapshot_tombstone_names(con)
         info["raw_text_snapshot_count"] = sum(len(v) for v in raw_by_transcription.values())
+        info["raw_snapshot_tombstone_count"] = len(tombstoned_snapshot_names)
         if invalid_raw:
             _issue(
                 blockers,
@@ -344,17 +348,24 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             )
 
         done_rows = con.execute(
-            "SELECT id FROM transcriptions WHERE status='done' ORDER BY id"
+            """
+            SELECT tr.id, mf.interview_id, tr.started_at, tr.completed_at
+            FROM transcriptions tr
+            JOIN media_files mf ON mf.id=tr.media_file_id
+            WHERE tr.status='done'
+            ORDER BY tr.id
+            """
         ).fetchall()
-        missing = [
-            int(row["id"]) for row in done_rows
-            if int(row["id"]) not in raw_by_transcription
-        ]
+        missing = missing_raw_snapshot_transcription_ids(
+            done_rows,
+            raw_by_transcription,
+            tombstoned_snapshot_names,
+        )
         if missing:
             _issue(
                 warnings,
                 "done_transcription_without_raw_snapshot",
-                "Completed transcriptions have no immutable raw text snapshot",
+                "Completed transcriptions have no immutable raw text snapshot from their current generation",
                 transcription_ids=missing[:JOB_REPORT_LIMIT],
                 count=len(missing),
             )

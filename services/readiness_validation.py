@@ -5,6 +5,7 @@ import hashlib
 import json
 import zipfile
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -12,7 +13,9 @@ def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], li
     """Load immutable raw text snapshots keyed by transcription id.
 
     Chunk-manifest JSON files are accepted as metadata but do not count as the
-    immutable text snapshot required for a completed transcription.
+    immutable text snapshot required for a completed transcription. Integer IDs
+    are only a lookup index; ownership is verified separately against the current
+    transcription generation before a snapshot can satisfy readiness.
     """
     by_transcription: dict[int, list[dict]] = defaultdict(list)
     invalid: list[dict] = []
@@ -56,6 +59,113 @@ def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], li
         })
 
     return by_transcription, invalid
+
+
+def load_raw_snapshot_tombstone_names(connection) -> set[str]:
+    """Return source snapshot filenames already bound to deleted stable owners.
+
+    Databases created before the provenance ledger are compatible because a
+    missing table simply means there are no tombstones yet. Once the table exists,
+    however, read failures must propagate: silently treating an unreadable ledger
+    as empty could let a retained predecessor snapshot be attributed to a reused
+    integer transcription ID.
+    """
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='raw_snapshot_tombstones'"
+    ).fetchone()
+    if not exists:
+        return set()
+    rows = connection.execute(
+        "SELECT snapshot_name FROM raw_snapshot_tombstones"
+    ).fetchall()
+    return {str(row[0]) for row in rows if row[0]}
+
+
+def _parse_utc_datetime(value) -> datetime | None:
+    """Parse SQLite/ISO timestamps as UTC without mutating legacy source data."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def raw_snapshot_matches_transcription_generation(payload: dict, transcription) -> bool:
+    """Return True only when a snapshot belongs to this exact transcription run.
+
+    Project deletion deliberately retains immutable raw snapshots while SQLite may
+    later reuse integer primary keys. Therefore ``transcription_id`` alone is not
+    an ownership identity. Existing snapshots already carry ``interview_id`` and
+    ``created_at_utc``; a completed Transcription carries ``started_at`` and
+    ``completed_at``. Requiring all of them to agree fences retained predecessor
+    snapshots away from a later row that happens to reuse the same integer ID.
+
+    Missing legacy generation metadata fails closed for ownership attribution: the
+    snapshot remains preserved and valid historical source material, but it cannot
+    satisfy readiness for a current completed transcription.
+    """
+    if not isinstance(payload, dict):
+        return False
+    try:
+        transcription_id = int(transcription["id"])
+        interview_id = int(transcription["interview_id"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+
+    if payload.get("transcription_id") != transcription_id:
+        return False
+    if payload.get("interview_id") != interview_id:
+        return False
+
+    created_at = _parse_utc_datetime(payload.get("created_at_utc"))
+    try:
+        started_value = transcription["started_at"]
+        completed_value = transcription["completed_at"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    started_at = _parse_utc_datetime(started_value)
+    completed_at = _parse_utc_datetime(completed_value)
+    if created_at is None or started_at is None or completed_at is None:
+        return False
+    if completed_at < started_at:
+        return False
+    return started_at <= created_at <= completed_at
+
+
+def missing_raw_snapshot_transcription_ids(
+    transcriptions,
+    by_transcription: dict[int, list[dict]],
+    tombstoned_snapshot_names: set[str] | None = None,
+) -> list[int]:
+    """Return completed transcription IDs lacking a snapshot from their generation."""
+    tombstoned = tombstoned_snapshot_names or set()
+    missing: list[int] = []
+    for row in transcriptions:
+        try:
+            transcription_id = int(row["id"])
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        candidates = by_transcription.get(transcription_id, [])
+        if not any(
+            Path(str(candidate.get("path") or "")).name not in tombstoned
+            and raw_snapshot_matches_transcription_generation(
+                candidate.get("payload") if isinstance(candidate, dict) else {},
+                row,
+            )
+            for candidate in candidates
+            if isinstance(candidate, dict)
+        ):
+            missing.append(transcription_id)
+    return missing
 
 
 def validate_generated_artifact(path: Path, file_format: str) -> str | None:
