@@ -2,7 +2,8 @@
 
 Extends the base read-only audit with structural validation of registered Office
 artifacts, immutable raw transcript snapshots, the newest local backup,
-processing-job quiescence, and database-level foreign-key consistency.
+processing-job quiescence/scope integrity, and database-level foreign-key
+consistency.
 """
 from __future__ import annotations
 
@@ -37,6 +38,23 @@ QUESTION_GUARD_TRIGGERS = {
     "trg_processing_jobs_question_insert",
     "trg_processing_jobs_question_update",
 }
+JOB_SCOPE_RULES = {
+    "transcribe": (True, False),
+    "map": (True, False),
+    "analyze": (True, False),
+    "analyze_question": (True, True),
+    "analyze_cross": (False, True),
+    "analyze_integrated": (False, False),
+    "project_pipeline": (False, False),
+}
+JOB_SCOPE_TABLES = {
+    "processing_jobs",
+    "projects",
+    "interviews",
+    "interview_flows",
+    "interview_flow_sections",
+    "interview_flow_questions",
+}
 
 
 def _issue(bucket: list[dict], code: str, message: str, **context) -> None:
@@ -44,6 +62,99 @@ def _issue(bucket: list[dict], code: str, message: str, **context) -> None:
     if context:
         item["context"] = context
     bucket.append(item)
+
+
+def _processing_job_scope_issues(con: sqlite3.Connection) -> list[dict]:
+    """Return semantic durable-job scope violations from the real main tables.
+
+    `main.` qualification is deliberate: project-scoped readiness installs TEMP
+    VIEWs for business-table isolation, but durable-job ownership must be checked
+    against the actual referenced rows before the resulting issues are filtered
+    back to the requested project.
+    """
+    rows = con.execute(
+        """
+        SELECT
+            pj.id,
+            pj.project_id,
+            pj.interview_id,
+            pj.question_id,
+            pj.job_type,
+            pj.status,
+            i.id AS linked_interview_id,
+            i.project_id AS interview_project_id,
+            i.flow_id AS interview_flow_id,
+            q.id AS linked_question_id,
+            sec.flow_id AS question_flow_id,
+            flow.project_id AS question_project_id
+        FROM main.processing_jobs pj
+        LEFT JOIN main.interviews i ON i.id=pj.interview_id
+        LEFT JOIN main.interview_flow_questions q ON q.id=pj.question_id
+        LEFT JOIN main.interview_flow_sections sec ON sec.id=q.section_id
+        LEFT JOIN main.interview_flows flow ON flow.id=sec.flow_id
+        ORDER BY pj.id
+        """
+    ).fetchall()
+
+    invalid: list[dict] = []
+    for row in rows:
+        project_id = int(row["project_id"])
+        interview_id = row["interview_id"]
+        question_id = row["question_id"]
+        job_type = str(row["job_type"] or "")
+        reasons: list[str] = []
+
+        rule = JOB_SCOPE_RULES.get(job_type)
+        if rule is None:
+            reasons.append("unsupported_job_type")
+        else:
+            interview_required, question_required = rule
+            if interview_required and interview_id is None:
+                reasons.append("interview_required")
+            if not interview_required and interview_id is not None:
+                reasons.append("interview_forbidden")
+            if question_required and question_id is None:
+                reasons.append("question_required")
+            if not question_required and question_id is not None:
+                reasons.append("question_forbidden")
+
+        if interview_id is not None:
+            if row["linked_interview_id"] is None:
+                reasons.append("interview_missing")
+            elif int(row["interview_project_id"]) != project_id:
+                reasons.append("interview_cross_project")
+
+        if question_id is not None and row["linked_question_id"] is not None:
+            if row["question_project_id"] is None:
+                reasons.append("question_flow_unresolvable")
+            elif int(row["question_project_id"]) != project_id:
+                reasons.append("question_cross_project")
+
+        if (
+            job_type == "analyze_question"
+            and interview_id is not None
+            and question_id is not None
+            and row["linked_interview_id"] is not None
+            and row["linked_question_id"] is not None
+        ):
+            interview_flow_id = row["interview_flow_id"]
+            question_flow_id = row["question_flow_id"]
+            if interview_flow_id is None:
+                reasons.append("interview_flow_missing")
+            elif question_flow_id is not None and int(question_flow_id) != int(interview_flow_id):
+                reasons.append("question_wrong_interview_flow")
+
+        if reasons:
+            invalid.append({
+                "id": int(row["id"]),
+                "project_id": project_id,
+                "interview_id": int(interview_id) if interview_id is not None else None,
+                "question_id": int(question_id) if question_id is not None else None,
+                "job_type": job_type,
+                "status": row["status"],
+                "reasons": sorted(set(reasons)),
+            })
+    return invalid
 
 
 def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
@@ -134,8 +245,8 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 orphan_jobs = con.execute(
                     """
                     SELECT pj.id, pj.project_id, pj.interview_id, pj.question_id, pj.job_type, pj.status
-                    FROM processing_jobs pj
-                    LEFT JOIN interview_flow_questions q ON q.id=pj.question_id
+                    FROM main.processing_jobs pj
+                    LEFT JOIN main.interview_flow_questions q ON q.id=pj.question_id
                     WHERE pj.question_id IS NOT NULL AND q.id IS NULL
                     ORDER BY pj.id
                     """
@@ -150,10 +261,24 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                         count=len(orphan_jobs),
                     )
 
+                if JOB_SCOPE_TABLES.issubset(tables):
+                    invalid_scope_jobs = _processing_job_scope_issues(con)
+                    info["processing_job_scope_invalid_count"] = len(invalid_scope_jobs)
+                    if invalid_scope_jobs:
+                        _issue(
+                            blockers,
+                            "processing_job_scope_invalid",
+                            "ProcessingJob rows violate durable job ownership or job-type scope rules",
+                            jobs=invalid_scope_jobs[:200],
+                            count=len(invalid_scope_jobs),
+                        )
+                else:
+                    info["processing_job_scope_invalid_count"] = 0
+
             active_jobs = con.execute(
                 """
                 SELECT id, project_id, interview_id, job_type, status, progress_json, created_at, started_at
-                FROM processing_jobs
+                FROM main.processing_jobs
                 WHERE status IN ('pending','running')
                 ORDER BY id
                 """
