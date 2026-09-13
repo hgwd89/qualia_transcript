@@ -303,7 +303,7 @@ def _windows_open_path_handle(path: Path, *, directory: bool, read_data: bool = 
     return int(handle)
 
 
-def _windows_create_file_handle(path: Path) -> int:
+def _windows_create_file_handle(path: Path, *, write_through: bool = False) -> int:
     import ctypes
     from ctypes import wintypes
 
@@ -313,6 +313,7 @@ def _windows_create_file_handle(path: Path) -> int:
     create_new = 1
     file_attribute_normal = 0x00000080
     file_flag_open_reparse_point = 0x00200000
+    file_flag_write_through = 0x80000000
 
     create_file = _windows_kernel32().CreateFileW
     create_file.argtypes = [
@@ -326,13 +327,17 @@ def _windows_create_file_handle(path: Path) -> int:
     ]
     create_file.restype = wintypes.HANDLE
 
+    create_flags = file_attribute_normal | file_flag_open_reparse_point
+    if write_through:
+        create_flags |= file_flag_write_through
+
     handle = create_file(
         str(path),
         generic_write | file_read_attributes,
         file_share_read,
         None,
         create_new,
-        file_attribute_normal | file_flag_open_reparse_point,
+        create_flags,
         None,
     )
     invalid_handle_value = ctypes.c_void_p(-1).value
@@ -456,7 +461,12 @@ def _open_managed_file_windows(root: Path, relative: Path) -> ManagedReadFile:
             _windows_close_handle(handle)
 
 
-def _create_managed_file_windows(root: Path, relative: Path) -> ManagedWriteFile:
+def _create_managed_file_windows(
+    root: Path,
+    relative: Path,
+    *,
+    write_through: bool = False,
+) -> ManagedWriteFile:
     import msvcrt
 
     pinned = _open_windows_directory_chain(root)
@@ -474,7 +484,10 @@ def _create_managed_file_windows(root: Path, relative: Path) -> ManagedWriteFile
             pinned.append(child_handle)
 
         display_path = current / relative.parts[-1]
-        final_handle = _windows_create_file_handle(display_path)
+        final_handle = _windows_create_file_handle(
+            display_path,
+            write_through=write_through,
+        )
         _windows_validate_handle_type(final_handle, directory=False, display_path=display_path)
 
         flags = os.O_WRONLY | int(getattr(os, "O_BINARY", 0) or 0)
@@ -520,7 +533,12 @@ def open_managed_file_for_read(root_value: str | Path, stored_path: str) -> Mana
     raise ValueError("platform cannot safely pin managed storage reads")
 
 
-def open_managed_file_for_create(root_value: str | Path, stored_path: str) -> ManagedWriteFile:
+def open_managed_file_for_create(
+    root_value: str | Path,
+    stored_path: str,
+    *,
+    write_through: bool = False,
+) -> ManagedWriteFile:
     """Create a new managed regular file through an ancestry-pinned boundary.
 
     The destination basename is created exclusively, so an existing entry is never
@@ -535,7 +553,11 @@ def open_managed_file_for_create(root_value: str | Path, stored_path: str) -> Ma
         raise ValueError("managed storage path is invalid")
 
     if os.name == "nt":
-        return _create_managed_file_windows(root, relative)
+        return _create_managed_file_windows(
+            root,
+            relative,
+            write_through=write_through,
+        )
     if _supports_pinned_posix_read():
         return _create_managed_file_posix(root, relative)
     raise ValueError("platform cannot safely pin managed storage writes")
