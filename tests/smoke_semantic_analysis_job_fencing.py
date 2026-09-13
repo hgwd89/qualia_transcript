@@ -214,6 +214,9 @@ def main() -> int:
                     f"status={response.status_code} body={response.get_json(silent=True)}",
                 )
 
+                db.session.remove()
+                db.engine.dispose()
+
         finally:
             config.DATABASE_URI = original["DATABASE_URI"]
             config.UPLOAD_DIR = original["UPLOAD_DIR"]
