@@ -39,6 +39,25 @@ def resolve_only_configured_flow(project) -> InterviewFlow:
     return flows[0]
 
 
+def resolve_pipeline_interview_flow(project, interview) -> tuple[InterviewFlow, bool]:
+    """Return the interview flow and whether a safe single-flow auto-assignment is needed."""
+    if interview.flow_id is None:
+        return resolve_only_configured_flow(project), True
+
+    flow_id = int(interview.flow_id)
+    flow = next(
+        (candidate for candidate in project.interview_flows if int(candidate.id) == flow_id),
+        None,
+    )
+    if flow is None:
+        raise ProjectFlowScopeError(
+            "interview_flow_project_mismatch",
+            "インタビューがこのプロジェクトに属さないフローを参照しています",
+            interview_ids=[int(interview.id)],
+        )
+    return flow, False
+
+
 def resolve_integrated_analysis_scope(project) -> IntegratedAnalysisScope:
     """Resolve one evidence-complete flow for project integrated analysis.
 
@@ -92,7 +111,7 @@ def resolve_integrated_analysis_scope(project) -> IntegratedAnalysisScope:
 
     flow_id = next(iter(flow_ids))
     flow = next(
-        (flow for flow in project.interview_flows if int(flow.id) == flow_id),
+        (candidate for candidate in project.interview_flows if int(candidate.id) == flow_id),
         None,
     )
     if flow is None:
