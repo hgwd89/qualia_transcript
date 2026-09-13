@@ -435,7 +435,10 @@ def _copy_open_regular_snapshot_file(
         final = os.fstat(fd)
         if _snapshot_stat_token(final) != _snapshot_stat_token(opened):
             raise ValueError(f"managed snapshot file changed during snapshot: {source_label}")
-        _apply_snapshot_metadata(target, final, attributes)
+        # Use the pre-read stat for metadata restoration. Reading can update
+        # atime on some filesystems; the final stat exists only to detect
+        # mutation and must not redefine the pre-restore metadata snapshot.
+        _apply_snapshot_metadata(target, opened, attributes)
     except Exception:
         target.unlink(missing_ok=True)
         raise
@@ -576,59 +579,54 @@ def _collect_tree_pinned(source_dir: Path, archive_prefix: str, staging_root: Pa
     """Collect a POSIX managed tree beneath pinned directory descriptors."""
     root_fd, root = _open_absolute_directory_pinned(source_dir)
     entries: list[dict] = []
-    open_fds: set[int] = {root_fd}
-    pending: list[tuple[int, Path]] = [(root_fd, Path())]
-    try:
-        while pending:
-            current_fd, relative_dir = pending.pop()
+
+    def walk(current_fd: int, relative_dir: Path) -> None:
+        try:
+            names = sorted(os.listdir(current_fd))
+        except OSError as exc:
+            raise ValueError(
+                f"managed backup directory became unreadable: {root / relative_dir}"
+            ) from exc
+
+        for name in names:
+            display = root / relative_dir / name
             try:
-                names = sorted(os.listdir(current_fd))
+                info = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
             except OSError as exc:
-                raise ValueError(
-                    f"managed backup directory became unreadable: {root / relative_dir}"
-                ) from exc
+                raise ValueError(f"managed backup entry became unreadable: {display}") from exc
 
-            for name in names:
-                display = root / relative_dir / name
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(f"managed backup tree contains linked/reparse entry: {display}")
+            if stat.S_ISDIR(info.st_mode):
+                child_fd, _opened = _open_directory_component(current_fd, name, display)
                 try:
-                    info = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
-                except OSError as exc:
-                    raise ValueError(f"managed backup entry became unreadable: {display}") from exc
+                    walk(child_fd, relative_dir / name)
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(f"managed backup tree contains unsupported entry type: {display}")
 
-                if stat.S_ISLNK(info.st_mode):
-                    raise ValueError(f"managed backup tree contains linked/reparse entry: {display}")
-                if stat.S_ISDIR(info.st_mode):
-                    child_fd, _opened = _open_directory_component(current_fd, name, display)
-                    open_fds.add(child_fd)
-                    pending.append((child_fd, relative_dir / name))
-                    continue
-                if not stat.S_ISREG(info.st_mode):
-                    raise ValueError(f"managed backup tree contains unsupported entry type: {display}")
+            relative = (relative_dir / name).as_posix()
+            archive_path = _safe_member_name(f"{archive_prefix}/{relative}")
+            staged = staging_root / Path(archive_path)
+            _copy_regular_snapshot_file_at(
+                current_fd,
+                name,
+                staged,
+                display,
+                preserve_xattrs=False,
+            )
+            entries.append({
+                "path": archive_path,
+                "size": staged.stat().st_size,
+                "sha256": _sha256(staged),
+            })
 
-                relative = (relative_dir / name).as_posix()
-                archive_path = _safe_member_name(f"{archive_prefix}/{relative}")
-                staged = staging_root / Path(archive_path)
-                _copy_regular_snapshot_file_at(
-                    current_fd,
-                    name,
-                    staged,
-                    display,
-                    preserve_xattrs=False,
-                )
-                entries.append({
-                    "path": archive_path,
-                    "size": staged.stat().st_size,
-                    "sha256": _sha256(staged),
-                })
-
-            os.close(current_fd)
-            open_fds.discard(current_fd)
+    try:
+        walk(root_fd, Path())
     finally:
-        for fd in list(open_fds):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        os.close(root_fd)
     return entries
 
 
@@ -640,55 +638,50 @@ def _snapshot_tree_no_links_pinned(source_dir: Path, destination: Path) -> None:
     directory_metadata: list[tuple[Path, os.stat_result, dict[str, bytes]]] = [
         (destination, root_info, _capture_extended_attributes(root_fd))
     ]
-    open_fds: set[int] = {root_fd}
-    pending: list[tuple[int, Path]] = [(root_fd, Path())]
-    try:
-        while pending:
-            current_fd, relative_dir = pending.pop()
+
+    def walk(current_fd: int, relative_dir: Path) -> None:
+        try:
+            names = sorted(os.listdir(current_fd))
+        except OSError as exc:
+            raise ValueError(
+                f"managed restore rollback directory became unreadable: {root / relative_dir}"
+            ) from exc
+
+        for name in names:
+            display = root / relative_dir / name
+            target = destination / relative_dir / name
             try:
-                names = sorted(os.listdir(current_fd))
+                info = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
             except OSError as exc:
                 raise ValueError(
-                    f"managed restore rollback directory became unreadable: {root / relative_dir}"
+                    f"managed restore rollback entry became unreadable: {display}"
                 ) from exc
 
-            for name in names:
-                display = root / relative_dir / name
-                target = destination / relative_dir / name
+            if stat.S_ISLNK(info.st_mode):
+                raise ValueError(
+                    f"managed restore rollback tree contains linked/reparse entry: {display}"
+                )
+            if stat.S_ISDIR(info.st_mode):
+                child_fd, opened = _open_directory_component(current_fd, name, display)
                 try:
-                    info = os.stat(name, dir_fd=current_fd, follow_symlinks=False)
-                except OSError as exc:
-                    raise ValueError(
-                        f"managed restore rollback entry became unreadable: {display}"
-                    ) from exc
-
-                if stat.S_ISLNK(info.st_mode):
-                    raise ValueError(
-                        f"managed restore rollback tree contains linked/reparse entry: {display}"
-                    )
-                if stat.S_ISDIR(info.st_mode):
-                    child_fd, opened = _open_directory_component(current_fd, name, display)
-                    open_fds.add(child_fd)
                     target.mkdir(parents=True, exist_ok=True)
                     directory_metadata.append(
                         (target, opened, _capture_extended_attributes(child_fd))
                     )
-                    pending.append((child_fd, relative_dir / name))
-                elif stat.S_ISREG(info.st_mode):
-                    _copy_regular_snapshot_file_at(current_fd, name, target, display)
-                else:
-                    raise ValueError(
-                        f"managed restore rollback tree contains unsupported entry type: {display}"
-                    )
+                    walk(child_fd, relative_dir / name)
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(info.st_mode):
+                _copy_regular_snapshot_file_at(current_fd, name, target, display)
+            else:
+                raise ValueError(
+                    f"managed restore rollback tree contains unsupported entry type: {display}"
+                )
 
-            os.close(current_fd)
-            open_fds.discard(current_fd)
+    try:
+        walk(root_fd, Path())
     finally:
-        for fd in list(open_fds):
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        os.close(root_fd)
 
     for target, info, attributes in sorted(
         directory_metadata,
