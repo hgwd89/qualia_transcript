@@ -30,16 +30,16 @@ jobs:
       - name: Apply and validate semantic review fixes
         shell: bash
         run: |
-          python scripts/patch_semantic_review_fixes.py
-          python -m py_compile models/processing_job.py app.py services/job_admission.py services/processing_jobs.py scripts/run_semantic_analysis.py scripts/audit_production_readiness_v2.py
+          python scripts/patch_semantic_review_tests.py
+          python -m py_compile models/processing_job.py app.py services/job_admission.py services/processing_jobs.py scripts/run_semantic_analysis.py scripts/audit_production_readiness_v2.py tests/smoke_semantic_analysis_job_fencing.py
           python tests/smoke_semantic_analysis_job_fencing.py
           python tests/smoke_processing_jobs.py
           python tests/smoke_processing_input_fencing.py
           python tests/smoke_analysis_metadata_input_fencing.py
           python tests/smoke_secondary_analysis_jobs.py
-          git rm scripts/patch_semantic_review_fixes.py
+          git rm scripts/patch_semantic_review_fixes.py scripts/patch_semantic_review_tests.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add models/processing_job.py app.py services/job_admission.py services/processing_jobs.py scripts/run_semantic_analysis.py scripts/audit_production_readiness_v2.py docs/architecture.md docs/testing.md
+          git add models/processing_job.py app.py services/job_admission.py services/processing_jobs.py scripts/run_semantic_analysis.py scripts/audit_production_readiness_v2.py docs/architecture.md docs/testing.md tests/smoke_semantic_analysis_job_fencing.py
           git commit -m 'fix: persist semantic durable job request contract'
           git push origin HEAD:fix/semantic-analysis-durable-job
