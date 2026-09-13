@@ -21,25 +21,13 @@ jobs:
           ref: fix/openai-chunk-result-write-fence
           fetch-depth: 2
 
-      - name: Apply production patch and restore final workflow
+      - name: Apply production patch
         shell: bash
         run: |
           python scripts/patch_openai_chunk_result_fence.py
           git rm scripts/patch_openai_chunk_result_fence.py
-          git fetch origin master --depth=1
-          git show origin/master:.github/workflows/safe-check.yml > .github/workflows/safe-check.yml
-          python - <<'PY'
-          from pathlib import Path
-          path = Path('.github/workflows/safe-check.yml')
-          text = path.read_text(encoding='utf-8')
-          anchor = '''      - name: Run raw snapshot storage fencing regression\n        run: python tests/smoke_raw_snapshot_storage_fencing.py\n\n      - name: Run question identity/evidence-scope regression\n'''
-          replacement = '''      - name: Run raw snapshot storage fencing regression\n        run: python tests/smoke_raw_snapshot_storage_fencing.py\n\n      - name: Run OpenAI chunk result-write fencing regression\n        run: python tests/smoke_openai_chunk_write_fencing.py\n\n      - name: Run question identity/evidence-scope regression\n'''
-          if text.count(anchor) != 1:
-              raise SystemExit(f'final workflow anchor count={text.count(anchor)}')
-          path.write_text(text.replace(anchor, replacement, 1), encoding='utf-8')
-          PY
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add services/transcription.py scripts/check_safe.ps1 .github/workflows/safe-check.yml
+          git add services/transcription.py scripts/check_safe.ps1
           git commit -m 'fix: fence long OpenAI chunk commits'
           git push origin HEAD:fix/openai-chunk-result-write-fence
