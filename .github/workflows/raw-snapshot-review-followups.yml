@@ -1,0 +1,31 @@
+name: Raw Snapshot Review Followups
+
+on:
+  push:
+    branches:
+      - fix/raw-snapshot-crash-durability
+
+permissions:
+  contents: write
+
+jobs:
+  patch-review-followups:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/raw-snapshot-crash-durability
+          fetch-depth: 2
+
+      - name: Apply review followups
+        shell: bash
+        run: |
+          python scripts/patch_raw_snapshot_review_followups.py
+          git rm scripts/patch_raw_snapshot_review_followups.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add services/raw_snapshot_storage.py tests/smoke_raw_snapshot_storage_fencing.py docs/architecture.md docs/testing.md
+          git commit -m 'fix: close raw evidence durability review gaps'
+          git push origin HEAD:fix/raw-snapshot-crash-durability
