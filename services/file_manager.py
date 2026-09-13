@@ -121,7 +121,16 @@ def write_output_target(
 
 
 def _verify_current_target(target: OutputTarget, expected: os.stat_result) -> None:
-    """Fail if the logical managed pathname no longer names the created object."""
+    """Fail if the logical managed pathname no longer names the created object.
+
+    POSIX permits a descriptor-relative identity check while the writer is still
+    open. On Windows, the retained directory/final handles deliberately deny write
+    and delete sharing, which already prevents rename/replacement for the lifetime
+    of the write transaction; reopening the same file would conflict with those
+    share restrictions and is therefore neither needed nor attempted.
+    """
+    if os.name == "nt":
+        return
     try:
         current = open_managed_file_for_read(config.OUTPUT_DIR, target.stored_path)
     except (OSError, ValueError) as exc:
@@ -146,11 +155,13 @@ def write_and_register_generated_file(
     """Write and register one output without reopening an unpinned pathname.
 
     The writer receives the exact newly-created regular file while every managed
-    ancestor is pinned. The file is flushed and fsynced, the current logical
-    pathname must still resolve to that same file generation, and the DB row is
-    committed before the write handle/ancestor pins are released. If writing,
-    verification, or DB commit fails, the partial file is removed through the same
-    pinned parent rather than through a later pathname lookup.
+    ancestor is pinned. The file is flushed and fsynced; POSIX also verifies that
+    the current logical pathname still names that file generation, while Windows
+    relies on the retained non-write/non-delete-share handles that prevent namespace
+    replacement. The DB row is committed before the write handle/ancestor pins are
+    released. If writing, verification, or DB commit fails, the partial file is
+    removed through the same pinned parent rather than through a later pathname
+    lookup.
     """
     opened = open_managed_file_for_write(config.OUTPUT_DIR, target.stored_path)
     committed = False
