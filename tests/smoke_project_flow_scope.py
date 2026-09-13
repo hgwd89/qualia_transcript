@@ -57,7 +57,6 @@ def main() -> int:
         try:
             from app import create_app
             from models import db
-            from models.analysis import AIAnalysis
             from models.interview import Interview
             from models.interview_flow import (
                 InterviewFlow,
@@ -69,6 +68,7 @@ def main() -> int:
             from models.project import Project
             from models.segment import Segment, UtteranceMapping
             import services.analyzer as analyzer
+            from services.analysis_review import resolve_finding_source_segment_ids
             from services.project_flow_scope import (
                 ProjectFlowScopeError,
                 resolve_integrated_analysis_scope,
@@ -258,15 +258,56 @@ def main() -> int:
                     f"content={content}",
                 )
 
+                # Add a later mapped interview with the exact same participant,
+                # question and quote. Approval of the older analysis must remain
+                # pinned to the interview set that actually fed its provider prompt.
+                late_interview = Interview(
+                    project_id=single.id,
+                    participant_id=sp.id,
+                    flow_id=sf.id,
+                    status="mapped",
+                )
+                db.session.add(late_interview)
+                db.session.flush()
+                late_segment = Segment(
+                    interview_id=late_interview.id,
+                    participant_id=sp.id,
+                    speaker_label="RESP_LATE",
+                    speaker_role="respondent",
+                    text="対象発言です。",
+                    seq=1,
+                )
+                db.session.add(late_segment)
+                db.session.flush()
+                db.session.add(UtteranceMapping(
+                    segment_id=late_segment.id,
+                    question_id=sq.id,
+                    mapped_by="manual",
+                    confidence=1.0,
+                    is_unclassified=False,
+                ))
+                db.session.commit()
+
+                resolved_ids = resolve_finding_source_segment_ids(
+                    analysis,
+                    content["findings"][0],
+                )
+                failures += check(
+                    "integrated approval stays pinned to generation-time interviews",
+                    resolved_ids == [int(seg.id)]
+                    and int(late_segment.id) not in resolved_ids,
+                    f"resolved={resolved_ids}, original={seg.id}, late={late_segment.id}",
+                )
+
                 # A participant interview that is not mapped must block the paid
                 # provider boundary rather than being silently omitted.
-                si2 = Interview(
+                incomplete_interview = Interview(
                     project_id=single.id,
                     participant_id=sp.id,
                     flow_id=sf.id,
                     status="transcribed",
                 )
-                db.session.add(si2)
+                db.session.add(incomplete_interview)
                 db.session.commit()
                 provider_calls = []
                 original_call_structured = analyzer.call_structured
