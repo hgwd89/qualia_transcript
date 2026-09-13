@@ -113,12 +113,13 @@
 
   {% if questions %}
   <div class="bg-white rounded-lg border border-gray-200 p-4 mb-4">
-    <p class="text-xs text-gray-500 mb-3">質問を選択して横断分析を実行してください（全参加者の回答を比較します）</p>
+    <p class="text-xs text-gray-500 mb-3">質問を選択して横断分析を実行してください（フローごとの参加者回答を比較します）</p>
     <div class="flex flex-wrap gap-2">
     {% for q in questions %}
     <button onclick="runCross({{ q.obj.id }}, this)"
             class="text-xs border border-brand-300 text-brand-700 rounded px-2 py-1 hover:bg-brand-50 transition"
             data-qid="{{ q.obj.id }}">
+      {{ q.flow_title or ('Flow #' ~ q.flow_id) }}{% if q.flow_version %} ({{ q.flow_version }}){% endif %} /
       [{{ q.obj.question_code }}] {{ q.obj.question_text[:30] }}{% if q.obj.question_text|length > 30 %}…{% endif %}
     </button>
     {% endfor %}
@@ -209,12 +210,26 @@
       <span class="w-6 h-6 rounded-full bg-brand-500 text-white text-xs flex items-center justify-center font-bold">3</span>
       プロジェクト統合分析
     </h2>
-    <button onclick="runIntegrated()"
-            class="bg-brand-500 text-white text-sm px-4 py-2 rounded hover:bg-brand-700 transition"
+    <button {% if not integrated_scope_error %}onclick="runIntegrated()"{% else %}disabled data-scope-disabled="1"{% endif %}
+            class="text-sm px-4 py-2 rounded transition {% if integrated_scope_error %}bg-gray-200 text-gray-500 cursor-not-allowed{% else %}bg-brand-500 text-white hover:bg-brand-700{% endif %}"
             id="btn-integrated">
       {% if integrated %}再実行{% else %}統合分析を実行{% endif %}
     </button>
   </div>
+
+  {% if integrated_scope_error %}
+  <div class="mb-4 rounded border border-orange-200 bg-orange-50 px-4 py-3">
+    <p class="text-sm font-medium text-orange-800">統合分析を実行できません</p>
+    <p class="text-xs text-orange-700 mt-1">{{ integrated_scope_error.message }}</p>
+    {% if integrated_scope_error.interview_ids %}
+    <p class="text-xs text-orange-600 mt-1">対象インタビューID: {{ integrated_scope_error.interview_ids | join(', ') }}</p>
+    {% endif %}
+  </div>
+  {% elif integrated_scope %}
+  <div class="mb-4 text-xs text-gray-500">
+    対象フロー: {{ integrated_scope.flow.title }}{% if integrated_scope.flow.version %} ({{ integrated_scope.flow.version }}){% endif %} / 対象インタビュー {{ integrated_scope.interview_ids | length }}件
+  </div>
+  {% endif %}
 
   {% if integrated %}
   {% set a = integrated.obj %}
@@ -332,7 +347,8 @@ function rememberButtonText(btn){
 function setAnalysisButtonBusy(btn, busy){
   if(!btn) return;
   rememberButtonText(btn);
-  btn.disabled = busy;
+  const scopeDisabled = btn.dataset.scopeDisabled === '1';
+  btn.disabled = busy || scopeDisabled;
   btn.textContent = busy ? '実行中…' : (btn.dataset.originalText || '分析を実行');
 }
 
@@ -384,6 +400,7 @@ async function runCross(questionId, btn){
 
 async function runIntegrated(){
   const btn = document.getElementById('btn-integrated');
+  if(!btn || btn.dataset.scopeDisabled === '1') return;
   setAnalysisButtonBusy(btn, true);
   showMsg('統合分析ジョブを登録中です…', 'info');
   try {
