@@ -7,38 +7,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  patch-media-snapshot-docs:
-    name: patch-media-snapshot-docs
-    runs-on: ubuntu-latest
-    if: github.head_ref == 'fix/media-transcription-read-fencing'
-    steps:
-      - name: Checkout PR branch
-        uses: actions/checkout@v4
-        with:
-          ref: fix/media-transcription-read-fencing
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Apply docs patch once
-        shell: bash
-        run: |
-          python scripts/patch_media_snapshot_docs.py
-          if ! git diff --quiet -- docs/architecture.md docs/testing.md; then
-            git config user.name 'github-actions[bot]'
-            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-            git add docs/architecture.md docs/testing.md
-            git commit -m 'docs: document private transcription media snapshots'
-            git push origin HEAD:fix/media-transcription-read-fencing
-          else
-            echo 'Docs already patched; no push needed.'
-          fi
-
   safe-smoke:
     name: safe-smoke
     runs-on: windows-latest
