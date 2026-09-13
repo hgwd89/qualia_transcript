@@ -14,18 +14,50 @@ bp = Blueprint("transcribe", __name__)
 
 
 def _launch_or_fail(job: ProcessingJob):
+    job_id = int(job.id)
+    observed_attempt = int(job.attempt_count or 0)
     try:
-        pid = launch_job_worker(job.id)
+        pid = launch_job_worker(job_id)
         return None, pid
     except Exception as exc:
         db.session.rollback()
-        job = db.session.get(ProcessingJob, job.id)
-        job.status = "failed"
-        job.error_message = f"worker launch failed: {exc}"[:4000]
-        job.finished_at = datetime.now(timezone.utc)
-        job.worker_pid = None
-        db.session.add(job)
+
+        # A launcher exception is authoritative only while the exact admitted job
+        # is still pending and no launch reservation/PID has been attached. Once a
+        # child has been spawned, it may claim the durable job before the parent can
+        # record the PID. Never let parent-side bookkeeping overwrite that newer
+        # running/succeeded state with `failed`.
+        updated = (
+            ProcessingJob.query
+            .filter(ProcessingJob.id == job_id)
+            .filter(ProcessingJob.status == "pending")
+            .filter(ProcessingJob.attempt_count == observed_attempt)
+            .filter(ProcessingJob.worker_pid.is_(None))
+            .update(
+                {
+                    ProcessingJob.status: "failed",
+                    ProcessingJob.error_message: f"worker launch failed: {exc}"[:4000],
+                    ProcessingJob.finished_at: datetime.now(timezone.utc),
+                    ProcessingJob.worker_pid: None,
+                },
+                synchronize_session=False,
+            )
+        )
         db.session.commit()
+        db.session.expire_all()
+        current = db.session.get(ProcessingJob, job_id)
+
+        if updated == 1:
+            return str(exc), None
+
+        # `worker_pid == 0` is the launch-reservation sentinel. A pending sentinel,
+        # a running worker, or an already-succeeded worker means the launch may have
+        # crossed the process-spawn boundary even though parent bookkeeping raised.
+        # Treat it as accepted and let the child/recovery path own durable state.
+        if current and current.status in {"pending", "running", "succeeded"}:
+            current_pid = int(current.worker_pid or 0)
+            return None, current_pid if current_pid > 0 else None
+
         return str(exc), None
 
 
