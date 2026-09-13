@@ -62,20 +62,22 @@ def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], li
 
 
 def load_raw_snapshot_tombstone_names(connection) -> set[str]:
-    """Return source snapshot filenames already bound to deleted stable owners."""
-    try:
-        exists = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='raw_snapshot_tombstones'"
-        ).fetchone()
-        if not exists:
-            return set()
-        rows = connection.execute(
-            "SELECT snapshot_name FROM raw_snapshot_tombstones"
-        ).fetchall()
-    except Exception:
-        # Readiness must remain compatible with databases created before the
-        # provenance ledger existed. Generation matching still fails closed.
+    """Return source snapshot filenames already bound to deleted stable owners.
+
+    Databases created before the provenance ledger are compatible because a
+    missing table simply means there are no tombstones yet. Once the table exists,
+    however, read failures must propagate: silently treating an unreadable ledger
+    as empty could let a retained predecessor snapshot be attributed to a reused
+    integer transcription ID.
+    """
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='raw_snapshot_tombstones'"
+    ).fetchone()
+    if not exists:
         return set()
+    rows = connection.execute(
+        "SELECT snapshot_name FROM raw_snapshot_tombstones"
+    ).fetchall()
     return {str(row[0]) for row in rows if row[0]}
 
 
