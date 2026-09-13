@@ -87,6 +87,9 @@ jobs:
       - name: Run OpenAI chunk result-write fencing regression
         run: python tests/smoke_openai_chunk_write_fencing.py
 
+      - name: Run transcription lifecycle write-fencing regression
+        run: python tests/smoke_transcription_state_fencing.py
+
       - name: Run question identity/evidence-scope regression
         run: python tests/smoke_question_code_identity.py
 
