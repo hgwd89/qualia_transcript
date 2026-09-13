@@ -28,6 +28,68 @@ function Get-QualiaAppScriptPath {
     return (Resolve-Path $scriptPath).Path
 }
 
+function Initialize-QualiaNativeCommandLineParser {
+    if ("Qualia.NativeCommandLine" -as [type]) {
+        return
+    }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace Qualia {
+    public static class NativeCommandLine {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr CommandLineToArgvW(
+            string lpCmdLine,
+            out int pNumArgs
+        );
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr LocalFree(IntPtr hMem);
+    }
+}
+'@
+}
+
+function ConvertFrom-QualiaWindowsCommandLine {
+    param([string]$CommandLine)
+
+    if (-not $CommandLine) {
+        return @()
+    }
+
+    Initialize-QualiaNativeCommandLineParser
+    $argc = 0
+    $argv = [Qualia.NativeCommandLine]::CommandLineToArgvW($CommandLine, [ref]$argc)
+    if ($argv -eq [IntPtr]::Zero -or $argc -lt 1) {
+        return @()
+    }
+
+    $arguments = @()
+    try {
+        for ($i = 0; $i -lt $argc; $i++) {
+            $argumentPtr = [Runtime.InteropServices.Marshal]::ReadIntPtr(
+                $argv,
+                $i * [IntPtr]::Size
+            )
+            if ($argumentPtr -eq [IntPtr]::Zero) {
+                return @()
+            }
+            $arguments += [Runtime.InteropServices.Marshal]::PtrToStringUni($argumentPtr)
+        }
+    } finally {
+        [void][Qualia.NativeCommandLine]::LocalFree($argv)
+    }
+    return @($arguments)
+}
+
+function Normalize-QualiaCommandArgument {
+    param([string]$Argument)
+
+    return "$Argument".Replace("/", "\").ToLowerInvariant()
+}
+
 function Test-QualiaProcessCommandLine {
     param(
         [string]$CommandLine,
@@ -41,15 +103,21 @@ function Test-QualiaProcessCommandLine {
     }
     try {
         $appScript = Get-QualiaAppScriptPath -ProjectDir $ProjectDir
+        $arguments = @(ConvertFrom-QualiaWindowsCommandLine -CommandLine $CommandLine)
     } catch {
         return $false
     }
+    if ($arguments.Count -lt 2) {
+        return $false
+    }
 
-    $normalizedLine = "$CommandLine".Replace("/", "\").ToLowerInvariant()
-    $normalizedScript = "$appScript".Replace("/", "\").ToLowerInvariant()
-    $escapedScript = [Regex]::Escape($normalizedScript)
-    $argumentPattern = '(?:^|\s)(?:"' + $escapedScript + '"|' + $escapedScript + ')(?=\s|$)'
-    return [Regex]::IsMatch($normalizedLine, $argumentPattern)
+    $normalizedScript = Normalize-QualiaCommandArgument -Argument $appScript
+    foreach ($argument in $arguments) {
+        if ((Normalize-QualiaCommandArgument -Argument $argument) -ceq $normalizedScript) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Test-QualiaSameProcessInstance {
@@ -113,15 +181,26 @@ function Get-QualiaAppUrl {
 function Test-QualiaSettingsContent {
     param(
         [string]$Content,
-        [string]$ServiceName
+        [AllowEmptyString()][string]$ServiceName
     )
 
-    if (-not $Content -or -not $ServiceName) { return $false }
+    if (-not $Content) { return $false }
     $decodedContent = [System.Net.WebUtility]::HtmlDecode("$Content")
-    return (
-        $decodedContent.Contains($ServiceName) -and
+    $hasQualiaProductMarkers = (
+        $decodedContent.Contains("MVP v0.1") -and
         ($decodedContent -match "OpenAI APIキー|Whisperモデル")
     )
+    if (-not $hasQualiaProductMarkers) {
+        return $false
+    }
+
+    # SERVICE_NAME can legally be configured as an empty environment value.
+    # In that case the rendered title/nav cannot carry a name, so rely on two
+    # independent fixed Qualia UI markers rather than rejecting a healthy app.
+    if ([string]::IsNullOrEmpty($ServiceName)) {
+        return $true
+    }
+    return $decodedContent.Contains($ServiceName)
 }
 
 function Get-QualiaRequestTimeoutSec {
@@ -139,12 +218,12 @@ function Get-QualiaRequestTimeoutSec {
 function Test-QualiaAppEndpoint {
     param(
         [string]$RootUrl,
-        [string]$ServiceName,
+        [AllowEmptyString()][string]$ServiceName,
         [int]$TimeoutSec = 2,
         [datetime]$DeadlineUtc = [datetime]::MaxValue
     )
 
-    if (-not $RootUrl -or -not $ServiceName) { return $false }
+    if (-not $RootUrl) { return $false }
     try {
         $rootTimeout = Get-QualiaRequestTimeoutSec `
             -DeadlineUtc $DeadlineUtc `
