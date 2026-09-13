@@ -4,6 +4,13 @@ from models import db
 
 class Participant(db.Model):
     __tablename__ = "participants"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "project_id",
+            "participant_code",
+            name="uq_participant_project_code",
+        ),
+    )
 
     id               = db.Column(db.Integer, primary_key=True)
     project_id       = db.Column(db.Integer, db.ForeignKey("projects.id"), nullable=False)

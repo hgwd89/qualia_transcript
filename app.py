@@ -87,6 +87,49 @@ def _install_processing_job_question_guards():
     db.session.commit()
 
 
+def _install_participant_code_guards():
+    """Prevent new project-local participant-code duplicates on legacy SQLite DBs.
+
+    New databases receive the model-level composite UNIQUE constraint. Existing
+    SQLite tables cannot gain that constraint in place without a rebuild, so
+    non-destructive INSERT/UPDATE triggers reject future duplicates while leaving
+    any historical duplicate rows unchanged for readiness tooling to surface.
+    """
+    from sqlalchemy import text
+
+    if db.engine.dialect.name != "sqlite":
+        return
+
+    db.session.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS trg_participants_code_insert
+        BEFORE INSERT ON participants
+        WHEN EXISTS (
+            SELECT 1
+            FROM participants p
+            WHERE p.project_id = NEW.project_id
+              AND p.participant_code = NEW.participant_code
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'participant_code must be unique within project');
+        END
+    """))
+    db.session.execute(text("""
+        CREATE TRIGGER IF NOT EXISTS trg_participants_code_update
+        BEFORE UPDATE OF project_id, participant_code ON participants
+        WHEN EXISTS (
+            SELECT 1
+            FROM participants p
+            WHERE p.project_id = NEW.project_id
+              AND p.participant_code = NEW.participant_code
+              AND p.id <> OLD.id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'participant_code must be unique within project');
+        END
+    """))
+    db.session.commit()
+
+
 def _run_migrations(app):
     """
     既存 SQLite DB への後付けカラム追加。
@@ -188,6 +231,9 @@ def _run_migrations(app):
                 ))
                 db.session.commit()
             _install_processing_job_question_guards()
+
+        if "participants" in existing_tables:
+            _install_participant_code_guards()
 
 
 def create_app():
