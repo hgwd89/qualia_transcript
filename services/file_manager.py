@@ -13,6 +13,7 @@ from models import db
 from models.generated_file import GeneratedFile
 from services.managed_storage_write import (
     open_managed_file_for_write,
+    unlink_managed_file,
 )
 from services.storage_paths import (
     ensure_managed_id_dir,
@@ -189,6 +190,49 @@ def write_and_register_generated_file(
         if not committed:
             raise
     return gf
+
+
+def register_generated_file(
+    target: OutputTarget,
+    *,
+    project_id: int,
+    file_type: str,
+    file_format: str,
+    interview_id: int | None = None,
+    generation_params_json: str | None = None,
+) -> GeneratedFile:
+    """Compatibility helper for already-written temporary/self-contained callers.
+
+    Production report generators must not split writing from registration; they use
+    ``write_and_register_generated_file``. This helper remains only for existing
+    non-racy smoke fixtures and legacy internal callers while migration completes.
+    """
+    try:
+        opened = open_managed_file_for_read(config.OUTPUT_DIR, target.stored_path)
+    except (OSError, ValueError) as exc:
+        raise FileNotFoundError(f"generated output file not found: {target.stored_path}") from exc
+    opened.close()
+
+    gf = GeneratedFile(
+        project_id=int(project_id),
+        interview_id=interview_id,
+        file_type=file_type,
+        file_format=file_format,
+        original_filename=target.filename,
+        stored_path=target.stored_path,
+        generation_params_json=generation_params_json,
+    )
+    try:
+        db.session.add(gf)
+        db.session.commit()
+        return gf
+    except Exception:
+        db.session.rollback()
+        try:
+            unlink_managed_file(config.OUTPUT_DIR, target.stored_path)
+        except (OSError, ValueError):
+            pass
+        raise
 
 
 def get_full_path(gf: GeneratedFile) -> str:
