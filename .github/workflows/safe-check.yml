@@ -34,6 +34,9 @@ jobs:
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 
+      - name: Run production transcription dispatch fencing regression
+        run: python tests/smoke_transcription_dispatch_fencing.py
+
       - name: Run managed write identity regression
         run: python tests/smoke_managed_write_identity.py
 
