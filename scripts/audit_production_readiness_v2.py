@@ -55,6 +55,8 @@ JOB_SCOPE_TABLES = {
     "interview_flow_sections",
     "interview_flow_questions",
 }
+JOB_REPORT_LIMIT = 200
+PROJECT_JOB_SAMPLE_LIMIT = 5
 
 
 def _issue(bucket: list[dict], code: str, message: str, **context) -> None:
@@ -157,6 +159,21 @@ def _processing_job_scope_issues(con: sqlite3.Connection) -> list[dict]:
     return invalid
 
 
+def _processing_job_project_summary(
+    jobs: list[dict],
+) -> tuple[dict[str, int], dict[str, list[dict]]]:
+    """Retain exact scoped counts before capping the global diagnostic sample."""
+    counts: dict[str, int] = {}
+    samples: dict[str, list[dict]] = {}
+    for job in jobs:
+        key = str(int(job["project_id"]))
+        counts[key] = counts.get(key, 0) + 1
+        bucket = samples.setdefault(key, [])
+        if len(bucket) < PROJECT_JOB_SAMPLE_LIMIT:
+            bucket.append(dict(job))
+    return counts, samples
+
+
 def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
     report = base_audit(db_path, output_dir, backup_dir)
     blockers = report["blockers"]
@@ -184,7 +201,7 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
         info["foreign_key_violation_count"] = len(fk_rows)
         if fk_rows:
             violations = []
-            for row in fk_rows[:200]:
+            for row in fk_rows[:JOB_REPORT_LIMIT]:
                 values = list(row)
                 violations.append({
                     "table": values[0] if len(values) > 0 else None,
@@ -257,7 +274,7 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                         blockers,
                         "processing_job_question_orphans",
                         "ProcessingJob rows reference missing interview-flow questions",
-                        jobs=[dict(row) for row in orphan_jobs[:200]],
+                        jobs=[dict(row) for row in orphan_jobs[:JOB_REPORT_LIMIT]],
                         count=len(orphan_jobs),
                     )
 
@@ -265,12 +282,17 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                     invalid_scope_jobs = _processing_job_scope_issues(con)
                     info["processing_job_scope_invalid_count"] = len(invalid_scope_jobs)
                     if invalid_scope_jobs:
+                        project_counts, project_samples = _processing_job_project_summary(
+                            invalid_scope_jobs
+                        )
                         _issue(
                             blockers,
                             "processing_job_scope_invalid",
                             "ProcessingJob rows violate durable job ownership or job-type scope rules",
-                            jobs=invalid_scope_jobs[:200],
+                            jobs=invalid_scope_jobs[:JOB_REPORT_LIMIT],
                             count=len(invalid_scope_jobs),
+                            project_counts=project_counts,
+                            project_samples=project_samples,
                         )
                 else:
                     info["processing_job_scope_invalid_count"] = 0
@@ -334,7 +356,7 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 warnings,
                 "done_transcription_without_raw_snapshot",
                 "Completed transcriptions have no immutable raw text snapshot",
-                transcription_ids=missing[:200],
+                transcription_ids=missing[:JOB_REPORT_LIMIT],
                 count=len(missing),
             )
     finally:
