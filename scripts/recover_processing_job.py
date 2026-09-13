@@ -78,9 +78,13 @@ def _pid_liveness_from_row(row: dict) -> bool | None:
 def _stale_reason_from_row(row: dict) -> str | None:
     if row.get("status") not in {"pending", "running"}:
         return None
-    created = _parse_dt(row.get("created_at"))
-    if not row.get("worker_pid") and created:
-        if (datetime.now(timezone.utc) - created).total_seconds() > 300:
+
+    # Match services.job_recovery.stale_reason(): retries reuse the durable row,
+    # so created_at is historical identity while started_at anchors the current
+    # admitted/claimed attempt. First-time pending rows fall back to created_at.
+    active_since = _parse_dt(row.get("started_at")) or _parse_dt(row.get("created_at"))
+    if not row.get("worker_pid") and active_since:
+        if (datetime.now(timezone.utc) - active_since).total_seconds() > 300:
             return "active job has no worker after launch grace period"
         return None
 
