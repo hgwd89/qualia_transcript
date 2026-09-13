@@ -90,18 +90,21 @@ def stale_reason(
 ) -> str | None:
     """Return an automatic-recovery reason only when recovery is unambiguous.
 
-    No-PID jobs get a startup grace period. PID-backed jobs are recovered only
-    when the OS confirms that the worker process is no longer alive. A live or
-    inconclusive PID is never released automatically.
+    No-PID jobs get a startup grace period for the *current active attempt*.
+    `started_at` is that attempt anchor when present (retry admission records it,
+    and worker claim refreshes it); first-time pending jobs fall back to their
+    creation time. PID-backed jobs are recovered only when the OS confirms that
+    the worker process is no longer alive. A live or inconclusive PID is never
+    released automatically.
     """
     if job.status not in ACTIVE_STATUSES:
         return None
 
     current = _utc(now) or datetime.now(timezone.utc)
-    created = _utc(job.created_at)
+    active_since = _utc(job.started_at) or _utc(job.created_at)
 
     if not job.worker_pid:
-        if created and current - created > ACTIVE_WITHOUT_WORKER_GRACE:
+        if active_since and current - active_since > ACTIVE_WITHOUT_WORKER_GRACE:
             return "active job has no worker after launch grace period"
         return None
 
