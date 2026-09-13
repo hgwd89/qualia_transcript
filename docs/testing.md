@@ -32,9 +32,9 @@ The required `safe-smoke` gate currently covers:
 - segment-role normalization/update integrity: canonical `moderator` handling, malformed or empty JSON rejection without mutation, and partial role updates that preserve an existing participant unless `participant_id` is explicitly supplied
 - SQLite foreign-key enforcement
 - legacy `processing_jobs.question_id` compatibility guards: insert/update triggers must reject orphan question references even when `PRAGMA foreign_keys=OFF`
-- readiness detection of declared SQLite FK violations and explicit `ProcessingJob.question_id` orphans
+- readiness detection of declared SQLite FK violations, explicit `ProcessingJob.question_id` orphans, and semantic durable-job scope violations whose referenced IDs still exist but belong to the wrong project/flow or violate the job type's required/forbidden interview/question shape
 - readiness traceability regressions: question mappings are rejected when an interview has no assigned flow, and every approved `source_segment_id` must individually support the finding's `evidence_quote`
-- project-scoped readiness isolation: `--project-id` excludes another project's workflow/content defects while keeping shared database integrity and recovery-set checks global, and the source SQLite file remains byte-for-byte unchanged
+- project-scoped readiness isolation: `--project-id` excludes another project's workflow/content and ProcessingJob scope defects while keeping shared database integrity and recovery-set checks global, recomputes job-scope counts for only the selected project, and leaves the source SQLite file byte-for-byte unchanged
 - resumed project-analysis UI recovery: the shared job script must wrap `pollAnalysisJob` before the page's resume handler runs and must re-enable the associated analysis button before propagating a polling error
 - Windows DPAPI secret-store behavior
 
