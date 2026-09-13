@@ -36,5 +36,8 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
+      - name: Run baseline durable job recovery regression
+        run: python tests/smoke_job_recovery.py
+
       - name: Run current-attempt result recovery regression
         run: python tests/smoke_job_recovery_result_generation.py
