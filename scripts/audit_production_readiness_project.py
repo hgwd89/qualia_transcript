@@ -144,6 +144,14 @@ def _filter_job_issue_list(items: list[dict], code: str, project_id: int) -> lis
     return result
 
 
+def _count_job_issue(items: list[dict], code: str) -> int:
+    return sum(
+        int((item.get("context") or {}).get("count") or 0)
+        for item in items
+        if item.get("code") == code
+    )
+
+
 def audit_project(
     db_path: Path,
     output_dir: Path,
@@ -188,6 +196,11 @@ def audit_project(
         "processing_job_question_orphans",
         project_id,
     )
+    report["blockers"] = _filter_job_issue_list(
+        report.get("blockers", []),
+        "processing_job_scope_invalid",
+        project_id,
+    )
     report["warnings"] = _filter_job_issue_list(
         report.get("warnings", []),
         "active_processing_jobs",
@@ -197,15 +210,17 @@ def audit_project(
     info = report.setdefault("info", {})
     info["scope"] = "project"
     info["project_id"] = project_id
-    info["processing_job_question_orphan_count"] = sum(
-        int((item.get("context") or {}).get("count") or 0)
-        for item in report["blockers"]
-        if item.get("code") == "processing_job_question_orphans"
+    info["processing_job_question_orphan_count"] = _count_job_issue(
+        report["blockers"],
+        "processing_job_question_orphans",
     )
-    info["active_processing_job_count"] = sum(
-        int((item.get("context") or {}).get("count") or 0)
-        for item in report["warnings"]
-        if item.get("code") == "active_processing_jobs"
+    info["processing_job_scope_invalid_count"] = _count_job_issue(
+        report["blockers"],
+        "processing_job_scope_invalid",
+    )
+    info["active_processing_job_count"] = _count_job_issue(
+        report["warnings"],
+        "active_processing_jobs",
     )
     return report
 
