@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -7,7 +9,11 @@ from uuid import uuid4
 import config
 from models import db
 from models.interview import Interview, MediaFile
-from services.storage_paths import ensure_managed_id_dir, resolve_managed_path
+from services.storage_paths import (
+    ensure_managed_id_dir,
+    open_managed_file_for_read,
+    resolve_managed_path,
+)
 
 
 @dataclass(frozen=True)
@@ -17,12 +23,44 @@ class MediaUploadTarget:
     extension: str
 
 
+@dataclass
+class MediaReadSnapshot:
+    """Private pathname snapshot copied from one ancestry-pinned managed read."""
+
+    full_path: str
+    _temporary_directory: tempfile.TemporaryDirectory
+    _closed: bool = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._temporary_directory.cleanup()
+        self._closed = True
+
+    def __enter__(self) -> "MediaReadSnapshot":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
 def _upload_root() -> Path:
     return Path(config.UPLOAD_DIR).resolve()
 
 
 def _resolve_stored_path(stored_path: str) -> Path:
     return resolve_managed_path(config.UPLOAD_DIR, stored_path)
+
+
+def _file_generation(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
+    )
 
 
 def media_extension(original_filename: str) -> str:
@@ -109,6 +147,61 @@ def save_and_register_media(
         db.session.rollback()
         _discard_target(target)
         raise
+
+
+def create_media_read_snapshot(media: MediaFile) -> MediaReadSnapshot:
+    """Copy managed media once from a pinned handle into a private temp pathname.
+
+    PyAV, OpenAI's upload client, and faster-whisper all accept pathnames and may
+    reopen them internally. The managed upload pathname is therefore resolved and
+    opened exactly once through the ancestry-pinned storage boundary. Downstream
+    consumers receive only the private snapshot path, so later replacement of the
+    managed pathname cannot redirect an in-flight transcription.
+    """
+    opened = open_managed_file_for_read(config.UPLOAD_DIR, media.stored_path)
+    temporary_directory = tempfile.TemporaryDirectory(prefix="qualia_media_read_")
+    try:
+        temp_root = Path(temporary_directory.name)
+        try:
+            os.chmod(temp_root, 0o700)
+        except OSError:
+            pass
+
+        suffix = Path(media.stored_path).suffix.lower() or ".media"
+        snapshot_path = temp_root / f"source{suffix}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0) or 0)
+        fd = os.open(snapshot_path, flags, 0o600)
+        copied = 0
+        try:
+            with os.fdopen(fd, "wb", closefd=True) as destination:
+                fd = -1
+                while True:
+                    chunk = opened.stream.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    destination.write(chunk)
+                    copied += len(chunk)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+        after = os.fstat(opened.stream.fileno())
+        if _file_generation(after) != _file_generation(opened.stat_result):
+            raise ValueError("managed media changed while creating read snapshot")
+        if copied != int(opened.stat_result.st_size):
+            raise ValueError("managed media snapshot size mismatch")
+        if snapshot_path.stat().st_size != copied:
+            raise ValueError("managed media snapshot was not written completely")
+
+        return MediaReadSnapshot(
+            full_path=str(snapshot_path),
+            _temporary_directory=temporary_directory,
+        )
+    except Exception:
+        temporary_directory.cleanup()
+        raise
+    finally:
+        opened.close()
 
 
 def get_media_full_path(media: MediaFile) -> str:
