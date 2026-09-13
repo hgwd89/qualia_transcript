@@ -410,14 +410,21 @@ def main() -> int:
                         f"calls={before_foreign_calls}->{provider_calls['count']}",
                     )
 
-                    integrated_generated = analyzer.analyze_project_integrated(project.id)
-                    generated_content = json.loads(integrated_generated.content_json)
+                    before_integrated_calls = provider_calls["count"]
+                    integrated_rejected = False
+                    integrated_error_code = None
+                    try:
+                        analyzer.analyze_project_integrated(project.id)
+                    except ValueError as exc:
+                        integrated_error_code = getattr(exc, "code", None)
+                        integrated_rejected = (
+                            integrated_error_code == "integrated_multiple_configured_flows"
+                        )
                     failures += check(
-                        "integrated analysis persists source flow and filters unknown question codes",
-                        generated_content.get("source_flow_id") == flow1.id
-                        and q1.id in (generated_content.get("source_question_ids") or [])
-                        and generated_content["findings"][0].get("question_codes") == ["Q1"],
-                        f"content={generated_content}",
+                        "integrated analysis rejects implicit first-flow selection before provider call",
+                        integrated_rejected
+                        and provider_calls["count"] == before_integrated_calls,
+                        f"error={integrated_error_code} calls={before_integrated_calls}->{provider_calls['count']}",
                     )
                 finally:
                     analyzer.call_structured = original_call_structured
