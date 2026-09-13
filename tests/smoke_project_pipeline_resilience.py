@@ -32,6 +32,7 @@ def main():
             from app import create_app
             from models import db
             from models.interview import Interview
+            from models.interview_flow import InterviewFlow
             from models.processing_job import ProcessingJob
             from models.project import Project
             from services.processing_jobs import execute_job, retry_failed_job
@@ -43,10 +44,13 @@ def main():
                 project = Project(name="Pipeline resilience smoke")
                 db.session.add(project)
                 db.session.flush()
-                iv1 = Interview(project_id=project.id, status="transcribed")
-                iv2 = Interview(project_id=project.id, status="transcribed")
-                iv3 = Interview(project_id=project.id, status="pending")
-                iv4 = Interview(project_id=project.id, status="transcribed")
+                flow = InterviewFlow(project_id=project.id, title="Pipeline resilience flow")
+                db.session.add(flow)
+                db.session.flush()
+                iv1 = Interview(project_id=project.id, flow_id=flow.id, status="transcribed")
+                iv2 = Interview(project_id=project.id, flow_id=flow.id, status="transcribed")
+                iv3 = Interview(project_id=project.id, flow_id=flow.id, status="pending")
+                iv4 = Interview(project_id=project.id, flow_id=flow.id, status="transcribed")
                 db.session.add_all([iv1, iv2, iv3, iv4])
                 db.session.flush()
                 job = ProcessingJob(

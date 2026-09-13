@@ -10,6 +10,7 @@ from models.interview_flow import InterviewFlowQuestion
 from models.segment import Segment, UtteranceMapping
 from models.analysis import AIAnalysis
 from services.ai_client import call_structured, MODEL
+from services.project_flow_scope import resolve_integrated_analysis_scope
 
 ResultWriteGuard = Callable[[], object]
 
@@ -335,53 +336,49 @@ def analyze_project_integrated(
     if not project:
         raise ValueError("project が見つかりません")
 
-    flows = project.interview_flows
-    flow  = flows[0] if flows else None
+    scope = resolve_integrated_analysis_scope(project)
+    flow = scope.flow
+    source_interview_ids = set(scope.interview_ids)
 
     sections_data = []
     source_question_ids: list[int] = []
     allowed_question_codes: set[str] = set()
-    if flow:
-        for section in flow.sections:
-            questions_data = []
-            for q in section.questions:
-                source_question_ids.append(int(q.id))
-                allowed_question_codes.add(_canonical_question_code(q))
-                utterances_by_p = []
-                for interview in project.interviews:
-                    if interview.flow_id is None or int(interview.flow_id) != int(flow.id):
-                        continue
-                    participant = interview.participant
-                    if not participant:
-                        continue
-                    code = participant.participant_code
-                    mappings = (
-                        UtteranceMapping.query
-                        .filter_by(question_id=q.id)
-                        .join(Segment, UtteranceMapping.segment_id == Segment.id)
-                        .filter(Segment.interview_id == interview.id,
-                                Segment.speaker_role == "respondent")
-                        .all()
-                    )
-                    if mappings:
-                        texts = "／".join(f'「{m.segment.text}」' for m in mappings)
-                        utterances_by_p.append(f"{code}: {texts}")
-                if utterances_by_p:
-                    questions_data.append(
-                        f"[{q.question_code}] {q.question_text}\n" + "\n".join(utterances_by_p)
-                    )
-            if questions_data:
-                sections_data.append(f"【{section.title}】\n" + "\n\n".join(questions_data))
+    for section in flow.sections:
+        questions_data = []
+        for q in section.questions:
+            source_question_ids.append(int(q.id))
+            allowed_question_codes.add(_canonical_question_code(q))
+            utterances_by_p = []
+            for interview in project.interviews:
+                if int(interview.id) not in source_interview_ids:
+                    continue
+                participant = interview.participant
+                if not participant:
+                    continue
+                code = participant.participant_code
+                mappings = (
+                    UtteranceMapping.query
+                    .filter_by(question_id=q.id)
+                    .join(Segment, UtteranceMapping.segment_id == Segment.id)
+                    .filter(Segment.interview_id == interview.id,
+                            Segment.speaker_role == "respondent")
+                    .all()
+                )
+                if mappings:
+                    texts = "／".join(f'「{m.segment.text}」' for m in mappings)
+                    utterances_by_p.append(f"{code}: {texts}")
+            if utterances_by_p:
+                questions_data.append(
+                    f"[{q.question_code}] {q.question_text}\n" + "\n".join(utterances_by_p)
+                )
+        if questions_data:
+            sections_data.append(f"【{section.title}】\n" + "\n\n".join(questions_data))
 
     if not sections_data:
         raise ValueError("分析対象の発言が見つかりません（先にマッピングを実行してください）")
 
     full_text = "\n\n".join(sections_data)
-    p_count = sum(
-        1
-        for iv in project.interviews
-        if iv.participant and iv.flow_id is not None and int(iv.flow_id) == int(flow.id)
-    )
+    p_count = len(scope.interview_ids)
 
     system = (
         "あなたは定性調査の専門アナリストです。"
@@ -414,6 +411,7 @@ def analyze_project_integrated(
     normalized_result = dict(result)
     normalized_result["source_flow_id"] = int(flow.id)
     normalized_result["source_question_ids"] = sorted(set(source_question_ids))
+    normalized_result["source_interview_ids"] = sorted(source_interview_ids)
     normalized_result["findings"] = normalized_findings
 
     if result_write_guard is not None:

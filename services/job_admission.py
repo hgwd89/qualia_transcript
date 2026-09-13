@@ -11,6 +11,7 @@ from models.processing_job import ProcessingJob
 from models.project import Project
 from services.job_recovery import recover_stale_jobs
 from services.processing_jobs import ACTIVE_STATUSES, JOB_TYPES, _json_dump
+from services.project_flow_scope import ProjectFlowScopeError, resolve_integrated_analysis_scope
 
 
 PROJECT_EXCLUSIVE_JOB_TYPES = {"project_pipeline", "analyze_cross", "analyze_integrated"}
@@ -57,10 +58,12 @@ def _validate_job_scope(
     """Validate durable-job ownership and required/forbidden scope fields.
 
     This runs after the admission write reservation is acquired so project
-    deletion and job admission observe one serialized database snapshot.
+    deletion, scope-changing writes, and job admission observe one serialized
+    database snapshot.
     """
     project_id = int(project_id)
-    if project_id <= 0 or db.session.get(Project, project_id) is None:
+    project = db.session.get(Project, project_id) if project_id > 0 else None
+    if project is None:
         raise ValueError("project not found for processing job")
 
     try:
@@ -97,6 +100,16 @@ def _validate_job_scope(
     if interview is not None and question is not None:
         if not interview.flow_id or int(question.section.flow_id) != int(interview.flow_id):
             raise ValueError("question not found in processing job interview flow")
+
+    # Integrated analysis has a stronger research-provenance contract than the
+    # generic durable-job shape. Revalidate it *inside* the serialized admission
+    # transaction so a concurrent flow/interview edit cannot slip between route
+    # preflight and durable job creation.
+    if job_type == "analyze_integrated":
+        try:
+            resolve_integrated_analysis_scope(project)
+        except ProjectFlowScopeError as exc:
+            raise ValueError(f"{exc.code}: {exc}") from exc
 
 
 def _same_scope(

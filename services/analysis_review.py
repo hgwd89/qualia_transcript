@@ -37,6 +37,25 @@ def _stored_source_flow_id(analysis: AIAnalysis) -> int | None:
     return value if value > 0 else None
 
 
+def _stored_source_interview_ids(analysis: AIAnalysis) -> set[int] | None:
+    content = _analysis_content(analysis)
+    if "source_interview_ids" not in content:
+        return None
+    raw_values = content.get("source_interview_ids")
+    if not isinstance(raw_values, list):
+        return set()
+
+    values: set[int] = set()
+    for raw in raw_values:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            values.add(value)
+    return values
+
+
 def _analysis_source_flow_id(analysis: AIAnalysis) -> int | None:
     stored = _stored_source_flow_id(analysis)
     if stored is not None:
@@ -115,6 +134,12 @@ def _candidate_segments(analysis: AIAnalysis, finding: dict) -> list[Segment]:
 
     if analysis.interview_id is not None:
         query = query.filter(Segment.interview_id == analysis.interview_id)
+
+    source_interview_ids = _stored_source_interview_ids(analysis)
+    if source_interview_ids is not None:
+        if not source_interview_ids:
+            return []
+        query = query.filter(Interview.id.in_(sorted(source_interview_ids)))
 
     candidates = query.all()
     source_flow_id = _analysis_source_flow_id(analysis)
