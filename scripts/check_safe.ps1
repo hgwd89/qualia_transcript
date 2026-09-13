@@ -55,6 +55,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] backup/restore integrity hardening smoke checks passed."
 
+Write-Host "[INFO] Running managed backup collector guard smoke check..."
+python tests/smoke_backup_collect_tree_guard.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] managed backup collector guard smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] managed backup collector guard smoke checks passed."
+
 Write-Host "[INFO] Running backup service-boundary smoke check..."
 python tests/smoke_backup_service_boundary.py
 if ($LASTEXITCODE -ne 0) {

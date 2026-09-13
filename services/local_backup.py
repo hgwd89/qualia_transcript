@@ -122,12 +122,26 @@ def _collect_tree(source_dir: Path, archive_prefix: str, staging_root: Path) -> 
     pending = [root]
     while pending:
         current = pending.pop()
+        if current != root:
+            try:
+                current_info = current.lstat()
+                if is_link_or_reparse(current) or not stat.S_ISDIR(current_info.st_mode):
+                    raise ValueError(
+                        f"managed backup directory changed during collection: {current}"
+                    )
+                current.resolve().relative_to(root)
+            except (OSError, RuntimeError, ValueError) as exc:
+                if isinstance(exc, ValueError) and "managed backup directory changed" in str(exc):
+                    raise
+                raise ValueError(f"managed backup directory is unsafe: {current}") from exc
+
         for source in sorted(current.iterdir(), key=lambda path: path.name):
             if is_link_or_reparse(source):
                 raise ValueError(
                     f"managed backup tree contains linked/reparse entry: {source}"
                 )
             try:
+                info = source.lstat()
                 resolved = source.resolve()
                 resolved.relative_to(root)
             except (OSError, RuntimeError, ValueError) as exc:
@@ -135,23 +149,18 @@ def _collect_tree(source_dir: Path, archive_prefix: str, staging_root: Path) -> 
                     f"managed backup tree escapes configured root: {source}"
                 ) from exc
 
-            if source.is_dir():
+            if stat.S_ISDIR(info.st_mode):
                 pending.append(source)
                 continue
-            if not source.is_file():
-                continue
-
-            # Re-check immediately before copying so a replaced file entry is not
-            # silently followed into an unmanaged location.
-            if is_link_or_reparse(source):
+            if not stat.S_ISREG(info.st_mode):
                 raise ValueError(
-                    f"managed backup file became linked/reparse: {source}"
+                    f"managed backup tree contains unsupported entry type: {source}"
                 )
+
             relative = source.relative_to(root).as_posix()
             archive_path = _safe_member_name(f"{archive_prefix}/{relative}")
             staged = staging_root / Path(archive_path)
-            staged.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, staged)
+            _copy_regular_snapshot_file(source, staged)
             entries.append({
                 "path": archive_path,
                 "size": staged.stat().st_size,
