@@ -55,6 +55,7 @@ class MediaFile(db.Model):
     mime_type         = db.Column(db.Text)
     duration_sec      = db.Column(db.Float)
     file_size_bytes   = db.Column(db.Integer)
+    content_sha256    = db.Column(db.Text)
     uploaded_at       = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     interview      = db.relationship("Interview",     back_populates="media_files")

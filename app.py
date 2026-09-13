@@ -170,6 +170,16 @@ def _run_migrations(app):
 
         inspector = sa_inspect(db.engine)
         existing_tables = set(inspector.get_table_names())
+        if "media_files" in existing_tables:
+            media_cols = {c["name"] for c in inspector.get_columns("media_files")}
+            if "content_sha256" not in media_cols:
+                db.session.execute(text(
+                    "ALTER TABLE media_files ADD COLUMN content_sha256 TEXT"
+                ))
+                db.session.commit()
+
+        inspector = sa_inspect(db.engine)
+        existing_tables = set(inspector.get_table_names())
         if "processing_jobs" in existing_tables:
             job_cols = {c["name"] for c in inspector.get_columns("processing_jobs")}
             if "question_id" not in job_cols:
