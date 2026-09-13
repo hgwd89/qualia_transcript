@@ -1,4 +1,6 @@
 from flask import Blueprint, render_template, request, redirect, url_for, flash
+from sqlalchemy.exc import IntegrityError
+
 from models import db
 from models.project import Project
 from models.interview import Interview
@@ -24,6 +26,27 @@ def _get_flow_section_or_404(flow_id: int, section_id: int) -> InterviewFlowSect
         .filter_by(id=section_id, flow_id=flow_id)
         .first_or_404()
     )
+
+
+def _question_code_conflict(flow_id: int, question_code: str) -> bool:
+    return (
+        InterviewFlowQuestion.query
+        .join(
+            InterviewFlowSection,
+            InterviewFlowQuestion.section_id == InterviewFlowSection.id,
+        )
+        .filter(
+            InterviewFlowSection.flow_id == int(flow_id),
+            InterviewFlowQuestion.question_code == str(question_code),
+        )
+        .first()
+        is not None
+    )
+
+
+def _duplicate_question_code_response(project: Project, flow: InterviewFlow):
+    flash("同じインタビューフロー内で質問コードは重複できません", "error")
+    return render_template("flows/detail.html", project=project, flow=flow), 409
 
 
 def _flow_usage_counts(flow_id: int) -> dict[str, int]:
@@ -106,20 +129,30 @@ def add_section(project_id, flow_id):
 @bp.route("/projects/<int:project_id>/flows/<int:flow_id>/sections/<int:section_id>/questions/new",
           methods=["POST"])
 def add_question(project_id, flow_id, section_id):
-    Project.query.get_or_404(project_id)
+    project = Project.query.get_or_404(project_id)
     flow = _get_project_flow_or_404(project_id, flow_id)
     section = _get_flow_section_or_404(flow.id, section_id)
     seq = len(section.questions) + 1
+    question_code = request.form.get("question_code", "").strip() or f"Q{section.seq}-{seq}"
+    if _question_code_conflict(flow.id, question_code):
+        return _duplicate_question_code_response(project, flow)
+
     q = InterviewFlowQuestion(
         section_id=section.id,
-        question_code=request.form.get("question_code", "").strip() or f"Q{section.seq}-{seq}",
+        question_code=question_code,
         question_text=request.form.get("question_text", "").strip(),
         question_type=request.form.get("question_type", "open"),
         is_key_question=request.form.get("is_key_question") == "1",
         seq=seq,
     )
-    db.session.add(q)
-    db.session.commit()
+    try:
+        db.session.add(q)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        flow = _get_project_flow_or_404(project_id, flow_id)
+        return _duplicate_question_code_response(project, flow)
+
     flash("質問項目を追加しました", "success")
     return redirect(url_for("flows.detail", project_id=project_id, flow_id=flow.id))
 

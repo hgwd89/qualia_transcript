@@ -20,16 +20,89 @@ def _normalize_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _segment_question_codes(segment: Segment) -> set[str]:
+def _analysis_content(analysis: AIAnalysis) -> dict:
+    try:
+        payload = json.loads(analysis.content_json or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _stored_source_flow_id(analysis: AIAnalysis) -> int | None:
+    raw = _analysis_content(analysis).get("source_flow_id")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _analysis_source_flow_id(analysis: AIAnalysis) -> int | None:
+    stored = _stored_source_flow_id(analysis)
+    if stored is not None:
+        return stored
+
+    if (
+        analysis.analysis_type == "integrated"
+        and analysis.interview_id is None
+        and analysis.question_id is None
+        and analysis.project is not None
+    ):
+        flow_ids = [int(flow.id) for flow in analysis.project.interview_flows]
+        if len(flow_ids) == 1:
+            return flow_ids[0]
+    return None
+
+
+def _integrated_scope_is_ambiguous(analysis: AIAnalysis) -> bool:
+    if (
+        analysis.analysis_type != "integrated"
+        or analysis.interview_id is not None
+        or analysis.question_id is not None
+        or analysis.project is None
+        or _stored_source_flow_id(analysis) is not None
+    ):
+        return False
+    return len(analysis.project.interview_flows) > 1
+
+
+def _segment_question_codes(segment: Segment, *, flow_id: int | None = None) -> set[str]:
     codes = set()
     for mapping in segment.utterance_mappings:
         question = mapping.question
-        if question and question.question_code:
-            codes.add(str(question.question_code))
+        if not question or not question.question_code:
+            continue
+        if flow_id is not None:
+            section = question.section
+            if not section or int(section.flow_id) != int(flow_id):
+                continue
+        codes.add(str(question.question_code))
     return codes
 
 
+def _segment_has_question_id(segment: Segment, question_id: int) -> bool:
+    return any(
+        mapping.question_id is not None and int(mapping.question_id) == int(question_id)
+        for mapping in segment.utterance_mappings
+    )
+
+
+def _segment_has_flow_mapping(segment: Segment, flow_id: int) -> bool:
+    for mapping in segment.utterance_mappings:
+        question = mapping.question
+        section = question.section if question else None
+        if section and int(section.flow_id) == int(flow_id):
+            return True
+    return False
+
+
 def _candidate_segments(analysis: AIAnalysis, finding: dict) -> list[Segment]:
+    if _integrated_scope_is_ambiguous(analysis):
+        # Historical integrated analyses did not persist which flow fed the
+        # prompt. When multiple flows now exist, rebinding by question-code text
+        # would be ambiguous, so approval fails closed instead of guessing.
+        return []
+
     query = (
         Segment.query
         .join(Interview, Segment.interview_id == Interview.id)
@@ -44,6 +117,7 @@ def _candidate_segments(analysis: AIAnalysis, finding: dict) -> list[Segment]:
         query = query.filter(Segment.interview_id == analysis.interview_id)
 
     candidates = query.all()
+    source_flow_id = _analysis_source_flow_id(analysis)
 
     participant_codes = {
         str(code).strip()
@@ -58,14 +132,24 @@ def _candidate_segments(analysis: AIAnalysis, finding: dict) -> list[Segment]:
 
     filtered = []
     for segment in candidates:
+        if analysis.question_id is not None:
+            if not _segment_has_question_id(segment, int(analysis.question_id)):
+                continue
+        elif source_flow_id is not None and not _segment_has_flow_mapping(segment, source_flow_id):
+            continue
+
         if participant_codes:
             participant = segment.interview.participant if segment.interview else None
             code = participant.participant_code if participant else None
             if not code or str(code) not in participant_codes:
                 continue
 
-        if question_codes:
-            seg_codes = _segment_question_codes(segment)
+        # A persisted question_id is the canonical scope and supersedes model-
+        # generated question-code strings. For broader analyses, codes remain a
+        # useful qualifier but are evaluated only inside the canonical flow when
+        # one is known.
+        if question_codes and analysis.question_id is None:
+            seg_codes = _segment_question_codes(segment, flow_id=source_flow_id)
             if not seg_codes.intersection(question_codes):
                 continue
 
@@ -116,6 +200,7 @@ def prepare_analysis_for_approval(analysis: AIAnalysis) -> tuple[dict, list[dict
     if not isinstance(findings, list) or not findings:
         raise ValueError("承認には findings が1件以上必要です")
 
+    ambiguous_integrated_scope = _integrated_scope_is_ambiguous(analysis)
     unresolved = []
     normalized_findings = []
     for index, raw_finding in enumerate(findings, start=1):
@@ -130,7 +215,12 @@ def prepare_analysis_for_approval(analysis: AIAnalysis) -> tuple[dict, list[dict
         finding["source_segment_ids"] = source_ids
         normalized_findings.append(finding)
 
-        if not evidence_quote:
+        if ambiguous_integrated_scope:
+            unresolved.append({
+                "finding_no": index,
+                "reason": "integrated analysis has no source_flow_id while multiple project flows exist",
+            })
+        elif not evidence_quote:
             unresolved.append({"finding_no": index, "reason": "evidence_quote is empty"})
         elif not source_ids:
             unresolved.append({

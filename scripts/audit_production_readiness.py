@@ -196,6 +196,42 @@ def audit(
                 count=len(duplicate_participant_codes),
             )
 
+        question_columns = {
+            str(row["name"])
+            for row in con.execute("PRAGMA table_info(interview_flow_questions)").fetchall()
+        }
+        duplicate_question_codes = []
+        question_identity_checked = "question_code" in question_columns
+        if question_identity_checked:
+            duplicate_question_codes = con.execute(
+                """
+                SELECT
+                    sec.flow_id,
+                    q.question_code,
+                    COUNT(*) AS duplicate_count,
+                    GROUP_CONCAT(q.id, ',') AS question_ids
+                FROM interview_flow_questions q
+                JOIN interview_flow_sections sec ON sec.id = q.section_id
+                WHERE q.question_code IS NOT NULL
+                  AND TRIM(q.question_code) <> ''
+                GROUP BY sec.flow_id, q.question_code
+                HAVING COUNT(*) > 1
+                ORDER BY sec.flow_id, q.question_code
+                """
+            ).fetchall()
+        info["question_code_identity_check"] = (
+            "checked" if question_identity_checked else "skipped_missing_column"
+        )
+        info["duplicate_question_code_count"] = len(duplicate_question_codes)
+        if duplicate_question_codes:
+            _issue(
+                blockers,
+                "duplicate_question_code",
+                "Question codes must be unique within each interview flow for traceable evidence",
+                rows=[dict(row) for row in duplicate_question_codes[:100]],
+                count=len(duplicate_question_codes),
+            )
+
         integrity = con.execute("PRAGMA integrity_check").fetchone()
         if not integrity or integrity[0] != "ok":
             _issue(blockers, "sqlite_integrity", "SQLite integrity_check failed", result=integrity[0] if integrity else None)
@@ -498,7 +534,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only production readiness audit")
     parser.add_argument("--db", help="SQLite DB path; defaults to config.DATABASE_URI")
     parser.add_argument("--output-dir", help="outputs directory; defaults to config.OUTPUT_DIR")
-    parser.add_argument("--backup-dir", help="backup directory; defaults to config.BACKUP_DIR")
+    parser.add_argument("--backup-dir", help="backups directory; defaults to config.BACKUP_DIR")
     parser.add_argument("--json", action="store_true", help="print JSON report")
     parser.add_argument("--strict", action="store_true", help="treat warnings as a failing exit status")
     args = parser.parse_args()
