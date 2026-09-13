@@ -68,7 +68,9 @@ def main() -> int:
             from models.project import Project
             from models.segment import Segment, UtteranceMapping
             import services.analyzer as analyzer
+            import services.project_pipeline as pipeline_service
             from services.analysis_review import resolve_finding_source_segment_ids
+            from services.job_admission import admit_processing_job
             from services.project_flow_scope import (
                 ProjectFlowScopeError,
                 resolve_integrated_analysis_scope,
@@ -171,16 +173,101 @@ def main() -> int:
                 f"status={response.status_code}, payload={payload}, jobs={multi_jobs}",
             )
 
+            # The route preflight is not the concurrency boundary. Admission must
+            # independently reject the same invalid scope while holding BEGIN IMMEDIATE.
+            with app.app_context():
+                direct_admission = admit_processing_job(multi_id, "analyze_integrated")
+                direct_job_count = ProcessingJob.query.filter_by(
+                    project_id=multi_id,
+                    job_type="analyze_integrated",
+                ).count()
+            failures += check(
+                "serialized job admission revalidates integrated flow scope",
+                bool(direct_admission.error)
+                and "integrated_multiple_configured_flows" in str(direct_admission.error)
+                and direct_job_count == 0,
+                f"error={direct_admission.error!r}, jobs={direct_job_count}",
+            )
+
             page = client.get(f"/projects/{multi_id}/analysis")
             failures += check(
-                "analysis page exposes questions from every configured flow",
+                "analysis page exposes flow identity and disables invalid integrated action",
                 page.status_code == 200
+                and b"Guide A" in page.data
+                and b"Guide B" in page.data
                 and b"Flow A question" in page.data
-                and b"Flow B question" in page.data,
+                and b"Flow B question" in page.data
+                and b'data-scope-disabled="1"' in page.data
+                and "統合分析を実行できません".encode("utf-8") in page.data,
                 f"status={page.status_code}",
             )
 
             with app.app_context():
+                # Simulate the exact assignment race: preflight observes one flow,
+                # then the write reservation is acquired, and the locked recheck
+                # observes that assignment has become ambiguous. No flow may commit.
+                race_project = Project(name="Assignment race")
+                db.session.add(race_project)
+                db.session.flush()
+                race_flow = InterviewFlow(project_id=race_project.id, title="Only at preflight")
+                db.session.add(race_flow)
+                db.session.flush()
+                race_interview = Interview(
+                    project_id=race_project.id,
+                    flow_id=None,
+                    status="done",
+                )
+                db.session.add(race_interview)
+                db.session.commit()
+                race_interview_id = int(race_interview.id)
+                race_events = []
+                saved_resolver = pipeline_service.resolve_pipeline_interview_flow
+                saved_guard = pipeline_service.begin_job_result_write
+
+                def racing_resolver(project, interview):
+                    race_events.append("resolve")
+                    if race_events.count("resolve") == 1:
+                        return race_flow, True
+                    raise ProjectFlowScopeError(
+                        "ambiguous_flow_assignment",
+                        "simulated second flow after preflight",
+                        interview_ids=[int(interview.id)],
+                    )
+
+                def fake_write_guard(_job):
+                    race_events.append("guard")
+                    return object()
+
+                pipeline_service.resolve_pipeline_interview_flow = racing_resolver
+                pipeline_service.begin_job_result_write = fake_write_guard
+                try:
+                    try:
+                        pipeline_service.run_project_pipeline(
+                            SimpleNamespace(project_id=int(race_project.id)),
+                            lambda *_args, **_kwargs: None,
+                        )
+                        race_error = None
+                    except ProjectPipelinePartialFailure as exc:
+                        race_error = exc
+                finally:
+                    pipeline_service.resolve_pipeline_interview_flow = saved_resolver
+                    pipeline_service.begin_job_result_write = saved_guard
+                db.session.expire_all()
+                race_after = db.session.get(Interview, race_interview_id)
+                race_steps = (
+                    race_error.job_result["interviews"][0]["steps"]
+                    if race_error is not None
+                    else []
+                )
+                failures += check(
+                    "pipeline rechecks sole-flow assignment after write reservation",
+                    race_error is not None
+                    and race_events[:3] == ["resolve", "guard", "resolve"]
+                    and race_after.flow_id is None
+                    and any(step.get("code") == "ambiguous_flow_assignment" for step in race_steps),
+                    f"events={race_events}, flow_id={race_after.flow_id}, steps={race_steps}",
+                )
+
                 # Single-flow project: every participant interview is mapped and
                 # the analyzer may proceed with an explicit canonical source set.
                 single = Project(name="Single Flow")
