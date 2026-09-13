@@ -23,9 +23,10 @@ jobs:
         shell: bash
         run: |
           python scripts/patch_worker_launch_generation.py
+          python scripts/fix_worker_launch_guard_patch.py
           python -m py_compile services/processing_jobs.py services/worker_launch_guard.py scripts/run_processing_job.py tests/smoke_worker_launch_fencing.py
           python tests/smoke_worker_launch_fencing.py
-          git rm scripts/patch_worker_launch_generation.py
+          git rm scripts/patch_worker_launch_generation.py scripts/fix_worker_launch_guard_patch.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add services/processing_jobs.py services/worker_launch_guard.py scripts/run_processing_job.py tests/smoke_worker_launch_fencing.py docs/worker-launch-fencing.md
