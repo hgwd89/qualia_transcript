@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from dataclasses import dataclass
@@ -131,29 +132,37 @@ def save_and_register_media(
     original_filename: str,
     mime_type: str | None = None,
 ) -> MediaFile:
-    """Save media and commit metadata while the written generation stays pinned.
+    """Save media and bind metadata to the exact bytes and generation written.
 
-    The upload is created through the ancestry-pinned write boundary. After the
-    writer closes, a commit guard re-pins that exact generation and its current
-    ancestry for the full database commit window. Namespace replacement before the
-    guard is rejected; replacement during commit is detected by post-commit
-    verification, the just-created MediaFile row is compensated, and cleanup is
-    limited to the pinned original generation rather than the replacement path.
+    Upload bytes are copied to the ancestry-pinned exclusive writer while SHA-256
+    is computed in the same loop. After the writer closes, a commit guard re-pins
+    that exact generation through the DB commit window. New rows therefore carry a
+    persistent content identity in addition to filesystem-generation fencing.
     """
     if interview.id is None:
         raise ValueError("interview must be flushed before media upload")
 
     target = prepare_media_upload_target(interview.id, original_filename)
     written_stat = None
+    content_sha256 = None
     guard = None
     media = None
     committed = False
     try:
         opened = open_managed_file_for_create(config.UPLOAD_DIR, target.stored_path)
+        hasher = hashlib.sha256()
+        copied = 0
         try:
-            file_storage.save(opened.stream)
+            while True:
+                chunk = file_storage.stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                opened.stream.write(chunk)
+                hasher.update(chunk)
+                copied += len(chunk)
             opened.stream.flush()
             written_stat = os.fstat(opened.stream.fileno())
+            content_sha256 = hasher.hexdigest()
         finally:
             if written_stat is None and not opened.stream.closed:
                 try:
@@ -163,8 +172,10 @@ def save_and_register_media(
                     pass
             opened.close()
 
-        if written_stat is None:
+        if written_stat is None or content_sha256 is None:
             raise RuntimeError("uploaded media write did not complete")
+        if copied != int(written_stat.st_size):
+            raise ValueError("uploaded media byte count does not match written file size")
 
         guard = open_managed_write_commit_guard(
             config.UPLOAD_DIR,
@@ -184,6 +195,7 @@ def save_and_register_media(
             ),
             mime_type=mime_type,
             file_size_bytes=int(written_stat.st_size),
+            content_sha256=content_sha256,
         )
         db.session.add(media)
         db.session.commit()
@@ -216,17 +228,21 @@ def save_and_register_media(
 
 
 def create_media_read_snapshot(media: MediaFile) -> MediaReadSnapshot:
-    """Copy managed media once from a pinned handle into a private temp pathname.
+    """Copy and verify one managed media object into a private temp pathname.
 
-    PyAV, OpenAI's upload client, and faster-whisper all accept pathnames and may
-    reopen them internally. The managed upload pathname is therefore resolved and
-    opened exactly once through the ancestry-pinned storage boundary. Downstream
-    consumers receive only the private snapshot path, so later replacement of the
-    managed pathname cannot redirect an in-flight transcription.
+    The source is acquired through the ancestry-pinned read boundary. For new rows,
+    SHA-256 and stored size are verified from that exact open handle while copying;
+    a same-path replacement therefore cannot silently become transcription input.
+    Legacy rows whose digest is NULL remain readable for compatibility but are not
+    automatically blessed with a digest from the current pathname.
     """
     opened = open_managed_file_for_read(config.UPLOAD_DIR, media.stored_path)
     temporary_directory = None
     try:
+        expected_size = media.file_size_bytes
+        if expected_size is not None and int(opened.stat_result.st_size) != int(expected_size):
+            raise ValueError("managed media size no longer matches registered metadata")
+
         temporary_directory = tempfile.TemporaryDirectory(prefix="qualia_media_read_")
         temp_root = Path(temporary_directory.name)
         try:
@@ -239,6 +255,7 @@ def create_media_read_snapshot(media: MediaFile) -> MediaReadSnapshot:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | int(getattr(os, "O_BINARY", 0) or 0)
         fd = os.open(snapshot_path, flags, 0o600)
         copied = 0
+        hasher = hashlib.sha256()
         try:
             with os.fdopen(fd, "wb", closefd=True) as destination:
                 fd = -1
@@ -247,6 +264,7 @@ def create_media_read_snapshot(media: MediaFile) -> MediaReadSnapshot:
                     if not chunk:
                         break
                     destination.write(chunk)
+                    hasher.update(chunk)
                     copied += len(chunk)
         finally:
             if fd >= 0:
@@ -257,6 +275,16 @@ def create_media_read_snapshot(media: MediaFile) -> MediaReadSnapshot:
             raise ValueError("managed media changed while creating read snapshot")
         if copied != int(opened.stat_result.st_size):
             raise ValueError("managed media snapshot size mismatch")
+        if expected_size is not None and copied != int(expected_size):
+            raise ValueError("managed media bytes no longer match registered size")
+
+        expected_sha256 = media.content_sha256
+        if expected_sha256 is not None:
+            expected_digest = str(expected_sha256).strip().lower()
+            actual_digest = hasher.hexdigest()
+            if len(expected_digest) != 64 or actual_digest != expected_digest:
+                raise ValueError("managed media content no longer matches registered SHA-256")
+
         if snapshot_path.stat().st_size != copied:
             raise ValueError("managed media snapshot was not written completely")
 

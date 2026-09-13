@@ -1,3 +1,4 @@
+import hashlib
 import io
 import sys
 import tempfile
@@ -44,7 +45,7 @@ def main() -> int:
         config.UPLOAD_DIR = str(upload_root)
 
         try:
-            from sqlalchemy import event
+            from sqlalchemy import event, inspect as sa_inspect
             from werkzeug.datastructures import FileStorage
 
             from app import create_app
@@ -64,6 +65,13 @@ def main() -> int:
             app.config["TESTING"] = True
 
             with app.app_context():
+                media_columns = {column["name"] for column in sa_inspect(db.engine).get_columns("media_files")}
+                failures += check(
+                    "media schema carries nullable content identity",
+                    "content_sha256" in media_columns,
+                    str(sorted(media_columns)),
+                )
+
                 project = Project(name="Media integrity")
                 db.session.add(project)
                 db.session.commit()
@@ -72,8 +80,9 @@ def main() -> int:
                 interview = Interview(project_id=project_id, notes="success")
                 db.session.add(interview)
                 db.session.flush()
+                original_bytes = b"fake-media-bytes"
                 storage = FileStorage(
-                    stream=io.BytesIO(b"fake-media-bytes"),
+                    stream=io.BytesIO(original_bytes),
                     filename="sample.mp3",
                     content_type="audio/mpeg",
                 )
@@ -84,15 +93,17 @@ def main() -> int:
                     mime_type=storage.content_type,
                 )
                 media_path = Path(get_media_full_path(media))
+                expected_sha256 = hashlib.sha256(original_bytes).hexdigest()
                 failures += check(
-                    "successful media upload keeps file and DB row aligned",
+                    "successful media upload binds DB metadata to exact written bytes",
                     media.id is not None
                     and media.interview_id == interview.id
                     and media_file_exists(media)
-                    and media_path.read_bytes() == b"fake-media-bytes"
-                    and media.file_size_bytes == len(b"fake-media-bytes")
+                    and media_path.read_bytes() == original_bytes
+                    and media.file_size_bytes == len(original_bytes)
+                    and media.content_sha256 == expected_sha256
                     and "\\" not in media.stored_path,
-                    f"media_id={media.id} stored_path={media.stored_path}",
+                    f"media_id={media.id} stored_path={media.stored_path} sha={media.content_sha256}",
                 )
 
                 snapshot = create_media_read_snapshot(media)
@@ -107,7 +118,7 @@ def main() -> int:
                     id_dir.rename(saved_id_dir)
                     id_dir.mkdir()
                     (id_dir / media_path.name).write_bytes(b"replacement-media")
-                    snapshot_survived_replacement = snapshot_path.read_bytes() == b"fake-media-bytes"
+                    snapshot_survived_replacement = snapshot_path.read_bytes() == original_bytes
                 finally:
                     snapshot.close()
                     snapshot_removed = not snapshot_path.exists()
@@ -119,8 +130,8 @@ def main() -> int:
                     if saved_id_dir.exists():
                         saved_id_dir.rename(id_dir)
                 failures += check(
-                    "transcription media snapshot is private stable input and cleans up",
-                    snapshot_initial == b"fake-media-bytes"
+                    "in-flight transcription snapshot remains stable after managed pathname replacement",
+                    snapshot_initial == original_bytes
                     and snapshot_outside_uploads
                     and snapshot_survived_replacement
                     and snapshot_removed,
@@ -128,6 +139,42 @@ def main() -> int:
                         f"outside={snapshot_outside_uploads} "
                         f"stable={snapshot_survived_replacement} removed={snapshot_removed}"
                     ),
+                )
+
+                tampered_bytes = b"tampered-media!!"
+                failures += check(
+                    "tamper fixture preserves size so SHA-256 is the deciding identity check",
+                    len(tampered_bytes) == len(original_bytes),
+                    f"original={len(original_bytes)} tampered={len(tampered_bytes)}",
+                )
+                media_path.unlink()
+                media_path.write_bytes(tampered_bytes)
+                tamper_rejected = False
+                try:
+                    create_media_read_snapshot(media)
+                except ValueError as exc:
+                    tamper_rejected = "SHA-256" in str(exc)
+                finally:
+                    media_path.unlink(missing_ok=True)
+                    media_path.write_bytes(original_bytes)
+                failures += check(
+                    "same-size regular-file replacement is rejected before transcription",
+                    tamper_rejected,
+                )
+
+                persisted_digest = media.content_sha256
+                media.content_sha256 = None
+                db.session.commit()
+                legacy_snapshot = create_media_read_snapshot(media)
+                try:
+                    legacy_ok = Path(legacy_snapshot.full_path).read_bytes() == original_bytes
+                finally:
+                    legacy_snapshot.close()
+                media.content_sha256 = persisted_digest
+                db.session.commit()
+                failures += check(
+                    "legacy media rows without a stored digest remain readable but are not backfilled",
+                    legacy_ok and media.content_sha256 == expected_sha256,
                 )
 
                 tracked_open: dict[str, object] = {}
@@ -253,16 +300,21 @@ def main() -> int:
 
             interviews_source = (repo_root / "routes" / "interviews.py").read_text(encoding="utf-8")
             transcription_source = (repo_root / "services" / "transcription.py").read_text(encoding="utf-8")
+            app_source = (repo_root / "app.py").read_text(encoding="utf-8")
             failures += check(
                 "interview upload route uses managed media registration",
                 "save_and_register_media(" in interviews_source,
             )
             failures += check(
-                "transcription uses stable managed-media snapshots instead of reopening upload paths",
+                "transcription uses verified managed-media snapshots instead of reopening upload paths",
                 transcription_source.count("create_media_read_snapshot(media)") == 2
                 and "get_media_full_path(media)" not in transcription_source
                 and transcription_source.count("media_snapshot.close()") == 2
                 and "os.path.join(config.UPLOAD_DIR, media.stored_path)" not in transcription_source,
+            )
+            failures += check(
+                "legacy databases receive the media content identity column additively",
+                "ALTER TABLE media_files ADD COLUMN content_sha256 TEXT" in app_source,
             )
 
         finally:
