@@ -81,7 +81,7 @@ def _restrict_permissions(path: Path, mode: int) -> None:
 
 def _sync_file_data(path: Path) -> None:
     """Force validated archive bytes to stable storage before publication."""
-    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags = os.O_RDWR | int(getattr(os, "O_BINARY", 0))
     fd = os.open(path, flags)
     try:
         os.fsync(fd)
