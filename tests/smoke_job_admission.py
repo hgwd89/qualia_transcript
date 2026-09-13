@@ -1,3 +1,4 @@
+import ast
 import sys
 import tempfile
 import threading
@@ -13,6 +14,22 @@ def check(name: str, ok: bool, detail: str = "") -> int:
     return 0 if ok else 1
 
 
+def _uses_legacy_admission(source_text: str) -> bool:
+    """Detect real imports/calls without treating comments or strings as call sites."""
+    tree = ast.parse(source_text)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "services.processing_jobs":
+            if any(alias.name == "create_or_get_active_job" for alias in node.names):
+                return True
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "create_or_get_active_job":
+                return True
+            if isinstance(func, ast.Attribute) and func.attr == "create_or_get_active_job":
+                return True
+    return False
+
+
 def main() -> int:
     failures = 0
     repo_root = Path(__file__).resolve().parents[1]
@@ -20,6 +37,7 @@ def main() -> int:
         sys.path.insert(0, str(repo_root))
 
     legacy_callers = []
+    parse_errors = []
     for folder_name in ("routes", "services", "scripts"):
         folder = repo_root / folder_name
         for source_path in folder.rglob("*.py"):
@@ -27,10 +45,17 @@ def main() -> int:
                 continue
             try:
                 source_text = source_path.read_text(encoding="utf-8")
-            except OSError:
-                continue
-            if "create_or_get_active_job" in source_text:
-                legacy_callers.append(source_path.relative_to(repo_root).as_posix())
+                if _uses_legacy_admission(source_text):
+                    legacy_callers.append(source_path.relative_to(repo_root).as_posix())
+            except (OSError, SyntaxError) as exc:
+                parse_errors.append(
+                    f"{source_path.relative_to(repo_root).as_posix()}: {type(exc).__name__}: {exc}"
+                )
+    failures += check(
+        "operational Python sources are parseable for admission-boundary audit",
+        not parse_errors,
+        "; ".join(parse_errors),
+    )
     failures += check(
         "operational code does not bypass authoritative job admission",
         not legacy_callers,
