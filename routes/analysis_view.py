@@ -15,6 +15,7 @@ from services.analysis_review import set_analysis_review_status
 from services.job_admission import admit_processing_job
 from services.job_recovery import recover_stale_jobs
 from services.processing_jobs import launch_job_worker
+from services.project_flow_scope import ProjectFlowScopeError, resolve_integrated_analysis_scope
 
 bp = Blueprint("analysis_view", __name__)
 _PROJECT_ANALYSIS_JOB_TYPES = {"analyze_cross", "analyze_integrated"}
@@ -27,6 +28,22 @@ def _parse(a: AIAnalysis) -> dict:
             content = json.loads(a.content_json)
         except (json.JSONDecodeError, TypeError):
             pass
+
+    # Cross-participant analyses are scoped by canonical question_id. Surface the
+    # owning flow identity on every result view so reused question codes/text
+    # across flow versions cannot become visually indistinguishable after save.
+    if a.analysis_type == "cross_participant" and a.question_id is not None:
+        question = db.session.get(InterviewFlowQuestion, int(a.question_id))
+        flow = question.section.flow if question and question.section else None
+        if flow is not None:
+            flow_label = str(flow.title or f"Flow {flow.id}")
+            if flow.version:
+                flow_label += f" v{flow.version}"
+            flow_label += f" [flow_id:{int(flow.id)}]"
+            suffix = f" — {flow_label}"
+            if suffix not in str(a.title or ""):
+                a.title = f"{a.title or '横断分析'}{suffix}"
+
     return {"obj": a, "content": content}
 
 
@@ -91,6 +108,15 @@ def _queue_project_analysis(project_id: int, job_type: str, *, question_id: int 
     return _queued_response(job, created=True, worker_pid=pid)
 
 
+def _integrated_scope_error_payload(exc: ProjectFlowScopeError) -> dict:
+    return {
+        "ok": False,
+        "error": str(exc),
+        "scope_error_code": exc.code,
+        "interview_ids": exc.interview_ids,
+    }
+
+
 @bp.route("/projects/<int:project_id>/analysis")
 def index(project_id):
     project = Project.query.get_or_404(project_id)
@@ -108,13 +134,29 @@ def index(project_id):
     ).order_by(AIAnalysis.created_at.desc()).all()
     integrated = _parse(integrated_list[0]) if integrated_list else None
 
-    # フロー質問一覧（横断分析トリガー用）
-    flows = project.interview_flows
+    # 横断分析は各質問IDで正本化されるため、全flowを明示して選択可能にする。
     questions = []
-    if flows:
-        for section in flows[0].sections:
-            for q in section.questions:
-                questions.append({"obj": q, "section_title": section.title})
+    for flow in sorted(project.interview_flows, key=lambda item: int(item.id)):
+        for section in sorted(flow.sections, key=lambda item: (int(item.seq or 0), int(item.id))):
+            for question in sorted(section.questions, key=lambda item: (int(item.seq or 0), int(item.id))):
+                questions.append({
+                    "obj": question,
+                    "section_title": section.title,
+                    "flow_id": int(flow.id),
+                    "flow_title": f"{flow.title or f'Flow #{int(flow.id)}'} [flow_id:{int(flow.id)}]",
+                    "flow_version": flow.version,
+                })
+
+    integrated_scope = None
+    integrated_scope_error = None
+    try:
+        integrated_scope = resolve_integrated_analysis_scope(project)
+    except ProjectFlowScopeError as exc:
+        integrated_scope_error = {
+            "code": exc.code,
+            "message": str(exc),
+            "interview_ids": exc.interview_ids,
+        }
 
     return render_template(
         "analysis/index.html",
@@ -123,6 +165,8 @@ def index(project_id):
         cross_participant=cross_participant,
         integrated=integrated,
         questions=questions,
+        integrated_scope=integrated_scope,
+        integrated_scope_error=integrated_scope_error,
     )
 
 
@@ -197,7 +241,11 @@ def run_cross(project_id, question_id):
 
 @bp.route("/api/projects/<int:project_id>/analyze/integrated", methods=["POST"])
 def run_integrated(project_id):
-    Project.query.get_or_404(project_id)
+    project = Project.query.get_or_404(project_id)
+    try:
+        resolve_integrated_analysis_scope(project)
+    except ProjectFlowScopeError as exc:
+        return jsonify(_integrated_scope_error_payload(exc)), 409
     return _queue_project_analysis(project_id, "analyze_integrated")
 
 

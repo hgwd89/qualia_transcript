@@ -191,6 +191,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] question code identity/evidence-scope smoke checks passed."
 
+Write-Host "[INFO] Running project flow scope smoke check..."
+python tests/smoke_project_flow_scope.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] project flow scope smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] project flow scope smoke checks passed."
+
 Write-Host "[INFO] Running interview creation scope smoke check..."
 python tests/smoke_interview_create_scope.py
 if ($LASTEXITCODE -ne 0) {
