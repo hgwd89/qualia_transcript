@@ -56,3 +56,6 @@ jobs:
 
       - name: Run POSIX snapshot fencing regression
         run: python tests/smoke_backup_snapshot_fencing.py
+
+      - name: Run POSIX managed-storage read fencing regression
+        run: python tests/smoke_linked_storage_guards.py

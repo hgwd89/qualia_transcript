@@ -183,13 +183,80 @@ def main() -> int:
                     invalid_rejected and not file_exists(malicious) and outside.is_file(),
                 )
 
+                legacy = GeneratedFile(
+                    project_id=project_id,
+                    file_type="analysis",
+                    file_format="xlsx",
+                    original_filename=None,
+                    stored_path=gf.stored_path,
+                )
+                db.session.add(legacy)
+                db.session.commit()
+
                 client = app.test_client()
+                normal_response = client.get(f"/api/outputs/{gf.id}/download")
+                normal_status = normal_response.status_code
+                normal_data = normal_response.data
+                normal_headers = dict(normal_response.headers)
+                normal_response.close()
+                failures += check(
+                    "download route streams registered managed file bytes",
+                    normal_status == 200 and normal_data == b"generated",
+                    f"status={normal_status} bytes={len(normal_data)}",
+                )
+                failures += check(
+                    "download route preserves length modification and etag metadata",
+                    normal_headers.get("Content-Length") == "9"
+                    and bool(normal_headers.get("Last-Modified"))
+                    and bool(normal_headers.get("ETag")),
+                    (
+                        f"length={normal_headers.get('Content-Length')} "
+                        f"last_modified={normal_headers.get('Last-Modified')} "
+                        f"etag={normal_headers.get('ETag')}"
+                    ),
+                )
+
+                range_response = client.get(
+                    f"/api/outputs/{gf.id}/download",
+                    headers={"Range": "bytes=2-4"},
+                )
+                range_status = range_response.status_code
+                range_data = range_response.data
+                range_headers = dict(range_response.headers)
+                range_response.close()
+                failures += check(
+                    "download route preserves byte-range behavior",
+                    range_status == 206
+                    and range_data == b"ner"
+                    and range_headers.get("Content-Range") == "bytes 2-4/9"
+                    and range_headers.get("Content-Length") == "3"
+                    and range_headers.get("Accept-Ranges") == "bytes",
+                    (
+                        f"status={range_status} data={range_data!r} "
+                        f"range={range_headers.get('Content-Range')}"
+                    ),
+                )
+
+                legacy_response = client.get(f"/api/outputs/{legacy.id}/download")
+                legacy_status = legacy_response.status_code
+                legacy_data = legacy_response.data
+                legacy_disposition = legacy_response.headers.get("Content-Disposition", "")
+                legacy_response.close()
+                failures += check(
+                    "download route supports legacy rows without original filename",
+                    legacy_status == 200
+                    and legacy_data == b"generated"
+                    and Path(gf.stored_path).name in legacy_disposition,
+                    f"status={legacy_status} disposition={legacy_disposition}",
+                )
+
                 response = client.get(f"/api/outputs/{malicious.id}/download")
                 failures += check(
                     "download route rejects escaped stored_path",
                     response.status_code == 404 and outside.is_file(),
                     f"status={response.status_code}",
                 )
+                response.close()
 
                 invalid_name_raised = False
                 try:

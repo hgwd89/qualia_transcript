@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -18,6 +19,14 @@ def raises_value_error(fn) -> bool:
     return False
 
 
+def read_and_close(fn) -> bytes:
+    opened = fn()
+    try:
+        return opened.stream.read()
+    finally:
+        opened.close()
+
+
 def main() -> int:
     failures = 0
     repo_root = Path(__file__).resolve().parents[1]
@@ -32,6 +41,9 @@ def main() -> int:
     original_output = config.OUTPUT_DIR
     original_upload = config.UPLOAD_DIR
     original_detector = storage_paths.is_link_or_reparse
+    original_os_open = storage_paths.os.open
+    original_supports_pinned = storage_paths._supports_pinned_posix_read
+    supports_pinned_posix = original_supports_pinned()
 
     with tempfile.TemporaryDirectory(prefix="qualia_link_guard_") as tmp:
         root = Path(tmp)
@@ -45,6 +57,67 @@ def main() -> int:
                 Path(output.full_path).parent == Path(config.OUTPUT_DIR).resolve() / "1"
                 and Path(media.full_path).parent == Path(config.UPLOAD_DIR).resolve() / "2",
             )
+
+            output_path = Path(output.full_path)
+            output_path.write_bytes(b"inside-managed-file")
+            failures += check(
+                "managed reader returns the expected regular file",
+                read_and_close(
+                    lambda: storage_paths.open_managed_file_for_read(
+                        config.OUTPUT_DIR,
+                        output.stored_path,
+                    )
+                )
+                == b"inside-managed-file",
+            )
+
+            if supports_pinned_posix:
+                race_target = prepare_output_target(3, "race.bin")
+                race_path = Path(race_target.full_path)
+                race_path.write_bytes(b"pinned-inside")
+                outside_dir = root / "outside-tree"
+                outside_dir.mkdir()
+                (outside_dir / race_path.name).write_bytes(b"outside-redirection")
+                id_dir = race_path.parent
+                saved_dir = id_dir.with_name(f"{id_dir.name}.pinned-original")
+                swapped = False
+
+                def racing_open(path, flags, *args, **kwargs):
+                    nonlocal swapped
+                    if (
+                        not swapped
+                        and kwargs.get("dir_fd") is not None
+                        and str(path) == race_path.name
+                        and not (flags & getattr(os, "O_DIRECTORY", 0))
+                    ):
+                        id_dir.rename(saved_dir)
+                        os.symlink(outside_dir, id_dir, target_is_directory=True)
+                        swapped = True
+                    return original_os_open(path, flags, *args, **kwargs)
+
+                # Monkeypatching storage_paths.os.open mutates the shared os module,
+                # so preserve the capability decision made with the real os.open.
+                storage_paths._supports_pinned_posix_read = lambda: supports_pinned_posix
+                storage_paths.os.open = racing_open
+                try:
+                    raced_data = read_and_close(
+                        lambda: storage_paths.open_managed_file_for_read(
+                            config.OUTPUT_DIR,
+                            race_target.stored_path,
+                        )
+                    )
+                finally:
+                    storage_paths.os.open = original_os_open
+                    storage_paths._supports_pinned_posix_read = original_supports_pinned
+                    if id_dir.is_symlink():
+                        id_dir.unlink()
+                    if saved_dir.exists():
+                        saved_dir.rename(id_dir)
+                failures += check(
+                    "POSIX managed reader stays on pinned parent after pathname replacement",
+                    swapped and raced_data == b"pinned-inside",
+                    f"swapped={swapped} data={raced_data!r}",
+                )
 
             def fake_link_detector(path: Path) -> bool:
                 return path.name in {"7", "8", "linked.xlsx"}
@@ -72,6 +145,8 @@ def main() -> int:
                 ),
             )
         finally:
+            storage_paths.os.open = original_os_open
+            storage_paths._supports_pinned_posix_read = original_supports_pinned
             storage_paths.is_link_or_reparse = original_detector
             config.OUTPUT_DIR = original_output
             config.UPLOAD_DIR = original_upload
@@ -81,6 +156,29 @@ def main() -> int:
         "Windows reparse-point detection is part of the guard",
         "FILE_ATTRIBUTE_REPARSE_POINT" in helper_source
         and "path.is_symlink()" in helper_source,
+    )
+    failures += check(
+        "POSIX managed reads descend through pinned no-follow descriptors",
+        "dir_fd=parent_fd" in helper_source
+        and "os.O_NOFOLLOW" in helper_source
+        and "_open_posix_directory_chain" in helper_source,
+    )
+    failures += check(
+        "Windows managed reads deny write/delete sharing while pinning components",
+        "file_flag_open_reparse_point = 0x00200000" in helper_source
+        and "file_share_read = 0x00000001" in helper_source
+        and "file_share_write =" not in helper_source
+        and "file_share_delete =" not in helper_source
+        and "_open_windows_directory_chain" in helper_source,
+    )
+
+    route_source = (repo_root / "routes" / "outputs.py").read_text(encoding="utf-8")
+    failures += check(
+        "output download streams from the pinned managed reader",
+        "open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)" in route_source
+        and "response.call_on_close(opened.close)" in route_source
+        and "response.make_conditional(" in route_source
+        and "os.path.isfile(full_path)" not in route_source,
     )
 
     if failures:
