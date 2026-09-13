@@ -15,7 +15,11 @@ from models import db
 from models.generated_file import GeneratedFile
 from models.interview import Interview
 from models.speaker_assignment import SpeakerAssignment
-from services.file_manager import prepare_output_target, register_generated_file
+from services.file_manager import (
+    open_output_target_for_write,
+    prepare_output_target,
+    register_generated_file,
+)
 
 
 ROLE_LABELS = {
@@ -124,7 +128,11 @@ def generate_verbatim(interview_id: int) -> GeneratedFile:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"発言録_{participant.participant_code if participant else 'unknown'}_{ts}.docx"
     target = prepare_output_target(interview.project_id, filename)
-    doc.save(target.full_path)
+    opened = open_output_target_for_write(target)
+    try:
+        doc.save(opened.stream)
+    finally:
+        opened.close()
     return register_generated_file(
         target,
         project_id=project.id,

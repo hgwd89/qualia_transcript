@@ -11,6 +11,7 @@ from models import db
 from models.interview import Interview, MediaFile
 from services.storage_paths import (
     ensure_managed_id_dir,
+    open_managed_file_for_create,
     open_managed_file_for_read,
     resolve_managed_path,
 )
@@ -92,11 +93,20 @@ def prepare_media_upload_target(interview_id: int, original_filename: str) -> Me
     )
 
 
-def _discard_target(target: MediaUploadTarget) -> None:
+def _discard_target_if_same_generation(
+    target: MediaUploadTarget,
+    expected: os.stat_result | None,
+) -> None:
+    """Best-effort cleanup without unlinking a pathname-replacement successor."""
+    if expected is None:
+        return
     try:
         path = _resolve_stored_path(target.stored_path)
-        if path == Path(target.full_path).resolve():
-            path.unlink(missing_ok=True)
+        if path != Path(target.full_path).resolve() or not path.is_file():
+            return
+        if _file_generation(path.stat()) != _file_generation(expected):
+            return
+        path.unlink(missing_ok=True)
     except (OSError, ValueError):
         pass
 
@@ -111,22 +121,41 @@ def save_and_register_media(
     """Save media and atomically commit its DB metadata as far as one DB allows.
 
     Filesystem and database cannot share one transaction. The function therefore
-    removes a partial/saved upload whenever file saving or the DB commit fails.
-    The caller's pending Interview row is committed in the same DB transaction as
-    the MediaFile row. Interview ID directories must be normal directories rather
-    than symlinks or Windows junction/reparse points.
+    removes a partial/saved upload whenever file saving or the DB commit fails, but
+    rollback cleanup is allowed to unlink only the exact generation written by this
+    call. The upload itself is created through the ancestry-pinned managed write
+    boundary rather than reopening a validated pathname.
     """
     if interview.id is None:
         raise ValueError("interview must be flushed before media upload")
 
     target = prepare_media_upload_target(interview.id, original_filename)
+    written_stat = None
     try:
-        file_storage.save(target.full_path)
+        opened = open_managed_file_for_create(config.UPLOAD_DIR, target.stored_path)
+        try:
+            file_storage.save(opened.stream)
+            opened.stream.flush()
+            written_stat = os.fstat(opened.stream.fileno())
+        finally:
+            if written_stat is None and not opened.stream.closed:
+                try:
+                    opened.stream.flush()
+                    written_stat = os.fstat(opened.stream.fileno())
+                except OSError:
+                    pass
+            opened.close()
+
+        if written_stat is None:
+            raise RuntimeError("uploaded media write did not complete")
+
         full_path = _resolve_stored_path(target.stored_path)
         if full_path != Path(target.full_path).resolve():
             raise ValueError("uploaded media target path changed")
         if not full_path.is_file():
             raise FileNotFoundError("uploaded media file was not created")
+        if _file_generation(full_path.stat()) != _file_generation(written_stat):
+            raise ValueError("uploaded media target changed after write")
 
         media = MediaFile(
             interview_id=int(interview.id),
@@ -138,14 +167,14 @@ def save_and_register_media(
                 else "video"
             ),
             mime_type=mime_type,
-            file_size_bytes=full_path.stat().st_size,
+            file_size_bytes=int(written_stat.st_size),
         )
         db.session.add(media)
         db.session.commit()
         return media
     except Exception:
         db.session.rollback()
-        _discard_target(target)
+        _discard_target_if_same_generation(target, written_stat)
         raise
 
 

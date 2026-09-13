@@ -27,6 +27,15 @@ def read_and_close(fn) -> bytes:
         opened.close()
 
 
+def write_and_close(fn, data: bytes) -> None:
+    opened = fn()
+    try:
+        opened.stream.write(data)
+        opened.stream.flush()
+    finally:
+        opened.close()
+
+
 def main() -> int:
     failures = 0
     repo_root = Path(__file__).resolve().parents[1]
@@ -119,6 +128,59 @@ def main() -> int:
                     f"swapped={swapped} data={raced_data!r}",
                 )
 
+                write_target = prepare_output_target(4, "write-race.bin")
+                write_path = Path(write_target.full_path)
+                write_outside = root / "outside-write-tree"
+                write_outside.mkdir()
+                write_id_dir = write_path.parent
+                write_saved_dir = write_id_dir.with_name(
+                    f"{write_id_dir.name}.pinned-write-original"
+                )
+                write_swapped = False
+
+                def racing_create(path, flags, *args, **kwargs):
+                    nonlocal write_swapped
+                    if (
+                        not write_swapped
+                        and kwargs.get("dir_fd") is not None
+                        and str(path) == write_path.name
+                        and bool(flags & getattr(os, "O_CREAT", 0))
+                    ):
+                        write_id_dir.rename(write_saved_dir)
+                        os.symlink(write_outside, write_id_dir, target_is_directory=True)
+                        write_swapped = True
+                    return original_os_open(path, flags, *args, **kwargs)
+
+                storage_paths._supports_pinned_posix_read = lambda: supports_pinned_posix
+                storage_paths.os.open = racing_create
+                try:
+                    write_and_close(
+                        lambda: storage_paths.open_managed_file_for_create(
+                            config.OUTPUT_DIR,
+                            write_target.stored_path,
+                        ),
+                        b"pinned-write",
+                    )
+                    pinned_written = (write_saved_dir / write_path.name).read_bytes()
+                    redirected_exists = (write_outside / write_path.name).exists()
+                finally:
+                    storage_paths.os.open = original_os_open
+                    storage_paths._supports_pinned_posix_read = original_supports_pinned
+                    if write_id_dir.is_symlink():
+                        write_id_dir.unlink()
+                    if write_saved_dir.exists():
+                        write_saved_dir.rename(write_id_dir)
+                failures += check(
+                    "POSIX managed writer creates beneath pinned parent after pathname replacement",
+                    write_swapped
+                    and pinned_written == b"pinned-write"
+                    and not redirected_exists,
+                    (
+                        f"swapped={write_swapped} data={pinned_written!r} "
+                        f"redirected={redirected_exists}"
+                    ),
+                )
+
             def fake_link_detector(path: Path) -> bool:
                 return path.name in {"7", "8", "linked.xlsx"}
 
@@ -158,18 +220,57 @@ def main() -> int:
         and "path.is_symlink()" in helper_source,
     )
     failures += check(
-        "POSIX managed reads descend through pinned no-follow descriptors",
+        "POSIX managed reads and creates descend through pinned no-follow descriptors",
         "dir_fd=parent_fd" in helper_source
         and "os.O_NOFOLLOW" in helper_source
-        and "_open_posix_directory_chain" in helper_source,
+        and "os.O_EXCL" in helper_source
+        and "_open_posix_directory_chain" in helper_source
+        and "open_managed_file_for_create" in helper_source,
     )
     failures += check(
-        "Windows managed reads deny write/delete sharing while pinning components",
+        "Windows managed reads and creates deny write/delete sharing while pinning components",
         "file_flag_open_reparse_point = 0x00200000" in helper_source
         and "file_share_read = 0x00000001" in helper_source
         and "file_share_write =" not in helper_source
         and "file_share_delete =" not in helper_source
+        and "create_new = 1" in helper_source
+        and "_windows_create_file_handle" in helper_source
         and "_open_windows_directory_chain" in helper_source,
+    )
+
+    writer_paths = [
+        "services/report_verbatim.py",
+        "services/report_formatted.py",
+        "services/report_analysis.py",
+        "services/report_approved_analysis.py",
+    ]
+    writer_sources = {
+        path: (repo_root / path).read_text(encoding="utf-8")
+        for path in writer_paths
+    }
+    failures += check(
+        "all generated-output writers use the pinned create boundary",
+        all(
+            "open_output_target_for_write" in source
+            and ".save(target.full_path)" not in source
+            and "open(target.full_path" not in source
+            for source in writer_sources.values()
+        ),
+        ", ".join(
+            path
+            for path, source in writer_sources.items()
+            if "open_output_target_for_write" not in source
+            or ".save(target.full_path)" in source
+            or "open(target.full_path" in source
+        ),
+    )
+
+    upload_source = (repo_root / "services" / "upload_manager.py").read_text(encoding="utf-8")
+    failures += check(
+        "media upload writes through the pinned create boundary",
+        "open_managed_file_for_create(config.UPLOAD_DIR, target.stored_path)" in upload_source
+        and "file_storage.save(opened.stream)" in upload_source
+        and "file_storage.save(target.full_path)" not in upload_source,
     )
 
     route_source = (repo_root / "routes" / "outputs.py").read_text(encoding="utf-8")
