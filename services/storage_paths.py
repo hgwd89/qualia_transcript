@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
+from typing import BinaryIO
 
 
 def is_link_or_reparse(path: Path) -> bool:
@@ -30,23 +32,31 @@ def _validated_relative(stored_path: str) -> Path:
     return relative
 
 
-def resolve_managed_path(root_value: str | Path, stored_path: str) -> Path:
-    """Resolve one managed path without accepting linked/reparse components.
-
-    The configured root itself may resolve through an operator-controlled link, but
-    every path component below that resolved root must be a normal filesystem entry.
-    This prevents a project/interview ID directory (or stored file) from redirecting
-    reads/writes into a sibling ID directory through a symlink or Windows junction.
-    """
-    root = _managed_root(root_value)
-    relative = _validated_relative(stored_path)
-    lexical = root / relative
-
+def _assert_unlinked_components(root: Path, relative: Path) -> None:
     current = root
     for part in relative.parts:
         current = current / part
         if is_link_or_reparse(current):
             raise ValueError("managed storage path contains a linked/reparse entry")
+
+
+def _file_identity(info) -> tuple[int, int, int, int, int]:
+    return (
+        int(getattr(info, "st_dev", 0) or 0),
+        int(getattr(info, "st_ino", 0) or 0),
+        int(getattr(info, "st_size", 0) or 0),
+        int(getattr(info, "st_mtime_ns", 0) or 0),
+        int(getattr(info, "st_ctime_ns", 0) or 0),
+    )
+
+
+def resolve_managed_path(root_value: str | Path, stored_path: str) -> Path:
+    """Resolve one managed path without accepting linked/reparse components."""
+    root = _managed_root(root_value)
+    relative = _validated_relative(stored_path)
+    lexical = root / relative
+
+    _assert_unlinked_components(root, relative)
 
     try:
         candidate = lexical.resolve()
@@ -54,6 +64,50 @@ def resolve_managed_path(root_value: str | Path, stored_path: str) -> Path:
     except (OSError, RuntimeError, ValueError) as exc:
         raise ValueError("managed storage path escapes root") from exc
     return candidate
+
+
+def open_managed_file_for_read(root_value: str | Path, stored_path: str) -> BinaryIO:
+    """Open a regular managed file and return the validated open handle."""
+    root = _managed_root(root_value)
+    relative = _validated_relative(stored_path)
+    lexical = root / relative
+
+    _assert_unlinked_components(root, relative)
+    try:
+        candidate = lexical.resolve()
+        candidate.relative_to(root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("managed storage path escapes root") from exc
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0) or 0)
+    fd = os.open(os.fspath(lexical), flags)
+    try:
+        opened_info = os.fstat(fd)
+        if not stat.S_ISREG(opened_info.st_mode):
+            raise ValueError("managed storage path is not a regular file")
+
+        _assert_unlinked_components(root, relative)
+        try:
+            current_info = lexical.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError("managed storage file disappeared during open") from exc
+        if not stat.S_ISREG(current_info.st_mode):
+            raise ValueError("managed storage path is not a regular file")
+        if _file_identity(opened_info) != _file_identity(current_info):
+            raise ValueError("managed storage file changed during open")
+
+        try:
+            current_resolved = lexical.resolve()
+            current_resolved.relative_to(root)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError("managed storage path escapes root") from exc
+
+        file_obj = os.fdopen(fd, "rb", closefd=True)
+        fd = -1
+        return file_obj
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def ensure_managed_id_dir(root_value: str | Path, value: int) -> Path:
