@@ -121,7 +121,13 @@ def stale_reason(
 
 
 def _unchanged_active_query(job: ProcessingJob):
-    """Return a CAS query for the exact active state recovery inspected."""
+    """Return a CAS query for the exact active state recovery inspected.
+
+    `started_at` is part of the token because retry admission can reuse the same
+    durable row while leaving status, attempt_count, and worker_pid unchanged.
+    Without the current-attempt anchor, a stale recovery observation could match
+    a later `failed -> pending` retry cycle before the worker increments attempt.
+    """
     query = (
         ProcessingJob.query
         .filter(ProcessingJob.id == int(job.id))
@@ -132,6 +138,10 @@ def _unchanged_active_query(job: ProcessingJob):
         query = query.filter(ProcessingJob.worker_pid.is_(None))
     else:
         query = query.filter(ProcessingJob.worker_pid == int(job.worker_pid))
+    if job.started_at is None:
+        query = query.filter(ProcessingJob.started_at.is_(None))
+    else:
+        query = query.filter(ProcessingJob.started_at == job.started_at)
     return query
 
 
@@ -144,8 +154,8 @@ def _mark_job_failed_if_unchanged(
     Recovery performs an OS liveness check outside the database transaction.
     During that gap the worker may finish, a launcher may attach a PID, or the
     job may be retried and claimed by a newer attempt. Treat the observed
-    status/attempt/PID as a compare-and-swap token so an old recovery decision
-    cannot overwrite newer durable state.
+    status/attempt/PID/current-attempt anchor as a compare-and-swap token so an
+    old recovery decision cannot overwrite newer durable state.
     """
     if str(job.status) not in ACTIVE_STATUSES:
         db.session.expire_all()
