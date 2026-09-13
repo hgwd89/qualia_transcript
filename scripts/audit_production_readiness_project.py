@@ -125,11 +125,37 @@ def _project_exists(db_path: Path, project_id: int) -> bool:
 
 def _filter_job_issue_list(items: list[dict], code: str, project_id: int) -> list[dict]:
     result: list[dict] = []
+    project_key = str(int(project_id))
     for item in items:
         if item.get("code") != code:
             result.append(item)
             continue
         context = dict(item.get("context") or {})
+
+        # Semantic job-scope diagnostics retain exact per-project counts and a
+        # bounded project sample before the global diagnostic list is truncated.
+        # Prefer that metadata so project readiness cannot miss a project's rows
+        # merely because another project's first 200 rows filled the global sample.
+        project_counts = context.get("project_counts")
+        project_samples = context.get("project_samples")
+        if isinstance(project_counts, dict):
+            count = int(project_counts.get(project_key) or 0)
+            if count <= 0:
+                continue
+            samples_by_project = project_samples if isinstance(project_samples, dict) else {}
+            jobs = [
+                dict(job)
+                for job in (samples_by_project.get(project_key) or [])
+            ]
+            context["jobs"] = jobs
+            context["count"] = count
+            context.pop("project_counts", None)
+            context.pop("project_samples", None)
+            updated = dict(item)
+            updated["context"] = context
+            result.append(updated)
+            continue
+
         jobs = [
             dict(job) for job in (context.get("jobs") or [])
             if int(job.get("project_id") or -1) == int(project_id)
