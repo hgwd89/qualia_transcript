@@ -31,6 +31,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] generated-file integrity smoke checks passed."
 
+Write-Host "[INFO] Running generated-output write fencing smoke check..."
+python tests/smoke_generated_output_write_fencing.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] generated-output write fencing smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] generated-output write fencing smoke checks passed."
+
 Write-Host "[INFO] Running media upload integrity smoke check..."
 python tests/smoke_media_upload_integrity.py
 if ($LASTEXITCODE -ne 0) {
