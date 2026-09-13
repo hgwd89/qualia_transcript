@@ -38,14 +38,14 @@ def main() -> int:
         race_source = root / "race-source"
         race_stage = root / "race-stage"
         race_source.mkdir()
-        race_file = race_source / "race.txt"
+        race_file = race_source / "collector-race.txt"
         retained_original = race_source / "race-original-retained.txt"
         race_file.write_text("original", encoding="utf-8")
         original_os_open = local_backup.os.open
         replaced = {"done": False}
 
         def replace_before_descriptor_open(path, flags, *args, **kwargs):
-            if Path(path) == race_file and not replaced["done"]:
+            if Path(path).name == "collector-race.txt" and not replaced["done"]:
                 # Keep the original file allocated so the replacement cannot
                 # accidentally reuse the same inode/file-id immediately.
                 race_file.rename(retained_original)
@@ -66,7 +66,7 @@ def main() -> int:
             replaced["done"]
             and race_rejected
             and retained_original.read_text(encoding="utf-8") == "original"
-            and not (race_stage / "uploads" / "race.txt").exists(),
+            and not (race_stage / "uploads" / "collector-race.txt").exists(),
         )
 
         linked_source = root / "linked-source"
