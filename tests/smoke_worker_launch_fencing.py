@@ -40,8 +40,10 @@ def main() -> int:
             from models import db
             from models.processing_job import ProcessingJob
             from models.project import Project
+            import routes.analysis_view as analysis_view
             import routes.transcribe as transcribe_route
             import services.processing_jobs as processing_jobs
+            import services.worker_launch_guard as launch_guard
 
             app = create_app()
             app.config["TESTING"] = True
@@ -63,27 +65,27 @@ def main() -> int:
                     db.session.commit()
                     return job
 
-                original_launch = transcribe_route.launch_job_worker
+                original_launch = launch_guard.launch_job_worker
                 try:
                     pre_spawn = new_job()
 
                     def fail_before_spawn(_job_id: int):
                         raise RuntimeError("simulated spawn failure")
 
-                    transcribe_route.launch_job_worker = fail_before_spawn
-                    error, pid = transcribe_route._launch_or_fail(pre_spawn)
+                    launch_guard.launch_job_worker = fail_before_spawn
+                    pid, launch_error = launch_guard.launch_job_or_preserve_active(pre_spawn)
                     db.session.expire_all()
                     pre_after = db.session.get(ProcessingJob, int(pre_spawn.id))
                     failures += check(
                         "definite pre-spawn failure marks the untouched pending job failed",
-                        bool(error)
-                        and "simulated spawn failure" in str(error)
+                        launch_error is not None
+                        and "simulated spawn failure" in str(launch_error)
                         and pid is None
                         and pre_after.status == "failed"
                         and pre_after.worker_pid is None
                         and "worker launch failed" in str(pre_after.error_message or ""),
                         (
-                            f"error={error!r} pid={pid!r} status={pre_after.status!r} "
+                            f"error={launch_error!r} pid={pid!r} status={pre_after.status!r} "
                             f"worker_pid={pre_after.worker_pid!r}"
                         ),
                     )
@@ -107,12 +109,12 @@ def main() -> int:
                         assert changed == 1
                         raise RuntimeError("simulated post-spawn bookkeeping failure")
 
-                    transcribe_route.launch_job_worker = fail_after_launch_reservation
+                    launch_guard.launch_job_worker = fail_after_launch_reservation
                     error, pid = transcribe_route._launch_or_fail(reserved)
                     db.session.expire_all()
                     reserved_after = db.session.get(ProcessingJob, reserved_id)
                     failures += check(
-                        "launch-reserved pending job is never overwritten failed by parent bookkeeping error",
+                        "transcription route preserves a launch-reserved pending job",
                         error is None
                         and pid is None
                         and reserved_after.status == "pending"
@@ -152,26 +154,26 @@ def main() -> int:
                         assert current.status == "running"
                         raise RuntimeError("simulated parent bookkeeping failure after child claim")
 
-                    transcribe_route.launch_job_worker = child_claims_then_parent_bookkeeping_fails
-                    error, pid = transcribe_route._launch_or_fail(claimed_job)
+                    launch_guard.launch_job_worker = child_claims_then_parent_bookkeeping_fails
+                    pid, launch_error = analysis_view._launch_or_fail(claimed_job)
                     db.session.expire_all()
                     claimed_after = db.session.get(ProcessingJob, claimed_id)
                     failures += check(
-                        "parent launcher error cannot overwrite a live claimed worker lease",
-                        error is None
+                        "analysis route cannot overwrite a live claimed worker lease",
+                        launch_error is None
                         and pid == 43211
                         and claimed_after.status == "running"
                         and int(claimed_after.attempt_count or 0) == 1
                         and int(claimed_after.worker_pid or 0) == 43211
                         and claimed_after.finished_at is None,
                         (
-                            f"error={error!r} pid={pid!r} status={claimed_after.status!r} "
+                            f"error={launch_error!r} pid={pid!r} status={claimed_after.status!r} "
                             f"attempt={claimed_after.attempt_count!r} "
                             f"worker_pid={claimed_after.worker_pid!r}"
                         ),
                     )
                 finally:
-                    transcribe_route.launch_job_worker = original_launch
+                    launch_guard.launch_job_worker = original_launch
                     db.session.remove()
                     db.engine.dispose()
 
@@ -194,6 +196,16 @@ def main() -> int:
             config.UPLOAD_DIR = original["UPLOAD_DIR"]
             config.OUTPUT_DIR = original["OUTPUT_DIR"]
             config.BACKUP_DIR = original["BACKUP_DIR"]
+
+    transcribe_source = (repo_root / "routes" / "transcribe.py").read_text(encoding="utf-8")
+    analysis_source = (repo_root / "routes" / "analysis_view.py").read_text(encoding="utf-8")
+    failures += check(
+        "all HTTP worker launch routes use the shared durable launch guard",
+        "from services.worker_launch_guard import launch_job_or_preserve_active" in transcribe_source
+        and "from services.worker_launch_guard import launch_job_or_preserve_active" in analysis_source
+        and "from services.processing_jobs import launch_job_worker" not in transcribe_source
+        and "from services.processing_jobs import launch_job_worker" not in analysis_source,
+    )
 
     if failures:
         print(f"\nSummary: FAIL ({failures} checks failed)")
