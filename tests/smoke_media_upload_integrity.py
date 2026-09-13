@@ -373,6 +373,113 @@ def main() -> int:
                     ),
                 )
 
+                stale_tr = Transcription(
+                    media_file_id=int(media.id),
+                    whisper_model="tiny",
+                    language="ja",
+                    status="pending",
+                )
+                db.session.add(stale_tr)
+                db.session.commit()
+                stale_tr_id = int(stale_tr.id)
+                model_started = False
+
+                def reject_lost_lease():
+                    raise RuntimeError("simulated durable lease loss")
+
+                def should_not_start_model(*_args, **_kwargs):
+                    nonlocal model_started
+                    model_started = True
+                    raise AssertionError("local inference started after lease loss")
+
+                fallback_rejected = False
+                with patch.object(
+                    transcription_service,
+                    "get_transcription_provider",
+                    return_value="openai",
+                ), patch.object(
+                    transcription_service,
+                    "get_fallback_provider",
+                    return_value="local_whisper",
+                ), patch.object(
+                    transcription_service,
+                    "run_openai_transcription",
+                    side_effect=RuntimeError("simulated OpenAI provider failure"),
+                ), patch.object(
+                    transcription_service,
+                    "_get_model",
+                    side_effect=should_not_start_model,
+                ):
+                    try:
+                        transcription_service.run_transcription(
+                            stale_tr_id,
+                            lease_check=reject_lost_lease,
+                        )
+                    except RuntimeError as exc:
+                        fallback_rejected = "simulated durable lease loss" in str(exc)
+
+                stale_tr = db.session.get(Transcription, stale_tr_id)
+                failures += check(
+                    "lost durable lease blocks local fallback before state mutation or CPU inference",
+                    fallback_rejected
+                    and not model_started
+                    and stale_tr.status == "pending"
+                    and stale_tr.started_at is None
+                    and Segment.query.filter_by(transcription_id=stale_tr_id).count() == 0,
+                    (
+                        f"rejected={fallback_rejected} model_started={model_started} "
+                        f"status={stale_tr.status} started_at={stale_tr.started_at}"
+                    ),
+                )
+
+                midflight_tr = Transcription(
+                    media_file_id=int(media.id),
+                    whisper_model="tiny",
+                    language="ja",
+                    status="pending",
+                )
+                db.session.add(midflight_tr)
+                db.session.commit()
+                midflight_tr_id = int(midflight_tr.id)
+                lease_calls = 0
+
+                def lose_lease_after_inference():
+                    nonlocal lease_calls
+                    lease_calls += 1
+                    if lease_calls >= 2:
+                        raise RuntimeError("simulated midflight lease loss")
+
+                with patch.object(
+                    transcription_service,
+                    "_get_model",
+                    return_value=FakeLocalModel(),
+                ):
+                    midflight_rejected = False
+                    try:
+                        transcription_service.run_local_whisper_transcription(
+                            midflight_tr_id,
+                            lease_check=lose_lease_after_inference,
+                        )
+                    except RuntimeError as exc:
+                        midflight_rejected = "simulated midflight lease loss" in str(exc)
+
+                midflight_tr = db.session.get(Transcription, midflight_tr_id)
+                midflight_snapshots, midflight_invalid = load_raw_text_snapshots(Path(config.OUTPUT_DIR))
+                failures += check(
+                    "midflight lease loss cannot create raw evidence, segments, or stale error transition",
+                    midflight_rejected
+                    and lease_calls >= 2
+                    and midflight_tr.status == "running"
+                    and midflight_tr.error_message is None
+                    and Segment.query.filter_by(transcription_id=midflight_tr_id).count() == 0
+                    and midflight_tr_id not in midflight_snapshots
+                    and not midflight_invalid,
+                    (
+                        f"rejected={midflight_rejected} lease_calls={lease_calls} "
+                        f"status={midflight_tr.status} error={midflight_tr.error_message!r}"
+                    ),
+                )
+
                 db.session.remove()
                 db.engine.dispose()
 
@@ -395,6 +502,11 @@ def main() -> int:
                 'raw_text = "".join(str(getattr(seg, "text", "") or "") for seg in local_segments)' in transcription_source
                 and 'raise RuntimeError("local Whisper transcription returned empty text")' in transcription_source
                 and 'snapshot_tag="local_whisper"' in transcription_source,
+            )
+            failures += check(
+                "local fallback inherits durable lease checks and stale errors are fenced",
+                transcription_source.count("lease_check=lease_check") >= 2
+                and transcription_source.count("If this exception reflects durable lease loss") == 2,
             )
             failures += check(
                 "legacy databases receive the media content identity column additively",
