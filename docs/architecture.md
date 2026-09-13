@@ -100,7 +100,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/analysis_review.py`: human review transitions and evidence-quote → respondent source-segment resolution.
 - `services/semantic_analysis.py`: semantic clustering and dry-run/no-ai support.
 - `services/integrated_analysis.py`: no-ai integrated analysis assembly from existing local data.
-- `services/job_admission.py`: serialized durable-job admission/retry and conflict handling.
+- `services/job_admission.py`: authoritative durable-job project/interview/question ownership and job-type scope validation, plus serialized admission/retry and conflict handling.
 - `services/processing_jobs.py`: worker launch, lease ownership, progress, execution, and terminal state handling.
 - `services/processing_result_guard.py`: crash-window reuse and canonical result-write cleanup/fencing helpers.
 - `services/storage_paths.py`: shared output/upload path validation, including symlink and Windows reparse/junction rejection below managed roots.
@@ -126,7 +126,9 @@ The settings UI exposes only configured/not-configured state for password fields
 
 Long-running transcription, mapping, participant analysis, question analysis, cross-participant analysis, integrated analysis, and project-pipeline work use `ProcessingJob` rather than executing the expensive operation inside the initiating request. The API route admits a durable job, launches a worker, returns a job ID, and the UI polls the job status endpoint. A browser reload can therefore resume observation of an existing `pending` or `running` job instead of starting the work again.
 
-`services/job_admission.py` is the concurrency boundary for new work and retries. On SQLite it acquires `BEGIN IMMEDIATE` before deciding whether a job may be admitted. Same-scope active work is reused where appropriate, incompatible active work is rejected, and a new `pending` row is created only while the write reservation is held. Retry admission uses the same serialization. This prevents two requests from independently observing an empty slot and both creating conflicting durable jobs.
+`services/job_admission.py` is the authoritative boundary for both admission concurrency and durable-job scope. On SQLite it acquires `BEGIN IMMEDIATE` before validating ownership or deciding whether a job may be admitted, so project deletion and job creation observe one serialized database snapshot. The service verifies that the project exists, that required/forbidden `interview_id` and `question_id` fields match the job type, that referenced interviews and questions belong to the job project, and, for `analyze_question`, that the question belongs to the interview's assigned flow. Failed-job retry revalidates the stored scope under the same reservation; malformed or cross-project legacy rows remain failed rather than being requeued. Operational routes/services/scripts must use this boundary rather than the legacy `create_or_get_active_job()` helper, and the required safe smoke checks that invariant through Python AST inspection.
+
+After scope validation, same-scope active work is reused where appropriate, incompatible active work is rejected, and a new `pending` row is created only while the write reservation is held. Retry admission uses the same serialization. This prevents two requests from independently observing an empty slot and both creating conflicting durable jobs.
 
 `services/processing_jobs.py` treats `status='running'` plus `attempt_count` as the worker lease. Claiming a pending job increments the attempt token. Progress updates and terminal writes are conditional on the same immutable attempt number; if stale recovery or retry has moved ownership to a later attempt, the older worker raises `JobLeaseLost` rather than continuing to publish progress or success.
 
