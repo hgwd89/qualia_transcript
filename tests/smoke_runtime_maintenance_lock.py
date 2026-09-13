@@ -80,6 +80,32 @@ def main() -> int:
                 f"{type(exc).__name__}: {exc}",
             )
 
+        class NestedFailure(RuntimeError):
+            pass
+
+        nested_propagated = False
+        try:
+            with runtime_lock("maintenance", lock_path):
+                with runtime_lock("maintenance", lock_path):
+                    raise NestedFailure("must escape nested context")
+        except NestedFailure as exc:
+            nested_propagated = str(exc) == "must escape nested context"
+        failures += check(
+            "nested same-mode runtime lock preserves with-body exceptions",
+            nested_propagated,
+        )
+
+        reacquired_after_failure = False
+        try:
+            with runtime_lock("maintenance", lock_path):
+                reacquired_after_failure = True
+        except Exception:
+            reacquired_after_failure = False
+        failures += check(
+            "nested exception unwinds reference counts and releases the outer lock",
+            reacquired_after_failure,
+        )
+
         app_child = worker_child = None
         try:
             app_child, app_ready = start_shared_child(repo_root, lock_path, "app")
@@ -131,6 +157,7 @@ def main() -> int:
     worker_text = (repo_root / "scripts" / "run_processing_job.py").read_text(encoding="utf-8")
     backup_text = (repo_root / "scripts" / "backup_local_data.py").read_text(encoding="utf-8")
     restore_text = (repo_root / "scripts" / "restore_local_data.py").read_text(encoding="utf-8")
+    runtime_lock_text = (repo_root / "services" / "runtime_lock.py").read_text(encoding="utf-8")
     failures += check(
         "local app lifetime owns shared runtime lock",
         'with runtime_lock("app")' in app_text,
@@ -146,6 +173,10 @@ def main() -> int:
     failures += check(
         "applied restore CLI owns exclusive maintenance runtime lock",
         'with runtime_lock("maintenance")' in restore_text,
+    )
+    failures += check(
+        "runtime lock finally block does not return while nested holds remain",
+        'if int(current["count"]) > 0:\n                return' not in runtime_lock_text,
     )
 
     if failures:
