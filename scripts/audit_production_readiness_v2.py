@@ -56,6 +56,7 @@ JOB_SCOPE_TABLES = {
     "interview_flow_questions",
 }
 JOB_REPORT_LIMIT = 200
+ACTIVE_JOB_REPORT_LIMIT = 100
 PROJECT_JOB_SAMPLE_LIMIT = 5
 
 
@@ -67,13 +68,7 @@ def _issue(bucket: list[dict], code: str, message: str, **context) -> None:
 
 
 def _processing_job_scope_issues(con: sqlite3.Connection) -> list[dict]:
-    """Return semantic durable-job scope violations from the real main tables.
-
-    `main.` qualification is deliberate: project-scoped readiness installs TEMP
-    VIEWs for business-table isolation, but durable-job ownership must be checked
-    against the actual referenced rows before the resulting issues are filtered
-    back to the requested project.
-    """
+    """Return semantic durable-job scope violations from the real main tables."""
     rows = con.execute(
         """
         SELECT
@@ -162,7 +157,7 @@ def _processing_job_scope_issues(con: sqlite3.Connection) -> list[dict]:
 def _processing_job_project_summary(
     jobs: list[dict],
 ) -> tuple[dict[str, int], dict[str, list[dict]]]:
-    """Retain exact scoped counts before capping the global diagnostic sample."""
+    """Retain exact scoped counts before capping a global diagnostic sample."""
     counts: dict[str, int] = {}
     samples: dict[str, list[dict]] = {}
     for job in jobs:
@@ -172,6 +167,16 @@ def _processing_job_project_summary(
         if len(bucket) < PROJECT_JOB_SAMPLE_LIMIT:
             bucket.append(dict(job))
     return counts, samples
+
+
+def _job_issue_context(jobs: list[dict], report_limit: int) -> dict:
+    project_counts, project_samples = _processing_job_project_summary(jobs)
+    return {
+        "jobs": jobs[:report_limit],
+        "count": len(jobs),
+        "project_counts": project_counts,
+        "project_samples": project_samples,
+    }
 
 
 def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
@@ -259,7 +264,7 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                         "Legacy processing_jobs.question_id has no FK or compatibility trigger guard; start the upgraded app once before professional use",
                     )
 
-                orphan_jobs = con.execute(
+                orphan_rows = con.execute(
                     """
                     SELECT pj.id, pj.project_id, pj.interview_id, pj.question_id, pj.job_type, pj.status
                     FROM main.processing_jobs pj
@@ -268,36 +273,30 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                     ORDER BY pj.id
                     """
                 ).fetchall()
+                orphan_jobs = [dict(row) for row in orphan_rows]
                 info["processing_job_question_orphan_count"] = len(orphan_jobs)
                 if orphan_jobs:
                     _issue(
                         blockers,
                         "processing_job_question_orphans",
                         "ProcessingJob rows reference missing interview-flow questions",
-                        jobs=[dict(row) for row in orphan_jobs[:JOB_REPORT_LIMIT]],
-                        count=len(orphan_jobs),
+                        **_job_issue_context(orphan_jobs, JOB_REPORT_LIMIT),
                     )
 
                 if JOB_SCOPE_TABLES.issubset(tables):
                     invalid_scope_jobs = _processing_job_scope_issues(con)
                     info["processing_job_scope_invalid_count"] = len(invalid_scope_jobs)
                     if invalid_scope_jobs:
-                        project_counts, project_samples = _processing_job_project_summary(
-                            invalid_scope_jobs
-                        )
                         _issue(
                             blockers,
                             "processing_job_scope_invalid",
                             "ProcessingJob rows violate durable job ownership or job-type scope rules",
-                            jobs=invalid_scope_jobs[:JOB_REPORT_LIMIT],
-                            count=len(invalid_scope_jobs),
-                            project_counts=project_counts,
-                            project_samples=project_samples,
+                            **_job_issue_context(invalid_scope_jobs, JOB_REPORT_LIMIT),
                         )
                 else:
                     info["processing_job_scope_invalid_count"] = 0
 
-            active_jobs = con.execute(
+            active_rows = con.execute(
                 """
                 SELECT id, project_id, interview_id, job_type, status, progress_json, created_at, started_at
                 FROM main.processing_jobs
@@ -305,14 +304,14 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 ORDER BY id
                 """
             ).fetchall()
+            active_jobs = [dict(row) for row in active_rows]
             info["active_processing_job_count"] = len(active_jobs)
             if active_jobs:
                 _issue(
                     warnings,
                     "active_processing_jobs",
                     "Processing jobs are still pending/running; wait for a quiescent dataset before final delivery",
-                    jobs=[dict(row) for row in active_jobs[:100]],
-                    count=len(active_jobs),
+                    **_job_issue_context(active_jobs, ACTIVE_JOB_REPORT_LIMIT),
                 )
 
         generated = con.execute(
