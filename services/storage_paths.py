@@ -213,7 +213,6 @@ def _windows_open_path_handle(path: Path, *, directory: bool, read_data: bool = 
     file_read_attributes = 0x00000080
     generic_read = 0x80000000
     file_share_read = 0x00000001
-    file_share_write = 0x00000002
     open_existing = 3
     file_flag_open_reparse_point = 0x00200000
     file_flag_backup_semantics = 0x02000000
@@ -235,12 +234,13 @@ def _windows_open_path_handle(path: Path, *, directory: bool, read_data: bool = 
     ]
     create_file.restype = wintypes.HANDLE
 
-    # Deliberately omit FILE_SHARE_DELETE. Once opened, a directory component
-    # cannot be renamed/deleted/replaced while this handle is retained.
+    # Permit only concurrent readers. Omitting both FILE_SHARE_WRITE and
+    # FILE_SHARE_DELETE prevents reparse metadata mutation, rename, deletion, or
+    # replacement while a managed component remains pinned by this handle.
     handle = create_file(
         str(path),
         desired_access,
-        file_share_read | file_share_write,
+        file_share_read,
         None,
         open_existing,
         flags,
@@ -372,9 +372,9 @@ def open_managed_file_for_read(root_value: str | Path, stored_path: str) -> Mana
 
     The returned stream is bound to the exact file object opened beneath the resolved
     managed root. POSIX walks with descriptor-relative ``open/stat`` and
-    ``O_NOFOLLOW``. Windows retains non-delete-sharing directory handles opened with
-    ``FILE_FLAG_OPEN_REPARSE_POINT`` while descending, preventing a component from
-    being renamed/replaced between validation and final-file acquisition.
+    ``O_NOFOLLOW``. Windows retains read-share-only directory handles opened with
+    ``FILE_FLAG_OPEN_REPARSE_POINT`` while descending, preventing rename/replacement
+    and write-side reparse mutation before final-file acquisition.
     """
     root = _managed_root(root_value)
     relative = _validated_relative(stored_path)
