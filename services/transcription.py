@@ -950,6 +950,10 @@ def run_openai_transcription(
                     db.session.commit()
 
                 except Exception as chunk_error:
+                    # A failed chunk can leave pending Segment rows or a failed
+                    # transaction. Discard those rows and release any earlier
+                    # reservation before reacquiring ownership for the error manifest.
+                    db.session.rollback()
                     err_type = type(chunk_error).__name__
                     err_message = _sanitize_error_message(str(chunk_error))
                     record["status"] = "error"

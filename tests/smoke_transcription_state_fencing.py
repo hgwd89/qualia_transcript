@@ -329,8 +329,10 @@ def main() -> int:
     failures += check(
         "chunk error manifest is fenced before immutable evidence publication",
         chunk_error_start >= 0
+        and chunk_error_block.find("db.session.rollback()") >= 0
         and chunk_error_block.find("result_write_guard()") >= 0
-        and chunk_error_block.find("result_write_guard()")
+        and chunk_error_block.find("db.session.rollback()")
+        < chunk_error_block.find("result_write_guard()")
         < chunk_error_block.find("manifest_path = _write_chunk_manifest"),
     )
     failures += check(
