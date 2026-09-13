@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from models.interview_flow import InterviewFlow
+from models.segment import Segment, UtteranceMapping
 
 
 ANALYSIS_READY_INTERVIEW_STATUSES = {"mapped", "analyzed", "done"}
@@ -63,8 +64,10 @@ def resolve_integrated_analysis_scope(project) -> IntegratedAnalysisScope:
 
     The current integrated artifact persists exactly one `source_flow_id`. It must
     therefore never guess among multiple configured flow versions. Every
-    participant interview must also be mapped-or-later and explicitly belong to
-    that sole flow, preventing silent participant omission before provider work.
+    participant interview must also be mapped-or-later, explicitly belong to the
+    sole flow, and contribute at least one classified respondent utterance to that
+    flow. This keeps persisted `source_interview_ids` identical to the interviews
+    that can actually enter the provider prompt.
     """
     try:
         flow = resolve_only_configured_flow(project)
@@ -121,6 +124,36 @@ def resolve_integrated_analysis_scope(project) -> IntegratedAnalysisScope:
             "integrated_interview_not_mapped",
             "全対象インタビューのマッピング完了後に統合分析を実行してください",
             interview_ids=incomplete_ids,
+        )
+
+    flow_question_ids = {
+        int(question.id)
+        for section in flow.sections
+        for question in section.questions
+    }
+    no_evidence_ids: list[int] = []
+    for interview in target_interviews:
+        has_evidence = False
+        if flow_question_ids:
+            has_evidence = (
+                UtteranceMapping.query
+                .join(Segment, UtteranceMapping.segment_id == Segment.id)
+                .filter(
+                    Segment.interview_id == int(interview.id),
+                    Segment.speaker_role == "respondent",
+                    UtteranceMapping.question_id.in_(flow_question_ids),
+                )
+                .first()
+                is not None
+            )
+        if not has_evidence:
+            no_evidence_ids.append(int(interview.id))
+
+    if no_evidence_ids:
+        raise ProjectFlowScopeError(
+            "integrated_interview_no_mapped_evidence",
+            "分類済みの回答発言がないインタビューがあるため統合分析できません",
+            interview_ids=no_evidence_ids,
         )
 
     return IntegratedAnalysisScope(
