@@ -1,5 +1,6 @@
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -60,12 +61,58 @@ def main() -> int:
     original_listdir = storage.os.listdir
     original_windows_open = storage._windows_open_path_handle
     original_file_generation = storage._file_generation
+    original_fsync = storage.os.fsync
+    original_managed_create = storage.open_managed_file_for_create
 
     with tempfile.TemporaryDirectory(prefix="qualia_raw_snapshot_fencing_") as tmp:
         root = Path(tmp)
         evidence_root = root / "outputs"
         config.OUTPUT_DIR = str(evidence_root)
         try:
+            durability_sync_modes: list[str] = []
+            durability_write_through: list[bool] = []
+            durability_root = root / "durability-outputs"
+
+            def recording_fsync(fd):
+                info = os.fstat(fd)
+                durability_sync_modes.append(
+                    "dir" if stat.S_ISDIR(info.st_mode) else "file"
+                )
+                return original_fsync(fd)
+
+            def recording_managed_create(*args, **kwargs):
+                durability_write_through.append(bool(kwargs.get("write_through")))
+                return original_managed_create(*args, **kwargs)
+
+            storage.os.fsync = recording_fsync
+            storage.open_managed_file_for_create = recording_managed_create
+            durability_stored = storage.write_raw_snapshot_json(
+                durability_root,
+                "durability_probe",
+                {"text": "durability-probe"},
+            )
+            storage.os.fsync = original_fsync
+            storage.open_managed_file_for_create = original_managed_create
+            durability_ok = (durability_root / durability_stored).is_file()
+            if os.name == "nt":
+                durability_ok = (
+                    durability_ok
+                    and durability_write_through == [True]
+                    and "file" in durability_sync_modes
+                )
+            else:
+                durability_ok = (
+                    durability_ok
+                    and durability_write_through == [True]
+                    and "file" in durability_sync_modes
+                    and durability_sync_modes.count("dir") >= 2
+                )
+            failures += check(
+                "raw evidence crosses the platform durability barrier before returning",
+                durability_ok,
+                f"write_through={durability_write_through!r} sync_modes={durability_sync_modes!r}",
+            )
+
             payload = {
                 "transcription_id": 1,
                 "interview_id": 2,
@@ -308,6 +355,8 @@ def main() -> int:
             storage.os.listdir = original_listdir
             storage._windows_open_path_handle = original_windows_open
             storage._file_generation = original_file_generation
+            storage.os.fsync = original_fsync
+            storage.open_managed_file_for_create = original_managed_create
             config.OUTPUT_DIR = original_output
 
     storage_source = (repo_root / "services" / "raw_snapshot_storage.py").read_text(encoding="utf-8")
@@ -317,8 +366,10 @@ def main() -> int:
 
     failures += check(
         "raw evidence writes use exclusive managed create plus durability flush",
-        "open_managed_file_for_create(output_dir, stored_path)" in storage_source
-        and "os.fsync(opened.stream.fileno())" in storage_source,
+        "write_through=True" in storage_source
+        and "os.fsync(opened.stream.fileno())" in storage_source
+        and "os.fsync(raw_fd)" in storage_source
+        and "os.fsync(root_fd)" in storage_source,
     )
     failures += check(
         "raw evidence batch reader pins or identity-revalidates the directory namespace",

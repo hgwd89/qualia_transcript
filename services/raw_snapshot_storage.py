@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from services.storage_paths import (
+    _directory_identity,
     _file_generation,
     _open_posix_directory_chain,
     _open_posix_directory_component,
@@ -18,6 +19,7 @@ from services.storage_paths import (
     _windows_validate_handle_type,
     is_link_or_reparse,
     open_managed_file_for_create,
+    open_managed_file_for_read,
 )
 
 
@@ -317,6 +319,65 @@ def read_raw_snapshot_batch(output_dir: str | Path) -> list[tuple[str, bytes]]:
     return _read_raw_snapshot_batch_posix(root)
 
 
+def _stable_written_identity(info: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_size),
+    )
+
+
+def _sync_raw_snapshot_parent_posix(
+    root: Path,
+    filename: str,
+    expected_file_stat: os.stat_result,
+) -> None:
+    opened = _open_raw_dir_posix(root)
+    if opened is None:
+        raise ValueError("raw snapshot directory disappeared before durability sync")
+    root_fd, raw_fd = opened
+    expected_generation = _file_generation(expected_file_stat)
+    try:
+        try:
+            current = os.stat(filename, dir_fd=raw_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("raw snapshot disappeared before durability sync") from exc
+        if not stat.S_ISREG(current.st_mode) or _file_generation(current) != expected_generation:
+            raise ValueError("raw snapshot changed before durability sync")
+
+        pinned_raw_identity = _directory_identity(os.fstat(raw_fd))
+        os.fsync(raw_fd)
+        # raw_transcripts itself may have been created for this first snapshot.
+        # Flush the managed root as well so that directory entry is durable.
+        os.fsync(root_fd)
+
+        after_sync = os.stat(filename, dir_fd=raw_fd, follow_symlinks=False)
+        public_raw = os.stat(RAW_SNAPSHOT_DIR, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            _file_generation(after_sync) != expected_generation
+            or not stat.S_ISDIR(public_raw.st_mode)
+            or _directory_identity(public_raw) != pinned_raw_identity
+        ):
+            raise ValueError("raw snapshot namespace changed during durability sync")
+    finally:
+        os.close(raw_fd)
+        os.close(root_fd)
+
+
+def _verify_written_snapshot_windows(
+    output_dir: str | Path,
+    stored_path: str,
+    expected_file_stat: os.stat_result,
+) -> None:
+    opened = open_managed_file_for_read(output_dir, stored_path)
+    try:
+        if _stable_written_identity(opened.stat_result) != _stable_written_identity(expected_file_stat):
+            raise ValueError("raw snapshot changed after durable write")
+    finally:
+        opened.close()
+
+
 def write_raw_snapshot_json(
     output_dir: str | Path,
     base_name: str,
@@ -331,11 +392,24 @@ def write_raw_snapshot_json(
     stored_path = f"{RAW_SNAPSHOT_DIR}/{filename}"
     encoded = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
 
-    opened = open_managed_file_for_create(output_dir, stored_path)
+    opened = open_managed_file_for_create(
+        output_dir,
+        stored_path,
+        write_through=True,
+    )
+    final_stat: os.stat_result | None = None
     try:
         opened.stream.write(encoded)
         opened.stream.flush()
         os.fsync(opened.stream.fileno())
+        final_stat = os.fstat(opened.stream.fileno())
     finally:
         opened.close()
+
+    if final_stat is None:
+        raise ValueError("raw snapshot durability state is unavailable")
+    if os.name == "nt":
+        _verify_written_snapshot_windows(output_dir, stored_path, final_stat)
+    else:
+        _sync_raw_snapshot_parent_posix(_root(output_dir), filename, final_stat)
     return stored_path
