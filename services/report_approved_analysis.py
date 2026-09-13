@@ -1,18 +1,21 @@
 """Generate formal XLSX output from human-approved AIAnalysis rows only."""
 import json
-import os
 from datetime import datetime
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-import config
-from models import db
 from models.analysis import AIAnalysis
 from models.generated_file import GeneratedFile
 from models.project import Project
-from services.file_manager import prepare_output_target, register_generated_file
+from services.file_manager import (
+    prepare_output_target,
+    write_and_register_generated_file,
+)
+
+# Legacy split helpers write_output_target/register_generated_file are intentionally
+# not called by production report generators; the combined boundary owns both steps.
 
 
 SUMMARY_HEADERS = [
@@ -182,15 +185,15 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"承認済AI分析_{project.name}_{ts}.xlsx"
     target = prepare_output_target(project_id, filename)
-    wb.save(target.full_path)
 
     params = {
         "approved_only": True,
         "analysis_count": len(summary_rows) - 1,
         "finding_count": finding_count,
     }
-    return register_generated_file(
+    return write_and_register_generated_file(
         target,
+        wb.save,
         project_id=project_id,
         file_type="approved_analysis",
         file_format="xlsx",
