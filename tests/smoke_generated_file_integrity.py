@@ -185,11 +185,13 @@ def main() -> int:
 
                 client = app.test_client()
                 normal_response = client.get(f"/api/outputs/{gf.id}/download")
+                normal_status = normal_response.status_code
+                normal_data = normal_response.data
+                normal_response.close()
                 failures += check(
                     "download route streams registered managed file bytes",
-                    normal_response.status_code == 200
-                    and normal_response.data == b"generated",
-                    f"status={normal_response.status_code} bytes={len(normal_response.data)}",
+                    normal_status == 200 and normal_data == b"generated",
+                    f"status={normal_status} bytes={len(normal_data)}",
                 )
 
                 response = client.get(f"/api/outputs/{malicious.id}/download")
