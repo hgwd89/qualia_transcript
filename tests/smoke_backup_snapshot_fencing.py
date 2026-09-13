@@ -4,6 +4,12 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None
 
 
 def check(name: str, ok: bool, detail: str = "") -> int:
@@ -50,6 +56,20 @@ foreach ($rule in @($acl.Access)) {
     return {line.strip() for line in result.stdout.splitlines() if line.strip()}
 
 
+def stat_with_changes(info, **changes):
+    values = {
+        "st_dev": info.st_dev,
+        "st_ino": info.st_ino,
+        "st_mode": info.st_mode,
+        "st_size": info.st_size,
+        "st_atime_ns": info.st_atime_ns,
+        "st_mtime_ns": info.st_mtime_ns,
+        "st_ctime_ns": info.st_ctime_ns,
+    }
+    values.update(changes)
+    return SimpleNamespace(**values)
+
+
 def main() -> int:
     failures = 0
     repo_root = Path(__file__).resolve().parents[1]
@@ -61,36 +81,80 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="qualia_snapshot_fencing_") as tmp:
         root = Path(tmp)
 
-        reuse_source = root / "inode-reuse-source.txt"
-        reuse_target = root / "inode-reuse-target.txt"
-        reuse_source.write_text("original", encoding="utf-8")
-        original_open = local_backup.os.open
-        replacement = {"done": False, "same_inode": False}
+        generation_source = root / "generation-source.txt"
+        generation_target = root / "generation-target.txt"
+        generation_source.write_text("original", encoding="utf-8")
+        checked = generation_source.lstat()
+        same_inode_generation = stat_with_changes(
+            checked,
+            st_size=checked.st_size + 1,
+            st_mtime_ns=checked.st_mtime_ns + 1,
+            st_ctime_ns=checked.st_ctime_ns + 1,
+        )
+        original_fstat = local_backup.os.fstat
 
-        def replace_before_open(path, flags, *args, **kwargs):
-            if Path(path) == reuse_source and not replacement["done"]:
-                before = reuse_source.stat()
-                reuse_source.unlink()
-                reuse_source.write_text("replaced", encoding="utf-8")
-                after = reuse_source.stat()
-                replacement["done"] = True
-                replacement["same_inode"] = (
-                    before.st_dev == after.st_dev and before.st_ino == after.st_ino
-                )
-            return original_open(path, flags, *args, **kwargs)
+        def fake_same_inode_fstat(_fd):
+            return same_inode_generation
 
-        local_backup.os.open = replace_before_open
-        replacement_rejected = False
+        local_backup.os.fstat = fake_same_inode_fstat
+        generation_rejected = False
         try:
-            local_backup._copy_regular_snapshot_file(reuse_source, reuse_target)
+            local_backup._copy_regular_snapshot_file(generation_source, generation_target)
         except ValueError as exc:
-            replacement_rejected = "changed during snapshot" in str(exc)
+            generation_rejected = "changed during snapshot" in str(exc)
         finally:
-            local_backup.os.open = original_open
+            local_backup.os.fstat = original_fstat
         failures += check(
-            "snapshot rejects unlink/recreate replacement even when inode reuse is possible",
-            replacement["done"] and replacement_rejected and not reuse_target.exists(),
-            f"same_inode={replacement['same_inode']}",
+            "generation token rejects replacement with the same device/inode identity",
+            local_backup._stat_identity(checked)
+            == local_backup._stat_identity(same_inode_generation)
+            and local_backup._snapshot_stat_token(checked)
+            != local_backup._snapshot_stat_token(same_inode_generation)
+            and generation_rejected
+            and not generation_target.exists(),
+            (
+                f"identity={local_backup._stat_identity(checked)} "
+                f"before={local_backup._snapshot_stat_token(checked)} "
+                f"after={local_backup._snapshot_stat_token(same_inode_generation)}"
+            ),
+        )
+
+        atime_source = root / "atime-source.txt"
+        atime_target = root / "atime-target.txt"
+        atime_source.write_text("atime-payload", encoding="utf-8")
+        atime_fd = os.open(atime_source, os.O_RDONLY | int(getattr(os, "O_BINARY", 0)))
+        opened = os.fstat(atime_fd)
+        after_read = stat_with_changes(opened, st_atime_ns=opened.st_atime_ns + 10_000_000)
+        original_fstat = local_backup.os.fstat
+        original_apply_metadata = local_backup._apply_snapshot_metadata
+        applied = {"info": None}
+
+        def fake_post_read_fstat(_fd):
+            return after_read
+
+        def capture_metadata(_target, info, _attributes=None):
+            applied["info"] = info
+
+        local_backup.os.fstat = fake_post_read_fstat
+        local_backup._apply_snapshot_metadata = capture_metadata
+        try:
+            local_backup._copy_open_regular_snapshot_file(
+                atime_fd,
+                atime_target,
+                opened,
+                str(atime_source),
+                preserve_xattrs=False,
+            )
+        finally:
+            local_backup.os.fstat = original_fstat
+            local_backup._apply_snapshot_metadata = original_apply_metadata
+            os.close(atime_fd)
+        failures += check(
+            "rollback metadata keeps the pre-read atime while final stat is validation-only",
+            applied["info"] is opened
+            and after_read.st_atime_ns != opened.st_atime_ns
+            and local_backup._snapshot_stat_token(after_read)
+            == local_backup._snapshot_stat_token(opened),
         )
 
         if local_backup._supports_pinned_posix_walk():
@@ -120,9 +184,6 @@ def main() -> int:
 
             local_backup.os.open = replace_ancestor_before_leaf_open
             try:
-                # Call the pinned implementation directly. Monkeypatching os.open
-                # would otherwise make the capability detector intentionally fall
-                # back because the wrapper function is not in os.supports_dir_fd.
                 local_backup._snapshot_tree_no_links_pinned(source, target)
             finally:
                 local_backup.os.open = original_open
@@ -177,6 +238,50 @@ def main() -> int:
                 and [entry["path"] for entry in entries] == ["uploads/inner/payload.txt"],
                 staged.read_text(encoding="utf-8") if staged.is_file() else "missing",
             )
+
+            if resource is not None:
+                wide_source = root / "wide-source"
+                wide_stage = root / "wide-stage"
+                wide_snapshot = root / "wide-snapshot"
+                wide_source.mkdir()
+                for index in range(96):
+                    child = wide_source / f"d{index:03d}"
+                    child.mkdir()
+                    (child / "payload.txt").write_text(str(index), encoding="utf-8")
+
+                original_limits = resource.getrlimit(resource.RLIMIT_NOFILE)
+                soft_limit, hard_limit = original_limits
+                finite_soft = 32 if soft_limit == resource.RLIM_INFINITY else min(int(soft_limit), 32)
+                if finite_soft >= 16:
+                    resource.setrlimit(resource.RLIMIT_NOFILE, (finite_soft, hard_limit))
+                    descriptor_bounded = False
+                    try:
+                        wide_entries = local_backup._collect_tree_pinned(
+                            wide_source,
+                            "uploads",
+                            wide_stage,
+                        )
+                        local_backup._snapshot_tree_no_links_pinned(
+                            wide_source,
+                            wide_snapshot,
+                        )
+                        descriptor_bounded = (
+                            len(wide_entries) == 96
+                            and len(list(wide_snapshot.glob("d*/payload.txt"))) == 96
+                        )
+                    finally:
+                        resource.setrlimit(resource.RLIMIT_NOFILE, original_limits)
+                    failures += check(
+                        "POSIX pinned traversal keeps descriptors bounded across many siblings",
+                        descriptor_bounded,
+                        f"soft_limit={finite_soft}",
+                    )
+                else:
+                    failures += check(
+                        "POSIX pinned traversal descriptor-bound regression",
+                        True,
+                        f"SKIP: existing RLIMIT_NOFILE too low ({soft_limit})",
+                    )
         else:
             failures += check(
                 "POSIX pinned-directory race regression",
@@ -266,6 +371,12 @@ def main() -> int:
             and "st_ctime_ns" in source_text
             and "_capture_extended_attributes" in source_text
             and "_apply_extended_attributes" in source_text,
+        )
+        failures += check(
+            "pinned traversal is depth-first rather than accumulating sibling descriptors",
+            "def walk(current_fd: int, relative_dir: Path) -> None:" in source_text
+            and "open_fds: set[int]" not in source_text
+            and "pending: list[tuple[int, Path]]" not in source_text,
         )
         failures += check(
             "Windows privacy implementation constructs a protected current-user-only DACL",
