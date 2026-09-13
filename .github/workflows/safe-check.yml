@@ -24,6 +24,7 @@ jobs:
       - name: Merge current master if needed
         shell: bash
         run: |
+          # sync-round-2
           git fetch origin master
           if git merge-base --is-ancestor origin/master HEAD; then
             echo 'Current master already included.'
