@@ -18,7 +18,7 @@ That compare-and-swap identifies a definite pre-spawn/unclaimed failure.
 
 The child remains authoritative for `pending -> running`: `_claim_pending_job()` increments `attempt_count` and attaches its real PID atomically. If the parent fails after reserving launch but before recording the PID, the child can still replace the sentinel and claim the job. If no child ever claims, existing stale-job recovery handles the abandoned active row after its grace/liveness checks.
 
-Both `routes/transcribe.py` and `routes/analysis_view.py` use this shared boundary. No HTTP worker-launch route should directly convert an arbitrary `launch_job_worker()` exception into an unconditional `ProcessingJob.status='failed'` write.
+All HTTP worker-launch routes use this shared boundary: `routes/transcribe.py` for transcription/mapping/project-pipeline jobs, `routes/analyze.py` for per-interview/per-question analysis, and `routes/analysis_view.py` for cross/integrated project analysis. No route should directly convert an arbitrary `launch_job_worker()` exception into an unconditional `ProcessingJob.status='failed'` write.
 
 ## Regression
 
@@ -28,6 +28,6 @@ Both `routes/transcribe.py` and `routes/analysis_view.py` use this shared bounda
 - a pending job with the launch-reservation sentinel is not overwritten failed by parent bookkeeping failure;
 - the child can subsequently claim that reserved job and attach its PID/attempt token;
 - a child that already claimed `running` cannot be overwritten by a later parent launcher exception; and
-- both transcription/mapping/project-pipeline routes and project-analysis routes use the shared launch guard.
+- transcription/mapping/project-pipeline, per-interview/per-question analysis, and project-level cross/integrated analysis routes all use the shared launch guard.
 
 `.github/workflows/worker-launch-fencing.yml` runs this regression on both Windows and Ubuntu.
