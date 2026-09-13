@@ -2,6 +2,7 @@ import io
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 
 def check(name: str, ok: bool, detail: str = "") -> int:
@@ -50,6 +51,7 @@ def main() -> int:
             from models import db
             from models.interview import Interview, MediaFile
             from models.project import Project
+            import services.upload_manager as upload_manager_service
             from services.upload_manager import (
                 create_media_read_snapshot,
                 get_media_full_path,
@@ -126,6 +128,40 @@ def main() -> int:
                         f"outside={snapshot_outside_uploads} "
                         f"stable={snapshot_survived_replacement} removed={snapshot_removed}"
                     ),
+                )
+
+                tracked_open: dict[str, object] = {}
+                real_open_managed_file = upload_manager_service.open_managed_file_for_read
+
+                def tracking_open(root_value, stored_path):
+                    opened = real_open_managed_file(root_value, stored_path)
+                    tracked_open["value"] = opened
+                    return opened
+
+                tempdir_failure_raised = False
+                with patch.object(
+                    upload_manager_service,
+                    "open_managed_file_for_read",
+                    side_effect=tracking_open,
+                ), patch.object(
+                    upload_manager_service.tempfile,
+                    "TemporaryDirectory",
+                    side_effect=RuntimeError("simulated media snapshot tempdir failure"),
+                ):
+                    try:
+                        create_media_read_snapshot(media)
+                    except RuntimeError as exc:
+                        tempdir_failure_raised = "simulated media snapshot tempdir failure" in str(exc)
+
+                opened_after_failure = tracked_open.get("value")
+                source_stream_closed = bool(
+                    opened_after_failure is not None
+                    and getattr(opened_after_failure.stream, "closed", False)
+                )
+                failures += check(
+                    "snapshot temp-directory failure closes pinned source handle",
+                    tempdir_failure_raised and source_stream_closed,
+                    f"raised={tempdir_failure_raised} source_closed={source_stream_closed}",
                 )
 
                 failures += check(
