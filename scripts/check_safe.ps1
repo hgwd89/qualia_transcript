@@ -111,6 +111,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] read-only runtime exclusion smoke checks passed."
 
+Write-Host "[INFO] Running durable job admission smoke check..."
+python tests/smoke_job_admission.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] durable job admission smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] durable job admission smoke checks passed."
+
 Write-Host "[INFO] Running project deletion lifecycle smoke check..."
 python tests/smoke_project_deletion_lifecycle.py
 if ($LASTEXITCODE -ne 0) {

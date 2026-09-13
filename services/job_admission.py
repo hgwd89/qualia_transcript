@@ -5,12 +5,24 @@ from dataclasses import dataclass
 from sqlalchemy import text
 
 from models import db
+from models.interview import Interview
+from models.interview_flow import InterviewFlowQuestion
 from models.processing_job import ProcessingJob
+from models.project import Project
 from services.job_recovery import recover_stale_jobs
 from services.processing_jobs import ACTIVE_STATUSES, JOB_TYPES, _json_dump
 
 
 PROJECT_EXCLUSIVE_JOB_TYPES = {"project_pipeline", "analyze_cross", "analyze_integrated"}
+_JOB_SCOPE = {
+    "transcribe": (True, False),
+    "map": (True, False),
+    "analyze": (True, False),
+    "analyze_question": (True, True),
+    "analyze_cross": (False, True),
+    "analyze_integrated": (False, False),
+    "project_pipeline": (False, False),
+}
 
 
 @dataclass(frozen=True)
@@ -34,6 +46,57 @@ def _begin_immediate() -> None:
     _require_clean_session()
     db.session.rollback()
     db.session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _validate_job_scope(
+    project_id: int,
+    job_type: str,
+    interview_id: int | None,
+    question_id: int | None,
+) -> None:
+    """Validate durable-job ownership and required/forbidden scope fields.
+
+    This runs after the admission write reservation is acquired so project
+    deletion and job admission observe one serialized database snapshot.
+    """
+    project_id = int(project_id)
+    if project_id <= 0 or db.session.get(Project, project_id) is None:
+        raise ValueError("project not found for processing job")
+
+    try:
+        interview_required, question_required = _JOB_SCOPE[job_type]
+    except KeyError as exc:
+        raise ValueError(f"unsupported job_type: {job_type}") from exc
+
+    if interview_required and interview_id is None:
+        raise ValueError(f"{job_type} processing job requires interview_id")
+    if not interview_required and interview_id is not None:
+        raise ValueError(f"{job_type} processing job forbids interview_id")
+    if question_required and question_id is None:
+        raise ValueError(f"{job_type} processing job requires question_id")
+    if not question_required and question_id is not None:
+        raise ValueError(f"{job_type} processing job forbids question_id")
+
+    interview = None
+    if interview_id is not None:
+        interview = db.session.get(Interview, int(interview_id))
+        if not interview or int(interview.project_id) != project_id:
+            raise ValueError("interview not found in processing job project")
+
+    question = None
+    if question_id is not None:
+        question = db.session.get(InterviewFlowQuestion, int(question_id))
+        if (
+            not question
+            or not question.section
+            or not question.section.flow
+            or int(question.section.flow.project_id) != project_id
+        ):
+            raise ValueError("question not found in processing job project")
+
+    if interview is not None and question is not None:
+        if not interview.flow_id or int(question.section.flow_id) != int(interview.flow_id):
+            raise ValueError("question not found in processing job interview flow")
 
 
 def _same_scope(
@@ -79,18 +142,28 @@ def admit_processing_job(
     *,
     question_id: int | None = None,
 ) -> JobAdmission:
-    """Atomically reuse, reject, or create one processing job.
+    """Atomically validate, reuse, reject, or create one processing job.
 
     SQLite `BEGIN IMMEDIATE` serializes all callers of this admission path before
-    they inspect the active-job set. The decision and optional INSERT therefore
-    happen in one database transaction rather than a check-then-create race.
+    they validate project ownership or inspect the active-job set. The scope
+    decision and optional INSERT therefore happen in one database transaction.
     """
     if job_type not in JOB_TYPES:
         raise ValueError(f"unsupported job_type: {job_type}")
 
+    project_id = int(project_id)
+    interview_id = int(interview_id) if interview_id is not None else None
+    question_id = int(question_id) if question_id is not None else None
+
     recover_stale_jobs(project_id=project_id)
     try:
         _begin_immediate()
+        try:
+            _validate_job_scope(project_id, job_type, interview_id, question_id)
+        except ValueError as exc:
+            db.session.rollback()
+            return JobAdmission(error=str(exc))
+
         active = _active_jobs(project_id)
 
         for job in active:
@@ -122,7 +195,7 @@ def admit_processing_job(
 
 
 def admit_retry_job(job_id: int) -> JobAdmission:
-    """Atomically validate conflicts and requeue exactly one failed job."""
+    """Atomically validate scope/conflicts and requeue exactly one failed job."""
     target = db.session.get(ProcessingJob, job_id)
     if not target:
         return JobAdmission(error="processing job not found")
@@ -138,6 +211,17 @@ def admit_retry_job(job_id: int) -> JobAdmission:
         if target.status != "failed":
             db.session.commit()
             return JobAdmission(job_id=target.id, error="only failed jobs can be retried")
+
+        try:
+            _validate_job_scope(
+                int(target.project_id),
+                target.job_type,
+                int(target.interview_id) if target.interview_id is not None else None,
+                int(target.question_id) if target.question_id is not None else None,
+            )
+        except ValueError as exc:
+            db.session.rollback()
+            return JobAdmission(job_id=target.id, error=f"invalid processing job scope: {exc}")
 
         active = _active_jobs(project_id)
         for job in active:
