@@ -109,6 +109,7 @@ The audit currently blocks on:
 - registered generated artifacts that are missing or zero bytes
 - malformed or hash-invalid raw transcript snapshots
 - structurally invalid registered Office artifacts
+- registered `approved_analysis` artifacts whose `artifact_sha256` metadata is missing/invalid or whose pinned managed bytes do not match that registered SHA-256; this is the same byte-integrity condition enforced by the standard formal download route
 - invalid newest backup archive
 
 A foreign-key blocker means the database already contains at least one child row whose referenced parent row is missing. FK enforcement prevents new invalid writes, but it does not repair corruption that predates enforcement; the affected rows must be reconciled before release.
@@ -116,6 +117,8 @@ A foreign-key blocker means the database already contains at least one child row
 Legacy `processing_jobs` tables require special handling because older SQLite installations added `question_id` after table creation and therefore may not have the model-declared FK. The upgraded app installs non-destructive insert/update trigger guards so future orphan question references are rejected without rebuilding durable job history. Readiness separately scans existing rows so pre-upgrade orphan values remain visible as blockers rather than being silently changed.
 
 Chunk-manifest JSON under `outputs/raw_transcripts/` is metadata and does not satisfy the immutable raw-text snapshot requirement by itself. The hardened audit counts only snapshot payloads that actually contain raw text and validates their recorded hash when present.
+
+Formal approved-analysis artifacts are checked through the same pinned managed-reader and SHA-256 verification boundary used by delivery. The audit remains read-only: it creates only a temporary in-process verification snapshot and never rewrites the registered workbook. Legacy formal artifacts that predate `artifact_sha256` fail closed because the final acceptance gate cannot prove that their bytes are the bytes registered by the formal exporter.
 
 ## Warning conditions
 
@@ -148,8 +151,8 @@ Before treating one project as ready for delivery:
 
 The backup precedes the strict audit deliberately: `no_backup_archive` is a readiness warning, and `--strict` converts warnings into a non-zero result. On a fresh workstation, running strict readiness before creating the first backup would therefore fail by design.
 
-A clean project-scoped strict readiness audit means the selected project's structural/traceability checks and the shared database/recovery-set checks passed. It does not replace human qualitative-research review of interpretation quality, moderation context, or client-specific formatting requirements.
+A clean project-scoped strict readiness audit means the selected project's structural/traceability checks, formal-artifact byte-integrity checks, and the shared database/recovery-set checks passed. It does not replace human qualitative-research review of interpretation quality, moderation context, or client-specific formatting requirements.
 
 ## CI coverage
 
-The real-data audit remains manual-only. Required CI includes focused temporary-fixture regressions for readiness foreign-key/orphan behavior, traceability rules such as flow ownership/per-source evidence matching, and project-scope isolation. The project-scope regression proves that unrelated project content defects do not leak into the selected project and that the source SQLite bytes remain unchanged. The broader `tests/smoke_production_readiness.py` uses a temporary SQLite database and temporary outputs to verify the hardened audit, artifact validation, raw-snapshot validation, backup validation, and job-quiescence logic; it remains part of `scripts/check_all.ps1 -AllLocal` rather than reading the real project database.
+The real-data audit remains manual-only. Required CI includes focused temporary-fixture regressions for readiness foreign-key/orphan behavior, traceability rules such as flow ownership/per-source evidence matching, project-scope isolation, and delivery/readiness parity for formal approved-analysis artifact SHA-256 verification. The project-scope regression proves that unrelated project content defects do not leak into the selected project and that the source SQLite bytes remain unchanged. The formal-artifact regression runs on Windows and Ubuntu and proves current bytes are accepted by both delivery and readiness, in-place tampering is rejected by both, and exact-byte restoration returns both gates to acceptance. The broader `tests/smoke_production_readiness.py` uses a temporary SQLite database and temporary outputs to verify the hardened audit, artifact validation, raw-snapshot validation, backup validation, and job-quiescence logic; it remains part of `scripts/check_all.ps1 -AllLocal` rather than reading the real project database.
