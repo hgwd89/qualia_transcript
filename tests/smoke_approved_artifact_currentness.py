@@ -17,6 +17,9 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
+    scripts_dir = repo_root / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
 
     import config
 
@@ -34,6 +37,7 @@ def main() -> int:
 
         try:
             from app import create_app
+            from audit_production_readiness_v2 import _formal_artifact_hash_reason
             from models import db
             from models.analysis import AIAnalysis
             from models.interview import Interview
@@ -237,6 +241,19 @@ def main() -> int:
                 )
                 response.close()
 
+                legacy_reason = _formal_artifact_hash_reason(
+                    {
+                        "generation_params_json": legacy_formal.generation_params_json,
+                        "stored_path": legacy_formal.stored_path,
+                    },
+                    Path(config.OUTPUT_DIR),
+                )
+                failures += check(
+                    "readiness fails closed for legacy formal artifact without byte hash",
+                    bool(legacy_reason) and "SHA-256" in legacy_reason,
+                    f"reason={legacy_reason}",
+                )
+
                 participant = db.session.get(Participant, participant_id)
                 participant.participant_code = "P99"
                 db.session.commit()
@@ -310,6 +327,20 @@ def main() -> int:
                 )
                 response.close()
 
+                readiness_row = {
+                    "generation_params_json": refreshed.generation_params_json,
+                    "stored_path": refreshed.stored_path,
+                }
+                readiness_reason = _formal_artifact_hash_reason(
+                    readiness_row,
+                    Path(config.OUTPUT_DIR),
+                )
+                failures += check(
+                    "readiness accepts the same current formal bytes as delivery",
+                    readiness_reason is None,
+                    f"reason={readiness_reason}",
+                )
+
                 refreshed_path = Path(config.OUTPUT_DIR) / refreshed.stored_path
                 expected_hash = formal_artifact_expected_sha256(refreshed)
                 managed = open_managed_file_for_read(config.OUTPUT_DIR, refreshed.stored_path)
@@ -337,6 +368,16 @@ def main() -> int:
                 )
                 response.close()
 
+                readiness_reason = _formal_artifact_hash_reason(
+                    readiness_row,
+                    Path(config.OUTPUT_DIR),
+                )
+                failures += check(
+                    "readiness rejects the same tampered formal bytes as delivery",
+                    bool(readiness_reason) and "do not match" in readiness_reason,
+                    f"reason={readiness_reason}",
+                )
+
                 with refreshed_path.open("r+b") as restored:
                     restored.seek(0)
                     restored.write(refreshed_bytes)
@@ -349,6 +390,16 @@ def main() -> int:
                     f"status={response.status_code}",
                 )
                 response.close()
+
+                readiness_reason = _formal_artifact_hash_reason(
+                    readiness_row,
+                    Path(config.OUTPUT_DIR),
+                )
+                failures += check(
+                    "restoring exact registered formal bytes restores readiness byte acceptance",
+                    readiness_reason is None,
+                    f"reason={readiness_reason}",
+                )
 
                 second_provenance = capture_analysis_source_provenance(
                     "per_question",
