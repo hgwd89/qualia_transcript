@@ -251,17 +251,21 @@ def _run_base_audit_on_snapshot(
 def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
     con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
+    start_data_version = int(con.execute("PRAGMA data_version").fetchone()[0])
     con.execute("BEGIN")
     # Establish the read snapshot before any acceptance query. The same
     # connection is then borrowed by base_audit and retained for v2 checks.
     con.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
 
+    rollback_error = None
+    end_data_version = None
     try:
         report = _run_base_audit_on_snapshot(con, db_path, output_dir, backup_dir)
         blockers = report["blockers"]
         warnings = report["warnings"]
         info = report["info"]
         info["database_snapshot"] = "single_read_transaction"
+        info["database_data_version_start"] = start_data_version
 
         warnings[:] = [
             item for item in warnings
@@ -544,9 +548,36 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
     finally:
         try:
             con.rollback()
-        except Exception:
-            pass
+        except Exception as exc:
+            rollback_error = f"{type(exc).__name__}: {exc}"
+        if rollback_error is None:
+            try:
+                end_data_version = int(con.execute("PRAGMA data_version").fetchone()[0])
+            except Exception as exc:
+                rollback_error = f"data_version read failed: {type(exc).__name__}: {exc}"
         con.close()
+
+    info["database_data_version_end"] = end_data_version
+    info["database_changed_during_audit"] = (
+        end_data_version is not None and end_data_version != start_data_version
+    )
+    if rollback_error is not None or end_data_version is None:
+        _issue(
+            blockers,
+            "database_change_detection_failed",
+            "Could not prove that the database remained unchanged during readiness; rerun before professional delivery",
+            error=rollback_error,
+            data_version_start=start_data_version,
+            data_version_end=end_data_version,
+        )
+    elif end_data_version != start_data_version:
+        _issue(
+            blockers,
+            "database_changed_during_audit",
+            "Database changed from another connection while readiness was running; rerun against a quiescent dataset before professional delivery",
+            data_version_start=start_data_version,
+            data_version_end=end_data_version,
+        )
 
     latest_backup, backup_error = validate_latest_backup(backup_dir)
     info["latest_validated_backup"] = str(latest_backup) if latest_backup else None
