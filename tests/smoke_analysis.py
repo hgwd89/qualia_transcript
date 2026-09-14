@@ -63,22 +63,6 @@ def _read_stored_openai_secret(source_db: Path) -> str | None:
         con.close()
 
 
-def _fake_provider_result() -> dict:
-    return {
-        "findings": [
-            {
-                "point": "テスト発言から具体的な示唆を確認した",
-                "evidence_quote": "テスト用の回答です",
-                "participant_codes": ["P01"],
-                "question_codes": [],
-                "confidence": "high",
-            }
-        ],
-        "implications": "テスト用の示唆です",
-        "unresolved": "追加確認事項はありません",
-    }
-
-
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
@@ -98,7 +82,6 @@ def main() -> int:
 
     source_db = Path(config.DATABASE_PATH).resolve()
     stored_openai_secret = _read_stored_openai_secret(source_db)
-    fake_provider = os.getenv("QUALIA_ANALYSIS_SMOKE_FAKE_PROVIDER", "").strip() == "1"
 
     original_config = {
         "DATABASE_URI": config.DATABASE_URI,
@@ -192,14 +175,9 @@ def main() -> int:
                 counter = {"n": 0}
                 original_call = analyzer.call_structured
 
-                if fake_provider:
-                    def wrapped_call(*args, **kwargs):
-                        counter["n"] += 1
-                        return _fake_provider_result()
-                else:
-                    def wrapped_call(*args, **kwargs):
-                        counter["n"] += 1
-                        return original_call(*args, **kwargs)
+                def wrapped_call(*args, **kwargs):
+                    counter["n"] += 1
+                    return original_call(*args, **kwargs)
 
                 analyzer.call_structured = wrapped_call
 
@@ -227,7 +205,7 @@ def main() -> int:
                     error_detail,
                 ) else 1
                 failures += 0 if print_result(
-                    "provider call count == 1",
+                    "OpenAI API call count == 1",
                     counter["n"] == 1,
                     f"count={counter['n']}",
                 ) else 1
@@ -304,8 +282,7 @@ def main() -> int:
     ) else 1
 
     if failures == 0:
-        mode = "fake provider" if fake_provider else "OpenAI provider"
-        print(f"\nSummary: PASS ({mode}, temporary fixture only)")
+        print("\nSummary: PASS (OpenAI provider, temporary fixture only)")
         return 0
     print(f"\nSummary: FAIL ({failures} checks failed)")
     return 1
