@@ -11,6 +11,7 @@ import config
 from models import db
 from models.generated_file import GeneratedFile
 from models.interview import Interview
+from models.project import Project
 from services.generated_file_ownership import stored_path_project_id
 from services.managed_write_commit_guard import open_managed_write_commit_guard
 from services.storage_paths import (
@@ -163,6 +164,8 @@ def _validate_generated_file_ownership(
     project_id = int(project_id)
     if project_id <= 0:
         raise ValueError("generated-file project_id must be positive")
+    if db.session.get(Project, project_id) is None:
+        raise ValueError("generated-file project does not exist")
 
     path_project_id = stored_path_project_id(target.stored_path)
     if path_project_id != project_id:
@@ -272,24 +275,28 @@ def register_generated_file(
     Formal artifacts retain their stricter exporter-owned metadata contract; when
     formal metadata is supplied, its hash is rechecked against the same pinned
     bytes here. Project/interview ownership is validated against the target's
-    project-scoped storage namespace before the row can be committed. Rollback
-    cleanup is performed through the pinned guard rather than check-then-unlink on
-    the mutable pathname.
+    project-scoped storage namespace before the row can be committed. Registration
+    also requires a clean SQLAlchemy session so its internal commit cannot publish
+    unrelated caller mutations. Rollback cleanup is performed through the pinned
+    guard rather than check-then-unlink on the mutable pathname.
     """
     expected = target.written_stat
     if expected is None:
         raise ValueError("generated output writer did not record final file identity")
 
-    normalized_project_id, normalized_interview_id = _validate_generated_file_ownership(
-        target,
-        project_id=project_id,
-        interview_id=interview_id,
-    )
-
     guard = None
     gf = None
     committed = False
     try:
+        if db.session.new or db.session.dirty or db.session.deleted:
+            raise RuntimeError("generated-file registration requires a clean database session")
+
+        normalized_project_id, normalized_interview_id = _validate_generated_file_ownership(
+            target,
+            project_id=project_id,
+            interview_id=interview_id,
+        )
+
         guard = open_managed_write_commit_guard(
             config.OUTPUT_DIR,
             target.stored_path,
