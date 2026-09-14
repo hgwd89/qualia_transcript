@@ -137,11 +137,18 @@ def analyze_per_question(
     if interview.flow_id is None or question_flow_id != int(interview.flow_id):
         raise ValueError("question が interview の割当フローに属していません")
 
-    segments = _mapped_respondent_segments(interview_id, question_id)
+    result_write_guard = _require_result_write_guard(result_write_guard)
+    source_provenance = capture_analysis_source_provenance(
+        "per_question",
+        int(interview.project_id),
+        interview_id=int(interview_id),
+        question_id=int(question_id),
+    )
 
+    segments = _mapped_respondent_segments(interview_id, question_id)
     participant = interview.participant
-    code        = participant.participant_code if participant else "P??"
-    utterances  = "\n".join(f'- {code}:「{segment.text}」' for segment in segments)
+    code = participant.participant_code if participant else "P??"
+    utterances = "\n".join(f'- {code}:「{segment.text}」' for segment in segments)
 
     system = (
         "あなたは定性調査の専門アナリストです。"
@@ -159,13 +166,6 @@ def analyze_per_question(
         "回答は日本語で返してください。"
     )
 
-    result_write_guard = _require_result_write_guard(result_write_guard)
-    source_provenance = capture_analysis_source_provenance(
-        "per_question",
-        int(interview.project_id),
-        interview_id=int(interview_id),
-        question_id=int(question_id),
-    )
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="analysis_result")
 
     canonical_q_code = _canonical_question_code(question)
@@ -221,6 +221,13 @@ def analyze_interview_summary(
     if not interview:
         raise ValueError("interview が見つかりません")
 
+    result_write_guard = _require_result_write_guard(result_write_guard)
+    source_provenance = capture_analysis_source_provenance(
+        "per_participant",
+        int(interview.project_id),
+        interview_id=int(interview_id),
+    )
+
     participant = interview.participant
     if participant:
         code = participant.participant_code or "P??"
@@ -253,12 +260,6 @@ def analyze_interview_summary(
         "回答は日本語で返してください。"
     )
 
-    result_write_guard = _require_result_write_guard(result_write_guard)
-    source_provenance = capture_analysis_source_provenance(
-        "per_participant",
-        int(interview.project_id),
-        interview_id=int(interview_id),
-    )
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="summary_result")
 
     result_write_guard()
@@ -299,7 +300,7 @@ def analyze_cross_participants(
     全インタビューの該当質問への回答を収集して比較する。
     """
     from models.project import Project
-    project  = Project.query.get(project_id)
+    project = Project.query.get(project_id)
     question = InterviewFlowQuestion.query.get(question_id)
 
     if not project or not question:
@@ -308,6 +309,13 @@ def analyze_cross_participants(
     question_flow_id = _question_flow_id(question)
     if _question_project_id(question) != int(project_id) or question_flow_id is None:
         raise ValueError("question が project のインタビューフローに属していません")
+
+    result_write_guard = _require_result_write_guard(result_write_guard)
+    source_provenance = capture_analysis_source_provenance(
+        "cross_participant",
+        int(project_id),
+        question_id=int(question_id),
+    )
 
     utterances_by_participant = []
     for interview in project.interviews:
@@ -340,12 +348,6 @@ def analyze_cross_participants(
         "共通点・相違点・注目発言・マーケティング示唆を分析してください。"
     )
 
-    result_write_guard = _require_result_write_guard(result_write_guard)
-    source_provenance = capture_analysis_source_provenance(
-        "cross_participant",
-        int(project_id),
-        question_id=int(question_id),
-    )
     result = call_structured(system, user, CROSS_SCHEMA, schema_name="cross_analysis_result")
     canonical_q_code = _canonical_question_code(question)
     normalized_findings = []
@@ -398,6 +400,12 @@ def analyze_project_integrated(
         raise ValueError("project が見つかりません")
 
     scope = resolve_integrated_analysis_scope(project)
+    result_write_guard = _require_result_write_guard(result_write_guard)
+    source_provenance = capture_analysis_source_provenance(
+        "integrated",
+        int(project_id),
+    )
+
     flow = scope.flow
     source_interview_ids = set(scope.interview_ids)
 
@@ -449,11 +457,6 @@ def analyze_project_integrated(
         "主要な発見事項、共通テーマ、参加者間の違い、代表発言、マーケティング示唆、注意点を分析してください。"
     )
 
-    result_write_guard = _require_result_write_guard(result_write_guard)
-    source_provenance = capture_analysis_source_provenance(
-        "integrated",
-        int(project_id),
-    )
     result = call_structured(system, user, INTEGRATED_SCHEMA, schema_name="integrated_result")
     normalized_findings = []
     for finding in (result.get("findings") or []):
