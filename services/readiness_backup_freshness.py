@@ -8,6 +8,7 @@ from pathlib import Path
 from services.local_backup import (
     DB_ARCHIVE_PATH,
     _collect_tree,
+    _safe_member_name,
     _sha256,
     validate_backup,
 )
@@ -15,6 +16,7 @@ from services.local_backup import (
 
 _BACKUP_NAME_PREFIX = "qualia_backup_"
 _BACKUP_TIMESTAMP_LENGTH = len("YYYYMMDDTHHMMSSZ")
+_DATABASE_KEY = ("database", "")
 
 
 @dataclass(frozen=True)
@@ -83,17 +85,39 @@ def _current_recovery_files(
         return files
 
 
-def _entry_index(entries) -> dict[str, dict]:
-    index: dict[str, dict] = {}
+def _entry_index(
+    entries,
+    *,
+    database_archive_path: str | None = None,
+) -> dict[tuple[str, str], dict]:
+    """Index recovery members while treating the DB archive pathname as metadata.
+
+    Restore semantics identify the database through manifest.database_archive_path;
+    its archive pathname is not part of the recovered database identity. Upload and
+    output member paths remain exact recovery-set identity and are compared exactly.
+    """
+    normalized_database_path = (
+        _safe_member_name(database_archive_path)
+        if database_archive_path
+        else None
+    )
+    index: dict[tuple[str, str], dict] = {}
+    normalized_paths: set[str] = set()
     for entry in entries or []:
-        path = str(entry.get("path") or "") if isinstance(entry, dict) else ""
+        raw_path = str(entry.get("path") or "") if isinstance(entry, dict) else ""
         size = int(entry.get("size", -1)) if isinstance(entry, dict) else -1
         sha256 = str(entry.get("sha256") or "") if isinstance(entry, dict) else ""
+        path = _safe_member_name(raw_path) if raw_path else ""
         if not path or size < 0 or len(sha256) != 64:
             raise ValueError(f"invalid recovery manifest entry: {entry!r}")
-        if path in index:
+        if path in normalized_paths:
             raise ValueError(f"duplicate recovery manifest path: {path}")
-        index[path] = {"path": path, "size": size, "sha256": sha256}
+        normalized_paths.add(path)
+
+        key = _DATABASE_KEY if path == normalized_database_path else ("file", path)
+        if key in index:
+            raise ValueError(f"duplicate logical recovery member: {path}")
+        index[key] = {"path": path, "size": size, "sha256": sha256}
     return index
 
 
@@ -109,6 +133,9 @@ def compare_latest_backup_to_current_recovery_set(
     so DB comparison is bound to the same snapshot used by readiness queries.
     Upload/output files are snapshotted with the same hardened collector used by
     backup creation. Comparison is exact on membership, byte size, and SHA-256.
+    The database is compared as a logical recovery member because its ZIP member
+    pathname is explicitly declared by the validated backup manifest and restore
+    supports safe noncanonical database member names.
     """
     latest = _latest_backup_path(Path(backup_dir).resolve())
     if latest is None:
@@ -140,10 +167,19 @@ def compare_latest_backup_to_current_recovery_set(
         )
 
     try:
-        backup_index = _entry_index(manifest.get("files") if isinstance(manifest, dict) else None)
-        current_index = _entry_index(
-            _current_recovery_files(connection, upload_dir, output_dir)
+        database_archive_path = _safe_member_name(
+            str(manifest.get("database_archive_path") or DB_ARCHIVE_PATH)
         )
+        backup_index = _entry_index(
+            manifest.get("files") if isinstance(manifest, dict) else None,
+            database_archive_path=database_archive_path,
+        )
+        current_index = _entry_index(
+            _current_recovery_files(connection, upload_dir, output_dir),
+            database_archive_path=DB_ARCHIVE_PATH,
+        )
+        if _DATABASE_KEY not in backup_index or _DATABASE_KEY not in current_index:
+            raise ValueError("recovery set has no logical database member")
     except Exception as exc:
         return BackupRecoverySetComparison(
             latest_backup=latest,
@@ -157,17 +193,18 @@ def compare_latest_backup_to_current_recovery_set(
             changed_files=[],
         )
 
-    backup_paths = set(backup_index)
-    current_paths = set(current_index)
-    missing_from_backup = [current_index[path] for path in sorted(current_paths - backup_paths)]
-    extra_in_backup = [backup_index[path] for path in sorted(backup_paths - current_paths)]
+    backup_keys = set(backup_index)
+    current_keys = set(current_index)
+    missing_from_backup = [current_index[key] for key in sorted(current_keys - backup_keys)]
+    extra_in_backup = [backup_index[key] for key in sorted(backup_keys - current_keys)]
     changed_files = []
-    for path in sorted(backup_paths & current_paths):
-        before = backup_index[path]
-        current = current_index[path]
+    for key in sorted(backup_keys & current_keys):
+        before = backup_index[key]
+        current = current_index[key]
         if before["size"] != current["size"] or before["sha256"] != current["sha256"]:
             changed_files.append({
-                "path": path,
+                "path": before["path"] if key == _DATABASE_KEY else current["path"],
+                "logical_member": "database" if key == _DATABASE_KEY else "file",
                 "backup_size": before["size"],
                 "current_size": current["size"],
                 "backup_sha256": before["sha256"],

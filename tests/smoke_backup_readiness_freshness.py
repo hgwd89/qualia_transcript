@@ -1,7 +1,9 @@
 import importlib.util
+import json
 import sqlite3
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 
@@ -88,12 +90,60 @@ def blocker_codes(report: dict) -> set[str]:
     return {str(item.get("code")) for item in report.get("blockers", [])}
 
 
+def rewrite_database_member(archive: Path, new_database_archive_path: str) -> None:
+    """Rewrite only the declared DB ZIP pathname while retaining identical DB bytes."""
+    from services.local_backup import DB_ARCHIVE_PATH, MANIFEST_NAME, _safe_member_name
+
+    with zipfile.ZipFile(archive, "r") as zf:
+        infos = [info for info in zf.infolist() if not info.is_dir()]
+        payloads = {info.filename: zf.read(info.filename) for info in infos}
+        manifest = json.loads(payloads[MANIFEST_NAME].decode("utf-8"))
+
+    old_database_path = _safe_member_name(
+        str(manifest.get("database_archive_path") or DB_ARCHIVE_PATH)
+    )
+    database_bytes = None
+    retained: list[tuple[str, bytes]] = []
+    for raw_name, data in payloads.items():
+        if raw_name == MANIFEST_NAME:
+            continue
+        if _safe_member_name(raw_name) == old_database_path:
+            database_bytes = data
+            continue
+        retained.append((raw_name, data))
+    if database_bytes is None:
+        raise AssertionError("fixture backup database member not found")
+
+    matching_entries = [
+        entry for entry in manifest.get("files", [])
+        if _safe_member_name(str(entry.get("path") or "")) == old_database_path
+    ]
+    if len(matching_entries) != 1:
+        raise AssertionError("fixture backup database manifest entry is ambiguous")
+    manifest["database_archive_path"] = new_database_archive_path
+    matching_entries[0]["path"] = new_database_archive_path
+
+    with zipfile.ZipFile(
+        archive,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=6,
+    ) as zf:
+        for raw_name, data in retained:
+            zf.writestr(raw_name, data)
+        zf.writestr(new_database_archive_path, database_bytes)
+        zf.writestr(
+            MANIFEST_NAME,
+            json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+
+
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
 
-    from services.local_backup import DB_ARCHIVE_PATH, create_backup
+    from services.local_backup import DB_ARCHIVE_PATH, create_backup, validate_backup
     from services.readiness_backup_freshness import compare_latest_backup_to_current_recovery_set
 
     audit_mod = load_audit(repo_root)
@@ -127,7 +177,7 @@ def main() -> int:
         upload_path.write_bytes(b"source-v1")
         output_path.write_text("report-v1", encoding="utf-8")
 
-        create_backup(
+        initial_archive = create_backup(
             backup_dir,
             database_uri=f"sqlite:///{db_path.as_posix()}",
             upload_dir=upload_dir,
@@ -159,6 +209,42 @@ def main() -> int:
             and report.get("info", {}).get("latest_backup_matches_current_recovery_set") is True,
             f"blockers={report.get('blockers', [])} info={report.get('info', {})}",
         )
+
+        noncanonical_db_path = r"recovery\declared\database.db"
+        rewrite_database_member(initial_archive, noncanonical_db_path)
+        noncanonical_manifest = validate_backup(initial_archive)
+        failures += check(
+            "backup validator accepts safe manifest-declared noncanonical database member",
+            noncanonical_manifest.get("database_archive_path") == noncanonical_db_path,
+            str(noncanonical_manifest.get("database_archive_path")),
+        )
+        con = pinned_connection(db_path)
+        try:
+            noncanonical_fresh = compare_latest_backup_to_current_recovery_set(
+                con, backup_dir, upload_dir, output_dir
+            )
+        finally:
+            con.rollback()
+            con.close()
+        failures += check(
+            "freshness treats manifest-declared database pathname as location metadata",
+            noncanonical_fresh.matches_current is True
+            and noncanonical_fresh.validation_error is None
+            and noncanonical_fresh.comparison_error is None,
+            str(noncanonical_fresh),
+        )
+        noncanonical_report = audit_mod.audit(db_path, output_dir, backup_dir, upload_dir)
+        failures += check(
+            "production readiness accepts fresh backup with declared noncanonical database member",
+            "latest_backup_stale" not in blocker_codes(noncanonical_report)
+            and noncanonical_report.get("info", {}).get("latest_backup_matches_current_recovery_set") is True,
+            str(noncanonical_report.get("blockers", [])),
+        )
+
+        # Return the same archive to the canonical member name before exercising
+        # the existing database-drift diagnostics, whose expected path is canonical.
+        rewrite_database_member(initial_archive, DB_ARCHIVE_PATH)
+        validate_backup(initial_archive)
 
         # Prove the DB comparison uses the caller's pinned SQLite snapshot rather
         # than reopening the latest database state midway through readiness.
@@ -193,7 +279,11 @@ def main() -> int:
         failures += check(
             "post-backup database change makes the newest backup stale",
             db_stale.matches_current is False
-            and any(item.get("path") == DB_ARCHIVE_PATH for item in db_stale.changed_files),
+            and any(
+                item.get("path") == DB_ARCHIVE_PATH
+                and item.get("logical_member") == "database"
+                for item in db_stale.changed_files
+            ),
             str(db_stale),
         )
 
