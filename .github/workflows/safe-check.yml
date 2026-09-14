@@ -60,6 +60,9 @@ jobs:
       - name: Run latest-backup ordering regression
         run: python tests/smoke_latest_backup_ordering.py
 
+      - name: Run backup recovery-set freshness regression
+        run: python tests/smoke_backup_readiness_freshness.py
+
       - name: Run readiness single-database-snapshot regression
         run: python tests/smoke_readiness_db_snapshot.py
 
@@ -129,6 +132,9 @@ jobs:
 
       - name: Run latest-backup ordering regression
         run: python tests/smoke_latest_backup_ordering.py
+
+      - name: Run backup recovery-set freshness regression
+        run: python tests/smoke_backup_readiness_freshness.py
 
       - name: Run readiness single-database-snapshot regression
         run: python tests/smoke_readiness_db_snapshot.py
