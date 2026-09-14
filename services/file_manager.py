@@ -4,12 +4,13 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 import config
 from models import db
 from models.generated_file import GeneratedFile
+from models.interview import Interview
 from services.managed_write_commit_guard import open_managed_write_commit_guard
 from services.storage_paths import (
     ManagedWriteFile,
@@ -100,12 +101,8 @@ def _unique_storage_name(filename: str) -> str:
 
 def _file_generation(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
-        int(info.st_dev),
-        int(info.st_ino),
-        int(info.st_mode),
-        int(info.st_size),
-        int(info.st_mtime_ns),
-        int(info.st_ctime_ns),
+        int(info.st_dev), int(info.st_ino), int(info.st_mode),
+        int(info.st_size), int(info.st_mtime_ns), int(info.st_ctime_ns),
     )
 
 
@@ -153,6 +150,52 @@ def generated_file_expected_sha256(gf: GeneratedFile) -> str | None:
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise ValueError("generated-file artifact SHA-256 metadata is invalid")
     return digest
+
+
+def _stored_path_project_id(stored_path: str) -> int | None:
+    """Return the numeric project namespace encoded by a managed output path."""
+    normalized = str(stored_path or "").replace("\\", "/").strip("/")
+    if not normalized:
+        return None
+    parts = PurePosixPath(normalized).parts
+    if len(parts) < 2:
+        return None
+    try:
+        project_id = int(parts[0])
+    except (TypeError, ValueError):
+        return None
+    return project_id if project_id > 0 else None
+
+
+def _validate_generated_file_ownership(
+    target: OutputTarget,
+    *,
+    project_id: int,
+    interview_id: int | None,
+) -> tuple[int, int | None]:
+    """Bind DB ownership metadata to the exact project-scoped output namespace."""
+    project_id = int(project_id)
+    if project_id <= 0:
+        raise ValueError("generated-file project_id must be positive")
+
+    path_project_id = _stored_path_project_id(target.stored_path)
+    if path_project_id != project_id:
+        raise ValueError(
+            "generated output stored_path project namespace does not match project_id"
+        )
+
+    normalized_interview_id = None
+    if interview_id is not None:
+        normalized_interview_id = int(interview_id)
+        if normalized_interview_id <= 0:
+            raise ValueError("generated-file interview_id must be positive")
+        interview = db.session.get(Interview, normalized_interview_id)
+        if interview is None:
+            raise ValueError("generated-file interview does not exist")
+        if int(interview.project_id) != project_id:
+            raise ValueError("generated-file interview belongs to another project")
+
+    return project_id, normalized_interview_id
 
 
 def _discard_output_target_if_same_generation(target: OutputTarget) -> None:
@@ -242,12 +285,20 @@ def register_generated_file(
     pinned generation so later downloads can reject in-place byte tampering.
     Formal artifacts retain their stricter exporter-owned metadata contract; when
     formal metadata is supplied, its hash is rechecked against the same pinned
-    bytes here. Rollback cleanup is performed through the pinned guard rather than
-    check-then-unlink on the mutable pathname.
+    bytes here. Project/interview ownership is validated against the target's
+    project-scoped storage namespace before the row can be committed. Rollback
+    cleanup is performed through the pinned guard rather than check-then-unlink on
+    the mutable pathname.
     """
     expected = target.written_stat
     if expected is None:
         raise ValueError("generated output writer did not record final file identity")
+
+    normalized_project_id, normalized_interview_id = _validate_generated_file_ownership(
+        target,
+        project_id=project_id,
+        interview_id=interview_id,
+    )
 
     guard = None
     gf = None
@@ -269,8 +320,8 @@ def register_generated_file(
         guard.verify_namespace()
 
         gf = GeneratedFile(
-            project_id=int(project_id),
-            interview_id=interview_id,
+            project_id=normalized_project_id,
+            interview_id=normalized_interview_id,
             file_type=file_type,
             file_format=file_format,
             original_filename=target.filename,
