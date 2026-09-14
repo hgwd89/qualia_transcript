@@ -44,6 +44,9 @@ jobs:
       - name: Run semantic durable job regression
         run: python tests/smoke_semantic_analysis_job_fencing.py
 
+      - name: Run processing job readiness schema regression
+        run: python tests/smoke_processing_job_readiness_schema.py
+
       - name: Run role normalization regression
         run: python tests/smoke_role_normalization.py
 
