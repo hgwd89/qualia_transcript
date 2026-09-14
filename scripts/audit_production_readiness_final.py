@@ -2,7 +2,9 @@
 
 This wrapper preserves the hardened database-wide/project-scoped readiness audits
 and adds the cross-project GeneratedFile ownership checks that individual SQLite
-foreign keys cannot express.
+foreign keys cannot express. A separate read-only data-version watcher spans the
+entire composite audit so the v2 snapshot and ownership scan cannot be accepted
+from different database generations.
 """
 from __future__ import annotations
 
@@ -66,6 +68,16 @@ def _dedupe(items: list[dict]) -> list[dict]:
     return result
 
 
+def _open_change_watcher(db_path: Path) -> tuple[sqlite3.Connection, int]:
+    con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    try:
+        version = int(con.execute("PRAGMA data_version").fetchone()[0])
+    except Exception:
+        con.close()
+        raise
+    return con, version
+
+
 def audit_final(
     db_path: Path,
     output_dir: Path,
@@ -74,18 +86,60 @@ def audit_final(
     *,
     project_id: int | None = None,
 ) -> dict:
-    if project_id is None:
-        report = readiness_v2.audit(db_path, output_dir, backup_dir, upload_dir)
-    else:
-        report = project_readiness.audit_project(
-            db_path,
-            output_dir,
-            backup_dir,
-            int(project_id),
-            upload_dir,
-        )
+    watcher = None
+    start_data_version = None
+    end_data_version = None
+    watcher_error = None
+    try:
+        watcher, start_data_version = _open_change_watcher(db_path)
+        if project_id is None:
+            report = readiness_v2.audit(db_path, output_dir, backup_dir, upload_dir)
+        else:
+            report = project_readiness.audit_project(
+                db_path,
+                output_dir,
+                backup_dir,
+                int(project_id),
+                upload_dir,
+            )
 
-    _append_generated_file_ownership(report, db_path, project_id=project_id)
+        _append_generated_file_ownership(report, db_path, project_id=project_id)
+        try:
+            end_data_version = int(watcher.execute("PRAGMA data_version").fetchone()[0])
+        except Exception as exc:
+            watcher_error = f"{type(exc).__name__}: {exc}"
+    finally:
+        if watcher is not None:
+            watcher.close()
+
+    info = report.setdefault("info", {})
+    info["final_audit_data_version_start"] = start_data_version
+    info["final_audit_data_version_end"] = end_data_version
+    info["database_changed_during_final_ownership_audit"] = (
+        start_data_version is not None
+        and end_data_version is not None
+        and start_data_version != end_data_version
+    )
+    if watcher_error is not None or start_data_version is None or end_data_version is None:
+        report.setdefault("blockers", []).append({
+            "code": "final_database_change_detection_failed",
+            "message": "Could not prove that the database remained unchanged through the composite readiness and GeneratedFile ownership audit",
+            "context": {
+                "error": watcher_error,
+                "data_version_start": start_data_version,
+                "data_version_end": end_data_version,
+            },
+        })
+    elif start_data_version != end_data_version:
+        report.setdefault("blockers", []).append({
+            "code": "database_changed_during_final_ownership_audit",
+            "message": "Database changed while final readiness and GeneratedFile ownership checks were running; rerun against a quiescent dataset before professional delivery",
+            "context": {
+                "data_version_start": start_data_version,
+                "data_version_end": end_data_version,
+            },
+        })
+
     report["blockers"] = _dedupe(report.get("blockers", []))
     report["warnings"] = _dedupe(report.get("warnings", []))
     return report
