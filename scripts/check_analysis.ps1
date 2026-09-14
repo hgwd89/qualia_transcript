@@ -5,6 +5,7 @@ $projectRoot = Resolve-Path (Join-Path $scriptDir "..")
 Set-Location $projectRoot
 
 Write-Host "[INFO] Analysis smoke check will call OpenAI API exactly once."
+Write-Host "[INFO] Research data is not modified: the check uses a temporary SQLite fixture and reads only the stored OpenAI credential from the real DB when needed."
 Write-Host "[INFO] Running analysis smoke check..."
 python tests/smoke_analysis.py
 $exitCode = $LASTEXITCODE
