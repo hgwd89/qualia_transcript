@@ -37,7 +37,7 @@ def main() -> int:
 
         try:
             from app import create_app
-            from audit_production_readiness_v2 import _formal_artifact_hash_reason
+            from audit_production_readiness_v2 import _formal_artifact_validation
             from models import db
             from models.analysis import AIAnalysis
             from models.interview import Interview
@@ -58,6 +58,15 @@ def main() -> int:
             )
             from services.formal_artifact_integrity import verified_artifact_snapshot
             from services.storage_paths import open_managed_file_for_read
+
+            def _formal_artifact_hash_reason(row, output_dir):
+                prepared = dict(row)
+                prepared.setdefault("file_format", "xlsx")
+                byte_reason, _structural_reason = _formal_artifact_validation(
+                    prepared,
+                    output_dir,
+                )
+                return byte_reason
 
             app = create_app()
             app.config["TESTING"] = True
