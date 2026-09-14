@@ -144,6 +144,64 @@ def main() -> int:
                 f"pending_jobs={durable_count}",
             )
 
+            original_validate_latest_backup = audit_mod.validate_latest_backup
+            late_mutation = {"committed": False}
+
+            def validate_backup_then_mutate(path):
+                result = original_validate_latest_backup(path)
+                if late_mutation["committed"]:
+                    return result
+                writer = sqlite3.connect(db_path, timeout=5.0)
+                try:
+                    writer.execute(
+                        """
+                        INSERT INTO processing_jobs (
+                            project_id, job_type, status, attempt_count, created_at
+                        )
+                        VALUES (?, 'project_pipeline', 'pending', 0, CURRENT_TIMESTAMP)
+                        """,
+                        (project_id,),
+                    )
+                    writer.commit()
+                    late_mutation["committed"] = True
+                finally:
+                    writer.close()
+                return result
+
+            audit_mod.validate_latest_backup = validate_backup_then_mutate
+            try:
+                late_report = audit_mod.audit(db_path, output_dir, backup_dir)
+            finally:
+                audit_mod.validate_latest_backup = original_validate_latest_backup
+
+            late_codes = {item.get("code") for item in late_report.get("blockers", [])}
+            late_start = late_report.get("info", {}).get("database_data_version_start")
+            late_end = late_report.get("info", {}).get("database_data_version_end")
+            failures += check(
+                "writer can commit after the SQLite snapshot is released but before readiness returns",
+                late_mutation["committed"]
+                and late_report.get("info", {}).get("active_processing_job_count") == 0,
+                f"info={late_report.get('info', {})}",
+            )
+            failures += check(
+                "readiness final change detector covers backup validation and fails closed on a late commit",
+                "database_changed_during_audit" in late_codes
+                and late_report.get("info", {}).get("database_changed_during_audit") is True
+                and isinstance(late_start, int)
+                and isinstance(late_end, int)
+                and late_start != late_end,
+                f"blockers={late_report.get('blockers', [])} start={late_start} end={late_end}",
+            )
+
+            cleanup = sqlite3.connect(db_path)
+            try:
+                cleanup.execute(
+                    "UPDATE processing_jobs SET status='completed' WHERE status='pending'"
+                )
+                cleanup.commit()
+            finally:
+                cleanup.close()
+
             stable_report = audit_mod.audit(db_path, output_dir, backup_dir)
             stable_codes = {item.get("code") for item in stable_report.get("blockers", [])}
             stable_start = stable_report.get("info", {}).get("database_data_version_start")
