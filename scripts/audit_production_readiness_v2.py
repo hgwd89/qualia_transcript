@@ -219,24 +219,59 @@ def _formal_artifact_hash_reason(row: sqlite3.Row, output_dir: Path) -> str | No
             verified.close()
 
 
+class _BorrowedConnection:
+    """Delegate a SQLite connection while suppressing borrower-owned close()."""
+
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+    def close(self) -> None:
+        return None
+
+
+def _run_base_audit_on_snapshot(
+    con,
+    db_path: Path,
+    output_dir: Path,
+    backup_dir: Path,
+) -> dict:
+    """Run the legacy/base checks against the caller-owned SQLite snapshot."""
+    globals_map = base_audit.__globals__
+    original_connect_ro = globals_map["_connect_ro"]
+    globals_map["_connect_ro"] = lambda _db_path: _BorrowedConnection(con)
+    try:
+        return base_audit(db_path, output_dir, backup_dir)
+    finally:
+        globals_map["_connect_ro"] = original_connect_ro
+
+
 def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
-    report = base_audit(db_path, output_dir, backup_dir)
-    blockers = report["blockers"]
-    warnings = report["warnings"]
-    info = report["info"]
-
-    warnings[:] = [
-        item for item in warnings
-        if item.get("code") not in {"done_transcription_without_raw_snapshot", "no_backup_archive"}
-    ]
-    blockers[:] = [
-        item for item in blockers
-        if item.get("code") != "malformed_raw_transcript_snapshot"
-    ]
-
     con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
+    con.execute("BEGIN")
+    # Establish the read snapshot before any acceptance query. The same
+    # connection is then borrowed by base_audit and retained for v2 checks.
+    con.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+
     try:
+        report = _run_base_audit_on_snapshot(con, db_path, output_dir, backup_dir)
+        blockers = report["blockers"]
+        warnings = report["warnings"]
+        info = report["info"]
+        info["database_snapshot"] = "single_read_transaction"
+
+        warnings[:] = [
+            item for item in warnings
+            if item.get("code") not in {"done_transcription_without_raw_snapshot", "no_backup_archive"}
+        ]
+        blockers[:] = [
+            item for item in blockers
+            if item.get("code") != "malformed_raw_transcript_snapshot"
+        ]
+
         tables = {
             row[0]
             for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -507,6 +542,10 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 count=len(missing),
             )
     finally:
+        try:
+            con.rollback()
+        except Exception:
+            pass
         con.close()
 
     latest_backup, backup_error = validate_latest_backup(backup_dir)
