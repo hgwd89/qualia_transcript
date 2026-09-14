@@ -23,6 +23,11 @@ from services.report_formatted import generate_formatted_sheet
 from services.report_analysis import generate_analysis_xlsx, generate_analysis_csv
 from services.report_approved_analysis import generate_approved_analysis_xlsx
 from services.storage_paths import open_managed_file_for_read
+from services.verbatim_artifact_currentness import (
+    VerbatimCurrentnessStatus,
+    verbatim_artifact_currentness,
+    verbatim_artifact_expected_sha256,
+)
 
 bp = Blueprint("outputs", __name__)
 
@@ -38,20 +43,29 @@ def _managed_download_etag(info) -> str:
 
 
 def _begin_formal_download_snapshot() -> None:
-    """Serialize formal-artifact validation until verified bytes are snapshotted."""
+    """Serialize guarded artifact validation until verified bytes are snapshotted."""
     if db.session.new or db.session.dirty or db.session.deleted:
-        raise RuntimeError("formal artifact download requires a clean database session")
+        raise RuntimeError("guarded artifact download requires a clean database session")
     db.session.rollback()
     if db.engine.dialect.name == "sqlite":
         db.session.execute(text("BEGIN IMMEDIATE"))
 
 
 def _output_file_item(generated_file: GeneratedFile) -> dict:
-    status = approved_analysis_artifact_currentness(generated_file)
+    if generated_file.file_type == "approved_analysis":
+        status = approved_analysis_artifact_currentness(generated_file)
+    elif generated_file.file_type == "verbatim":
+        status = verbatim_artifact_currentness(generated_file)
+    else:
+        status = VerbatimCurrentnessStatus(True, "")
     return {
         "obj": generated_file,
+        # Retain the formal_* aliases for existing templates/regressions while the
+        # generic fields now also describe guarded verbatim deliverables.
         "formal_current": status.current,
         "formal_reason": status.reason,
+        "artifact_current": status.current,
+        "artifact_reason": status.reason,
     }
 
 
@@ -145,7 +159,8 @@ def download(file_id):
     stored_path = str(gf.stored_path)
     download_name = gf.original_filename or Path(stored_path).name
 
-    if gf.file_type == "approved_analysis":
+    if gf.file_type in {"approved_analysis", "verbatim"}:
+        guarded_type = str(gf.file_type)
         try:
             _begin_formal_download_snapshot()
             db.session.expire_all()
@@ -154,15 +169,22 @@ def download(file_id):
                 db.session.rollback()
                 abort(404)
 
-            currentness = approved_analysis_artifact_currentness(gf)
+            if guarded_type == "approved_analysis":
+                currentness = approved_analysis_artifact_currentness(gf)
+                expected_artifact_sha256 = formal_artifact_expected_sha256(gf)
+                currentness_prefix = "この承認済AI分析ファイル"
+            else:
+                currentness = verbatim_artifact_currentness(gf)
+                expected_artifact_sha256 = verbatim_artifact_expected_sha256(gf)
+                currentness_prefix = "この発言録ファイル"
+
             if not currentness.current:
                 db.session.rollback()
                 abort(409, description=(
-                    "この承認済AI分析ファイルは現在のcanonical dataに対する正式出力として検証できません: "
+                    f"{currentness_prefix}は現在のcanonical dataに対する配布物として検証できません: "
                     + currentness.reason
                 ))
 
-            expected_artifact_sha256 = formal_artifact_expected_sha256(gf)
             stored_path = str(gf.stored_path)
             download_name = gf.original_filename or Path(stored_path).name
             opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
@@ -175,8 +197,15 @@ def download(file_id):
             db.session.rollback()
             if opened is not None:
                 opened.close()
-            abort(409, description=f"承認済AI分析ファイルのbytes整合性を検証できません: {exc}")
-        except (OSError, ValueError):
+            label = "承認済AI分析" if guarded_type == "approved_analysis" else "発言録"
+            abort(409, description=f"{label}ファイルのbytes整合性を検証できません: {exc}")
+        except ValueError as exc:
+            db.session.rollback()
+            if opened is not None:
+                opened.close()
+            label = "承認済AI分析" if guarded_type == "approved_analysis" else "発言録"
+            abort(409, description=f"{label}ファイルの登録情報を検証できません: {exc}")
+        except OSError:
             db.session.rollback()
             if opened is not None:
                 opened.close()
