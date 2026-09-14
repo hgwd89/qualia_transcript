@@ -5,6 +5,12 @@ import tempfile
 from pathlib import Path
 
 
+# The readiness implementation temporarily replaces the base audit's read-only
+# connection factory when borrowing its pinned snapshot. This focused schema test
+# stubs base_audit entirely, so expose the same global slot without opening a DB.
+_connect_ro = None
+
+
 def check(name: str, ok: bool, detail: str = "") -> int:
     status = "PASS" if ok else "FAIL"
     suffix = f": {detail}" if detail else ""
