@@ -36,6 +36,9 @@ jobs:
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 
+      - name: Run approved-artifact currentness regression
+        run: python tests/smoke_approved_artifact_currentness.py
+
       - name: Run production transcription dispatch fencing regression
         run: python tests/smoke_transcription_dispatch_fencing.py
 
@@ -75,6 +78,9 @@ jobs:
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+
+      - name: Run approved-artifact currentness regression
+        run: python tests/smoke_approved_artifact_currentness.py
 
       - name: Run POSIX snapshot fencing regression
         run: python tests/smoke_backup_snapshot_fencing.py
