@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import tempfile
@@ -42,12 +43,17 @@ def main() -> int:
             from models.segment import Segment, UtteranceMapping
             from services.analysis_review import set_analysis_review_status
             from services.analysis_source_provenance import capture_analysis_source_provenance
-            from services.approved_analysis_currentness import formal_analysis_state_sha256
+            from services.approved_analysis_currentness import (
+                formal_analysis_state_sha256,
+                formal_artifact_expected_sha256,
+            )
             from services.file_manager import (
                 open_output_target_for_write,
                 prepare_output_target,
                 register_generated_file,
             )
+            from services.formal_artifact_integrity import verified_artifact_snapshot
+            from services.storage_paths import open_managed_file_for_read
 
             app = create_app()
             app.config["TESTING"] = True
@@ -163,7 +169,7 @@ def main() -> int:
                         ),
                     )
 
-                def formal_params(current_analysis: AIAnalysis) -> dict:
+                def formal_params(current_analysis: AIAnalysis, data: bytes) -> dict:
                     current_content = json.loads(current_analysis.content_json or "{}")
                     current_provenance = current_content.get("source_provenance") or {}
                     aid = int(current_analysis.id)
@@ -178,13 +184,15 @@ def main() -> int:
                         "formal_analysis_state_sha256": {
                             str(aid): formal_analysis_state_sha256(current_analysis),
                         },
+                        "artifact_sha256": hashlib.sha256(data).hexdigest(),
                     }
 
+                formal_bytes = b"formal-current"
                 formal = register_bytes(
                     "承認済AI分析_current.xlsx",
                     "approved_analysis",
-                    b"formal-current",
-                    formal_params(analysis),
+                    formal_bytes,
+                    formal_params(analysis, formal_bytes),
                 )
                 ordinary = register_bytes(
                     "analysis.xlsx",
@@ -205,7 +213,7 @@ def main() -> int:
                 response = client.get(f"/api/outputs/{formal_id}/download")
                 failures += check(
                     "current formal artifact downloads exact registered bytes",
-                    response.status_code == 200 and response.data == b"formal-current",
+                    response.status_code == 200 and response.data == formal_bytes,
                     f"status={response.status_code} data={response.data!r}",
                 )
                 response.close()
@@ -223,7 +231,7 @@ def main() -> int:
 
                 response = client.get(f"/api/outputs/{legacy_formal_id}/download")
                 failures += check(
-                    "legacy formal artifact without complete provenance/state metadata is not distributable",
+                    "legacy formal artifact without complete provenance/state/hash metadata is not distributable",
                     response.status_code == 409,
                     f"status={response.status_code}",
                 )
@@ -286,17 +294,58 @@ def main() -> int:
                 )
                 response.close()
 
+                refreshed_bytes = b"formal-refreshed"
                 refreshed = register_bytes(
                     "承認済AI分析_refreshed.xlsx",
                     "approved_analysis",
-                    b"formal-refreshed",
-                    formal_params(analysis),
+                    refreshed_bytes,
+                    formal_params(analysis, refreshed_bytes),
                 )
                 refreshed_id = int(refreshed.id)
                 response = client.get(f"/api/outputs/{refreshed_id}/download")
                 failures += check(
                     "refreshed formal artifact is current after review metadata change",
-                    response.status_code == 200 and response.data == b"formal-refreshed",
+                    response.status_code == 200 and response.data == refreshed_bytes,
+                    f"status={response.status_code}",
+                )
+                response.close()
+
+                refreshed_path = Path(config.OUTPUT_DIR) / refreshed.stored_path
+                expected_hash = formal_artifact_expected_sha256(refreshed)
+                managed = open_managed_file_for_read(config.OUTPUT_DIR, refreshed.stored_path)
+                verified = verified_artifact_snapshot(managed, expected_hash)
+                try:
+                    with refreshed_path.open("r+b") as mutated:
+                        mutated.seek(0)
+                        mutated.write(b"X" * len(refreshed_bytes))
+                        mutated.flush()
+                    verified.stream.seek(0)
+                    snapshotted = verified.stream.read()
+                finally:
+                    verified.close()
+                failures += check(
+                    "verified formal snapshot is immutable after later in-place managed-file mutation",
+                    snapshotted == refreshed_bytes,
+                    f"snapshot={snapshotted!r}",
+                )
+
+                response = client.get(f"/api/outputs/{refreshed_id}/download")
+                failures += check(
+                    "in-place formal artifact byte tampering is rejected",
+                    response.status_code == 409,
+                    f"status={response.status_code}",
+                )
+                response.close()
+
+                with refreshed_path.open("r+b") as restored:
+                    restored.seek(0)
+                    restored.write(refreshed_bytes)
+                    restored.truncate(len(refreshed_bytes))
+                    restored.flush()
+                response = client.get(f"/api/outputs/{refreshed_id}/download")
+                failures += check(
+                    "restoring exact registered formal bytes restores distributability",
+                    response.status_code == 200 and response.data == refreshed_bytes,
                     f"status={response.status_code}",
                 )
                 response.close()
@@ -345,9 +394,10 @@ def main() -> int:
                     encoding="utf-8"
                 )
                 failures += check(
-                    "formal exporter records source and exported-analysis state hashes",
+                    "formal exporter records source, analysis-state, and artifact byte hashes",
                     '"source_provenance_sha256"' in report_source
-                    and '"formal_analysis_state_sha256"' in report_source,
+                    and '"formal_analysis_state_sha256"' in report_source
+                    and '"artifact_sha256"' in report_source,
                 )
 
                 db.session.rollback()
