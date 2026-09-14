@@ -104,8 +104,8 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 
 - `services/transcription.py`: OpenAI or Whisper transcription and raw transcript snapshot writing.
 - `services/raw_snapshot_storage.py`: ancestry-pinned exclusive creation, crash-durable publication, byte verification, and batch reads for immutable raw transcript JSON evidence.
-- `services/mapper.py`: OpenAI-backed mapping of respondent utterances to questions.
-- `services/analyzer.py`: OpenAI-backed interview, question, cross-participant, and integrated AI analysis.
+- `services/mapper.py`: OpenAI-backed mapping of respondent utterances to questions; canonical AI mapping saves require a durable result-write guard before provider work and revalidate that guard before replacement commit.
+- `services/analyzer.py`: OpenAI-backed interview, question, cross-participant, and integrated AI analysis; every canonical `AIAnalysis` save requires a durable result-write guard before provider work and revalidates it immediately before commit.
 - `services/analysis_review.py`: human review transitions and evidence-quote → respondent source-segment resolution.
 - `services/semantic_analysis.py`: semantic clustering and dry-run/no-ai support.
 - `services/integrated_analysis.py`: no-ai integrated analysis assembly from existing local data.
@@ -143,6 +143,8 @@ After scope validation, same-scope active work is reused only when its durable r
 `services/processing_jobs.py` treats `status='running'` plus `attempt_count` as the worker lease. Claiming a pending job increments the attempt token. Progress updates and terminal writes are conditional on the same immutable attempt number; if stale recovery or retry has moved ownership to a later attempt, the older worker raises `JobLeaseLost` rather than continuing to publish progress or success.
 
 Canonical result writes have an additional fence. After expensive external work and before changing canonical result rows, `begin_job_result_write()` acquires a database write reservation (`BEGIN IMMEDIATE` on SQLite, row lock on databases that support it) and revalidates the worker's attempt token. That closes the race where stale recovery/retry could supersede a worker between its final lease check and its result commit. Analysis handlers receive this result-write guard before committing `AIAnalysis`; transcription/mapping paths have corresponding cleanup/invalidation helpers in `services/processing_result_guard.py`. Transcription applies the same reservation to preflight cleanup and attempt creation, `running`/`error` status commits, immutable raw-evidence publication, chunk manifests, and final success so no stale worker can mutate state or add evidence after a later attempt takes ownership.
+
+The canonical AI save services themselves are also fail-closed boundaries. `services/analyzer.py`, persisted `services/semantic_analysis.py`, and the write-producing path in `services/mapper.py` refuse to start provider-backed canonical work unless a durable result-write guard was supplied by the owning worker. The guard is checked for presence before paid/provider work begins and is invoked again after provider output has been normalized but before any `AIAnalysis` or `UtteranceMapping` mutation is committed. Direct programmatic service calls therefore cannot silently bypass job admission, attempt generation, lease ownership, source-input fencing, or crash-window reconciliation merely by omitting the guard.
 
 Crash-window idempotency is explicit. `services/processing_result_guard.py` can detect mapping or analysis results that were already committed after the durable job was created but before the worker managed to mark the job `succeeded`. A retry reuses that committed result instead of duplicating canonical analysis rows. Stale transcription attempts can be invalidated and their partial derived segments removed without rewriting immutable raw transcript snapshots.
 
