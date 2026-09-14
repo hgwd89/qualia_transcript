@@ -13,12 +13,11 @@ foreach ($arg in $args) {
 }
 
 if ($projectScoped) {
-    Write-Host "[INFO] Running read-only project-scoped production readiness audit..."
-    python scripts/run_with_runtime_reader.py scripts/audit_production_readiness_project.py @args
+    Write-Host "[INFO] Running final read-only project-scoped production readiness audit..."
 } else {
-    Write-Host "[INFO] Running read-only database-wide production readiness audit..."
-    python scripts/run_with_runtime_reader.py scripts/audit_production_readiness_v2.py @args
+    Write-Host "[INFO] Running final read-only database-wide production readiness audit..."
 }
+python scripts/run_with_runtime_reader.py scripts/audit_production_readiness_final.py @args
 $exitCode = $LASTEXITCODE
 
 if ($exitCode -eq 0) {
