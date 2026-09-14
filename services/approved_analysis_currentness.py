@@ -4,7 +4,8 @@ Formal approved-analysis files are immutable generated history, but the normal
 professional-delivery path must only expose one as current when it still
 represents the complete set of currently approved analyses, the exact analysis
 state exported into the workbook, and the canonical source provenance recorded
-at export.
+at export. Byte integrity is separately verified from the registered artifact
+SHA-256 before download bytes are exposed.
 """
 from __future__ import annotations
 
@@ -89,6 +90,25 @@ def formal_analysis_state_sha256(analysis: AIAnalysis) -> str:
     return hashlib.sha256(_canonical_json(state).encode("utf-8")).hexdigest()
 
 
+def _generation_params(generated_file: GeneratedFile) -> dict:
+    try:
+        params = json.loads(generated_file.generation_params_json or "{}")
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("formal artifact generation metadata is invalid") from exc
+    if not isinstance(params, dict):
+        raise ValueError("formal artifact generation metadata is invalid")
+    return params
+
+
+def formal_artifact_expected_sha256(generated_file: GeneratedFile) -> str:
+    """Return the registered formal artifact hash or fail closed."""
+    params = _generation_params(generated_file)
+    value = str(params.get("artifact_sha256") or "").strip().lower()
+    if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+        raise ValueError("formal artifact SHA-256 metadata is missing or invalid")
+    return value
+
+
 def formal_approved_analysis_readiness(project_id: int) -> dict:
     """Return advisory UI readiness for generating a new formal workbook.
 
@@ -125,15 +145,18 @@ def approved_analysis_artifact_currentness(generated_file: GeneratedFile) -> Cur
 
     Missing legacy metadata fails closed. The file itself is never deleted; this
     function only decides whether the ordinary formal-delivery path may expose it.
+    The actual file bytes are verified against ``artifact_sha256`` by the download
+    boundary immediately before constructing the immutable response snapshot.
     """
     if generated_file.file_type != "approved_analysis":
         return CurrentnessStatus(True, "")
 
     try:
-        params = json.loads(generated_file.generation_params_json or "{}")
-    except (json.JSONDecodeError, TypeError):
-        return CurrentnessStatus(False, "formal artifact generation metadata is invalid")
-    if not isinstance(params, dict) or params.get("approved_only") is not True:
+        params = _generation_params(generated_file)
+        formal_artifact_expected_sha256(generated_file)
+    except ValueError as exc:
+        return CurrentnessStatus(False, str(exc))
+    if params.get("approved_only") is not True:
         return CurrentnessStatus(False, "formal artifact generation provenance is missing")
 
     raw_ids = params.get("analysis_ids")
