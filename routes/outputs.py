@@ -1,11 +1,18 @@
 from pathlib import Path
 
 from flask import Blueprint, jsonify, request, send_file, abort, render_template
+from sqlalchemy import text
+
 import config
+from models import db
 from models.project import Project
 from models.interview import Interview
 from models.analysis import AIAnalysis
 from models.generated_file import GeneratedFile
+from services.approved_analysis_currentness import (
+    approved_analysis_artifact_currentness,
+    formal_approved_analysis_readiness,
+)
 from services.report_verbatim import generate_verbatim
 from services.report_formatted import generate_formatted_sheet
 from services.report_analysis import generate_analysis_xlsx, generate_analysis_csv
@@ -25,6 +32,24 @@ def _managed_download_etag(info) -> str:
     return "-".join(f"{int(value):x}" for value in values)
 
 
+def _begin_formal_download_snapshot() -> None:
+    """Serialize formal-artifact validation until its exact bytes are pinned."""
+    if db.session.new or db.session.dirty or db.session.deleted:
+        raise RuntimeError("formal artifact download requires a clean database session")
+    db.session.rollback()
+    if db.engine.dialect.name == "sqlite":
+        db.session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _output_file_item(generated_file: GeneratedFile) -> dict:
+    status = approved_analysis_artifact_currentness(generated_file)
+    return {
+        "obj": generated_file,
+        "formal_current": status.current,
+        "formal_reason": status.reason,
+    }
+
+
 @bp.route("/projects/<int:project_id>/outputs")
 def index(project_id):
     project = Project.query.get_or_404(project_id)
@@ -34,16 +59,16 @@ def index(project_id):
         .order_by(GeneratedFile.created_at.desc())
         .all()
     )
-    approved_count = AIAnalysis.query.filter_by(
-        project_id=project_id,
-        review_status="approved",
-    ).count()
+    formal_readiness = formal_approved_analysis_readiness(project_id)
     analysis_count = AIAnalysis.query.filter_by(project_id=project_id).count()
     return render_template(
         "outputs/index.html",
         project=project,
-        files=files,
-        approved_count=approved_count,
+        files=[_output_file_item(item) for item in files],
+        approved_count=formal_readiness["approved_count"],
+        current_approved_count=formal_readiness["current_count"],
+        invalid_approved_count=formal_readiness["invalid_count"],
+        formal_ready=formal_readiness["ready"],
         analysis_count=analysis_count,
     )
 
@@ -111,13 +136,51 @@ def gen_approved_analysis(project_id):
 @bp.route("/api/outputs/<int:file_id>/download")
 def download(file_id):
     gf = GeneratedFile.query.get_or_404(file_id)
-    try:
-        opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
-    except (OSError, ValueError):
-        abort(404)
+    opened = None
+    stored_path = str(gf.stored_path)
+    download_name = gf.original_filename or Path(stored_path).name
+
+    if gf.file_type == "approved_analysis":
+        try:
+            _begin_formal_download_snapshot()
+            db.session.expire_all()
+            gf = db.session.get(GeneratedFile, int(file_id))
+            if gf is None:
+                db.session.rollback()
+                abort(404)
+
+            currentness = approved_analysis_artifact_currentness(gf)
+            if not currentness.current:
+                db.session.rollback()
+                abort(409, description=(
+                    "この承認済AI分析ファイルは現在のcanonical dataに対する正式出力として検証できません: "
+                    + currentness.reason
+                ))
+
+            stored_path = str(gf.stored_path)
+            download_name = gf.original_filename or Path(stored_path).name
+            opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
+            # Retain both the exact managed-file handle and its download metadata
+            # before releasing the serialized DB snapshot. No ORM reload is
+            # needed after the write reservation is released.
+            db.session.commit()
+        except (OSError, ValueError):
+            db.session.rollback()
+            if opened is not None:
+                opened.close()
+            abort(404)
+        except Exception:
+            db.session.rollback()
+            if opened is not None:
+                opened.close()
+            raise
+    else:
+        try:
+            opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
+        except (OSError, ValueError):
+            abort(404)
 
     info = opened.stat_result
-    download_name = gf.original_filename or Path(gf.stored_path).name
     try:
         response = send_file(
             opened.stream,
