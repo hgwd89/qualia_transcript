@@ -86,6 +86,13 @@ def _canonical_question_code(question: InterviewFlowQuestion) -> str:
     return str(question.question_code or f"Q{question.id}")
 
 
+def _require_result_write_guard(result_write_guard: ResultWriteGuard | None) -> ResultWriteGuard:
+    """Reject canonical analysis saves that are not owned by a durable attempt."""
+    if result_write_guard is None:
+        raise RuntimeError("analysis save requires a durable result-write guard")
+    return result_write_guard
+
+
 # ── インタビュー単位の分析 ────────────────────────────────────
 
 def analyze_per_question(
@@ -131,6 +138,7 @@ def analyze_per_question(
         "回答は日本語で返してください。"
     )
 
+    result_write_guard = _require_result_write_guard(result_write_guard)
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="analysis_result")
 
     canonical_q_code = _canonical_question_code(question)
@@ -151,8 +159,7 @@ def analyze_per_question(
         "unresolved": result.get("unresolved", ""),
     }
 
-    if result_write_guard is not None:
-        result_write_guard()
+    result_write_guard()
 
     analysis = AIAnalysis(
         project_id=interview.project_id,
@@ -211,10 +218,10 @@ def analyze_interview_summary(
         "回答は日本語で返してください。"
     )
 
+    result_write_guard = _require_result_write_guard(result_write_guard)
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="summary_result")
 
-    if result_write_guard is not None:
-        result_write_guard()
+    result_write_guard()
 
     analysis = AIAnalysis(
         project_id=interview.project_id,
@@ -291,6 +298,7 @@ def analyze_cross_participants(
         "共通点・相違点・注目発言・マーケティング示唆を分析してください。"
     )
 
+    result_write_guard = _require_result_write_guard(result_write_guard)
     result = call_structured(system, user, CROSS_SCHEMA, schema_name="cross_analysis_result")
     canonical_q_code = _canonical_question_code(question)
     normalized_findings = []
@@ -305,8 +313,7 @@ def analyze_cross_participants(
     normalized_result["question_code"] = canonical_q_code
     normalized_result["findings"] = normalized_findings
 
-    if result_write_guard is not None:
-        result_write_guard()
+    result_write_guard()
 
     analysis = AIAnalysis(
         project_id=project_id,
@@ -395,6 +402,7 @@ def analyze_project_integrated(
         "主要な発見事項、共通テーマ、参加者間の違い、代表発言、マーケティング示唆、注意点を分析してください。"
     )
 
+    result_write_guard = _require_result_write_guard(result_write_guard)
     result = call_structured(system, user, INTEGRATED_SCHEMA, schema_name="integrated_result")
     normalized_findings = []
     for finding in (result.get("findings") or []):
@@ -414,8 +422,7 @@ def analyze_project_integrated(
     normalized_result["source_interview_ids"] = sorted(source_interview_ids)
     normalized_result["findings"] = normalized_findings
 
-    if result_write_guard is not None:
-        result_write_guard()
+    result_write_guard()
 
     analysis = AIAnalysis(
         project_id=project_id,
