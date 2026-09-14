@@ -6,12 +6,18 @@ from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
+from sqlalchemy import text
 
 import config
 from models import db
 from models.analysis import AIAnalysis
 from models.generated_file import GeneratedFile
 from models.project import Project
+from services.analysis_source_provenance import (
+    PROVENANCE_KEY,
+    AnalysisSourceProvenanceError,
+    require_current_analysis_source_provenance,
+)
 from services.file_manager import (
     open_output_target_for_write,
     prepare_output_target,
@@ -80,7 +86,16 @@ def _join(values) -> str:
     return ",".join(str(v) for v in values)
 
 
-def _approved_rows(project_id: int) -> tuple[list[list], list[list], int]:
+def _begin_formal_export_snapshot() -> None:
+    """Serialize source validation with formal output registration."""
+    if db.session.new or db.session.dirty or db.session.deleted:
+        raise RuntimeError("formal analysis export requires a clean database session")
+    db.session.rollback()
+    if db.engine.dialect.name == "sqlite":
+        db.session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _approved_rows(project_id: int) -> tuple[list[list], list[list], int, list[int], dict[str, str]]:
     analyses = (
         AIAnalysis.query
         .filter_by(project_id=project_id, review_status="approved")
@@ -93,9 +108,22 @@ def _approved_rows(project_id: int) -> tuple[list[list], list[list], int]:
     summary_rows = [SUMMARY_HEADERS]
     evidence_rows = [EVIDENCE_HEADERS]
     finding_count = 0
+    analysis_ids = []
+    provenance_hashes: dict[str, str] = {}
 
     for analysis in analyses:
+        try:
+            require_current_analysis_source_provenance(analysis)
+        except AnalysisSourceProvenanceError as exc:
+            raise ValueError(
+                f"承認済みAIAnalysis id={analysis.id} の生成元入力が現在のcanonical dataと一致しません: {exc}"
+            ) from exc
+
         content = _parse_content(analysis)
+        provenance = content.get(PROVENANCE_KEY) or {}
+        analysis_ids.append(int(analysis.id))
+        provenance_hashes[str(int(analysis.id))] = str(provenance.get("sha256") or "")
+
         findings = content.get("findings") or []
         if not isinstance(findings, list):
             raise ValueError(f"AIAnalysis id={analysis.id} の findings が配列ではありません")
@@ -145,7 +173,7 @@ def _approved_rows(project_id: int) -> tuple[list[list], list[list], int]:
             ])
             finding_count += 1
 
-    return summary_rows, evidence_rows, finding_count
+    return summary_rows, evidence_rows, finding_count, analysis_ids, provenance_hashes
 
 
 def _style_sheet(ws):
@@ -165,42 +193,55 @@ def _style_sheet(ws):
 
 
 def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
-    project = Project.query.get(project_id)
-    if not project:
-        raise ValueError("project が見つかりません")
-
-    summary_rows, evidence_rows, finding_count = _approved_rows(project_id)
-
-    wb = Workbook()
-    ws_summary = wb.active
-    ws_summary.title = "承認済AI分析"
-    for row in summary_rows:
-        ws_summary.append(row)
-    _style_sheet(ws_summary)
-
-    ws_evidence = wb.create_sheet("根拠引用")
-    for row in evidence_rows:
-        ws_evidence.append(row)
-    _style_sheet(ws_evidence)
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"承認済AI分析_{project.name}_{ts}.xlsx"
-    target = prepare_output_target(project_id, filename)
-    opened = open_output_target_for_write(target)
+    _begin_formal_export_snapshot()
     try:
-        wb.save(opened.stream)
-    finally:
-        opened.close()
+        project = db.session.get(Project, int(project_id))
+        if not project:
+            raise ValueError("project が見つかりません")
 
-    params = {
-        "approved_only": True,
-        "analysis_count": len(summary_rows) - 1,
-        "finding_count": finding_count,
-    }
-    return register_generated_file(
-        target,
-        project_id=project_id,
-        file_type="approved_analysis",
-        file_format="xlsx",
-        generation_params_json=json.dumps(params, ensure_ascii=False),
-    )
+        (
+            summary_rows,
+            evidence_rows,
+            finding_count,
+            analysis_ids,
+            provenance_hashes,
+        ) = _approved_rows(project_id)
+
+        wb = Workbook()
+        ws_summary = wb.active
+        ws_summary.title = "承認済AI分析"
+        for row in summary_rows:
+            ws_summary.append(row)
+        _style_sheet(ws_summary)
+
+        ws_evidence = wb.create_sheet("根拠引用")
+        for row in evidence_rows:
+            ws_evidence.append(row)
+        _style_sheet(ws_evidence)
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"承認済AI分析_{project.name}_{ts}.xlsx"
+        target = prepare_output_target(project_id, filename)
+        opened = open_output_target_for_write(target)
+        try:
+            wb.save(opened.stream)
+        finally:
+            opened.close()
+
+        params = {
+            "approved_only": True,
+            "analysis_count": len(summary_rows) - 1,
+            "finding_count": finding_count,
+            "analysis_ids": analysis_ids,
+            "source_provenance_sha256": provenance_hashes,
+        }
+        return register_generated_file(
+            target,
+            project_id=project_id,
+            file_type="approved_analysis",
+            file_format="xlsx",
+            generation_params_json=json.dumps(params, ensure_ascii=False),
+        )
+    except Exception:
+        db.session.rollback()
+        raise
