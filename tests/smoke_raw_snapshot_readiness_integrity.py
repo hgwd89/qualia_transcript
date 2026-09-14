@@ -7,6 +7,11 @@ import tempfile
 from pathlib import Path
 
 
+# The readiness implementation temporarily replaces the base audit's read-only
+# connection factory. This regression stubs base_audit, so expose the same slot.
+_connect_ro = None
+
+
 def check(name: str, ok: bool, detail: str = "") -> int:
     status = "PASS" if ok else "FAIL"
     suffix = f": {detail}" if detail else ""
