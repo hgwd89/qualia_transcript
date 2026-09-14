@@ -1,12 +1,14 @@
 """Currentness checks for formal approved-analysis outputs.
 
-Formal approved-analysis files are immutable historical artifacts, but the normal
+Formal approved-analysis files are immutable generated history, but the normal
 professional-delivery path must only expose one as current when it still
-represents the complete set of currently approved analyses and every included
-analysis still proves the same canonical source provenance recorded at export.
+represents the complete set of currently approved analyses, the exact analysis
+state exported into the workbook, and the canonical source provenance recorded
+at export.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
@@ -28,9 +30,63 @@ class CurrentnessStatus:
 def _analysis_content(analysis: AIAnalysis) -> dict:
     try:
         value = json.loads(analysis.content_json or "{}")
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"AIAnalysis id={analysis.id} content_json is invalid") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"AIAnalysis id={analysis.id} content_json is not an object")
+    return value
+
+
+def _iso(value) -> str:
+    return value.isoformat() if value else ""
+
+
+def _canonical_json(value: dict) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def formal_analysis_state_sha256(analysis: AIAnalysis) -> str:
+    """Hash the exact analysis/review fields represented by the formal workbook."""
+    content = _analysis_content(analysis)
+    findings = content.get("findings") or []
+    if not isinstance(findings, list):
+        raise ValueError(f"AIAnalysis id={analysis.id} findings is not an array")
+
+    normalized_findings = []
+    for index, finding in enumerate(findings, start=1):
+        if not isinstance(finding, dict):
+            raise ValueError(f"AIAnalysis id={analysis.id} finding #{index} is not an object")
+        normalized_findings.append({
+            "point": finding.get("point", "") or "",
+            "evidence_quote": finding.get("evidence_quote", "") or "",
+            "source_segment_ids": list(finding.get("source_segment_ids") or []),
+            "participant_codes": list(finding.get("participant_codes") or []),
+            "question_codes": list(finding.get("question_codes") or []),
+            "confidence": finding.get("confidence", "") or "",
+        })
+
+    participant_code = ""
+    if analysis.interview and analysis.interview.participant:
+        participant_code = analysis.interview.participant.participant_code or ""
+    question_code = analysis.question.question_code or "" if analysis.question else ""
+
+    state = {
+        "analysis_id": int(analysis.id),
+        "analysis_type": str(analysis.analysis_type or ""),
+        "title": analysis.title or "",
+        "participant_code": participant_code,
+        "question_code": question_code,
+        "summary_text": analysis.summary_text or "",
+        "implications": content.get("implications", "") or "",
+        "unresolved": content.get("unresolved", "") or "",
+        "review_status": analysis.review_status or "",
+        "review_note": analysis.review_note or "",
+        "reviewed_at": _iso(analysis.reviewed_at),
+        "model_used": analysis.model_used or "",
+        "created_at": _iso(analysis.created_at),
+        "findings": normalized_findings,
+    }
+    return hashlib.sha256(_canonical_json(state).encode("utf-8")).hexdigest()
 
 
 def formal_approved_analysis_readiness(project_id: int) -> dict:
@@ -82,8 +138,14 @@ def approved_analysis_artifact_currentness(generated_file: GeneratedFile) -> Cur
 
     raw_ids = params.get("analysis_ids")
     hashes = params.get("source_provenance_sha256")
-    if not isinstance(raw_ids, list) or not raw_ids or not isinstance(hashes, dict):
-        return CurrentnessStatus(False, "formal artifact analysis provenance is missing")
+    state_hashes = params.get("formal_analysis_state_sha256")
+    if (
+        not isinstance(raw_ids, list)
+        or not raw_ids
+        or not isinstance(hashes, dict)
+        or not isinstance(state_hashes, dict)
+    ):
+        return CurrentnessStatus(False, "formal artifact analysis provenance/state metadata is missing")
     try:
         analysis_ids = [int(value) for value in raw_ids]
     except (TypeError, ValueError):
@@ -116,12 +178,23 @@ def approved_analysis_artifact_currentness(generated_file: GeneratedFile) -> Cur
         if analysis.review_status != "approved":
             return CurrentnessStatus(False, f"formal artifact analysis id={analysis_id} is no longer approved")
 
-        content = _analysis_content(analysis)
-        provenance = content.get(PROVENANCE_KEY) if content else None
+        try:
+            content = _analysis_content(analysis)
+        except ValueError as exc:
+            return CurrentnessStatus(False, str(exc))
+        provenance = content.get(PROVENANCE_KEY)
         stored_hash = str((provenance or {}).get("sha256") or "") if isinstance(provenance, dict) else ""
         artifact_hash = str(hashes.get(str(int(analysis_id))) or "")
         if not stored_hash or artifact_hash != stored_hash:
             return CurrentnessStatus(False, f"formal artifact analysis id={analysis_id} does not match its exported source hash")
+
+        try:
+            current_state_hash = formal_analysis_state_sha256(analysis)
+        except ValueError as exc:
+            return CurrentnessStatus(False, str(exc))
+        artifact_state_hash = str(state_hashes.get(str(int(analysis_id))) or "")
+        if not artifact_state_hash or artifact_state_hash != current_state_hash:
+            return CurrentnessStatus(False, f"formal artifact analysis id={analysis_id} no longer matches its exported analysis/review state")
 
         ok, reason = analysis_source_provenance_status(analysis)
         if not ok:
