@@ -346,9 +346,16 @@ def audit(
             sys.path.insert(0, str(root))
         from services.analysis_source_provenance_sqlite import validate_analysis_source_provenance
 
+        analysis_columns = {
+            str(row["name"])
+            for row in con.execute("PRAGMA table_info(ai_analyses)").fetchall()
+        }
+        question_id_select = (
+            "question_id" if "question_id" in analysis_columns else "NULL AS question_id"
+        )
         approved_rows = con.execute(
-            """
-            SELECT id, project_id, interview_id, question_id, analysis_type, content_json
+            f"""
+            SELECT id, project_id, interview_id, {question_id_select}, analysis_type, content_json
             FROM ai_analyses
             WHERE review_status='approved'
             ORDER BY id
