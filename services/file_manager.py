@@ -239,10 +239,12 @@ def register_generated_file(
     A second guard is acquired after the report library closes its writer. That
     guard re-pins the current exact file generation and its ancestor chain, stays
     live through DB commit, and verifies the public managed pathname again after
-    commit. Every newly registered artifact also receives a SHA-256 of that exact
-    generation so later downloads can reject in-place byte tampering. Rollback
-    cleanup is performed through the pinned guard rather than check-then-unlink on
-    the mutable pathname.
+    commit. Newly registered ordinary artifacts receive a SHA-256 of that exact
+    generation so later downloads can reject in-place byte tampering. Formal
+    artifacts retain their stricter exporter-owned metadata contract; when formal
+    metadata is supplied, its hash is rechecked against the same bytes here.
+    Rollback cleanup is performed through the pinned guard rather than
+    check-then-unlink on the mutable pathname.
     """
     expected = target.written_stat
     if expected is None:
@@ -264,10 +266,11 @@ def register_generated_file(
             target.stored_path,
             expected,
         )
-        generation_params_json = _generation_params_with_artifact_sha256(
-            generation_params_json,
-            artifact_sha256,
-        )
+        if file_type != "approved_analysis" or generation_params_json:
+            generation_params_json = _generation_params_with_artifact_sha256(
+                generation_params_json,
+                artifact_sha256,
+            )
         guard.verify_namespace()
 
         gf = GeneratedFile(
