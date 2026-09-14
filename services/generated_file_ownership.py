@@ -53,7 +53,7 @@ def inspect_generated_file_ownership(
     """Find cross-project GeneratedFile ownership inconsistencies read-only.
 
     `main.` is used deliberately so project-scoped readiness can still compare a
-    selected project's generated-file rows with the canonical interview table
+    selected project's generated-file rows with canonical project/interview tables
     rather than TEMP VIEWs that would hide a cross-project target.
     """
     params: tuple[object, ...] = ()
@@ -70,9 +70,11 @@ def inspect_generated_file_ownership(
             gf.project_id,
             gf.interview_id,
             gf.stored_path,
+            p.id AS linked_project_id,
             i.id AS linked_interview_id,
             i.project_id AS interview_project_id
         FROM main.generated_files gf
+        LEFT JOIN main.projects p ON p.id=gf.project_id
         LEFT JOIN main.interviews i ON i.id=gf.interview_id
         {where}
         ORDER BY gf.id
@@ -94,6 +96,16 @@ def inspect_generated_file_ownership(
             continue
 
         owner_project_id = int(raw_project_id)
+        if row["linked_project_id"] is None:
+            blockers.append({
+                "code": "generated_file_project_missing",
+                "message": "GeneratedFile references a missing project",
+                "context": {
+                    "generated_file_id": generated_file_id,
+                    "project_id": owner_project_id,
+                },
+            })
+
         interview_id = row["interview_id"]
         if interview_id is not None:
             if row["linked_interview_id"] is None:
