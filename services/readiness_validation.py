@@ -24,6 +24,8 @@ _OOXML_RULES = {
         "main_content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
     },
 }
+_BACKUP_NAME_PREFIX = "qualia_backup_"
+_BACKUP_TIMESTAMP_LENGTH = len("YYYYMMDDTHHMMSSZ")
 
 
 def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], list[dict]]:
@@ -292,13 +294,30 @@ def validate_generated_artifact(path: Path, file_format: str) -> str | None:
     return None
 
 
+def _backup_recency_key(path: Path) -> tuple[str, int, str]:
+    """Keep filename chronology, but use mtime to order same-second backups."""
+    name = path.name
+    timestamp_start = len(_BACKUP_NAME_PREFIX)
+    timestamp_key = name[timestamp_start:timestamp_start + _BACKUP_TIMESTAMP_LENGTH]
+    try:
+        mtime_ns = int(path.stat().st_mtime_ns)
+    except OSError:
+        mtime_ns = -1
+    return timestamp_key, mtime_ns, name
+
+
 def validate_latest_backup(backup_dir: Path) -> tuple[Path | None, str | None]:
     """Validate the newest Qualia backup archive without modifying local data."""
-    archives = sorted(backup_dir.glob("qualia_backup_*.zip")) if backup_dir.is_dir() else []
+    archives = list(backup_dir.glob("qualia_backup_*.zip")) if backup_dir.is_dir() else []
     if not archives:
         return None, None
 
-    latest = archives[-1]
+    # Backup filenames encode UTC only to whole seconds. Multiple serialized
+    # maintenance backups can still be published within one second, and their
+    # label/UUID suffixes are not chronological. Preserve the filename timestamp
+    # ordering across seconds, then use filesystem nanosecond mtime as the actual
+    # publication-order tie breaker within the same encoded second.
+    latest = max(archives, key=_backup_recency_key)
     try:
         from services.local_backup import validate_backup
 
