@@ -75,6 +75,9 @@ jobs:
       - name: Run raw snapshot storage fencing regression
         run: python tests/smoke_raw_snapshot_storage_fencing.py
 
+      - name: Run raw snapshot readiness integrity regression
+        run: python tests/smoke_raw_snapshot_readiness_integrity.py
+
       - name: Run question-code readiness regression
         run: python tests/smoke_question_code_readiness.py
 
@@ -144,6 +147,9 @@ jobs:
 
       - name: Run raw snapshot storage fencing regression
         run: python tests/smoke_raw_snapshot_storage_fencing.py
+
+      - name: Run raw snapshot readiness integrity regression
+        run: python tests/smoke_raw_snapshot_readiness_integrity.py
 
       - name: Run OpenAI chunk result-write fencing regression
         run: python tests/smoke_openai_chunk_write_fencing.py
