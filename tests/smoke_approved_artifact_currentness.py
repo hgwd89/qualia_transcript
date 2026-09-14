@@ -40,7 +40,9 @@ def main() -> int:
             from models.participant import Participant
             from models.project import Project
             from models.segment import Segment, UtteranceMapping
+            from services.analysis_review import set_analysis_review_status
             from services.analysis_source_provenance import capture_analysis_source_provenance
+            from services.approved_analysis_currentness import formal_analysis_state_sha256
             from services.file_manager import (
                 open_output_target_for_write,
                 prepare_output_target,
@@ -104,28 +106,31 @@ def main() -> int:
                 db.session.commit()
 
                 project_id = int(project.id)
+                interview_id = int(interview.id)
+                question_id = int(question.id)
                 participant_id = int(participant.id)
+                segment_id = int(segment.id)
                 provenance = capture_analysis_source_provenance(
                     "per_question",
                     project_id,
-                    interview_id=int(interview.id),
-                    question_id=int(question.id),
+                    interview_id=interview_id,
+                    question_id=question_id,
                 )
                 analysis = AIAnalysis(
                     project_id=project_id,
-                    interview_id=int(interview.id),
-                    question_id=int(question.id),
+                    interview_id=interview_id,
+                    question_id=question_id,
                     analysis_type="per_question",
                     title="Q1 考察",
                     summary_text="安心感が重要",
                     content_json=json.dumps({
-                        "question_id": int(question.id),
+                        "question_id": question_id,
                         "question_code": "Q1",
                         "question_text": question.question_text,
                         "findings": [{
                             "point": "安心感が重要",
                             "evidence_quote": source_text,
-                            "source_segment_ids": [int(segment.id)],
+                            "source_segment_ids": [segment_id],
                             "participant_codes": ["P01"],
                             "question_codes": ["Q1"],
                             "confidence": "high",
@@ -158,20 +163,28 @@ def main() -> int:
                         ),
                     )
 
-                params = {
-                    "approved_only": True,
-                    "analysis_count": 1,
-                    "finding_count": 1,
-                    "analysis_ids": [analysis_id],
-                    "source_provenance_sha256": {
-                        str(analysis_id): provenance["sha256"],
-                    },
-                }
+                def formal_params(current_analysis: AIAnalysis) -> dict:
+                    current_content = json.loads(current_analysis.content_json or "{}")
+                    current_provenance = current_content.get("source_provenance") or {}
+                    aid = int(current_analysis.id)
+                    return {
+                        "approved_only": True,
+                        "analysis_count": 1,
+                        "finding_count": 1,
+                        "analysis_ids": [aid],
+                        "source_provenance_sha256": {
+                            str(aid): str(current_provenance.get("sha256") or ""),
+                        },
+                        "formal_analysis_state_sha256": {
+                            str(aid): formal_analysis_state_sha256(current_analysis),
+                        },
+                    }
+
                 formal = register_bytes(
                     "承認済AI分析_current.xlsx",
                     "approved_analysis",
                     b"formal-current",
-                    params,
+                    formal_params(analysis),
                 )
                 ordinary = register_bytes(
                     "analysis.xlsx",
@@ -210,7 +223,7 @@ def main() -> int:
 
                 response = client.get(f"/api/outputs/{legacy_formal_id}/download")
                 failures += check(
-                    "legacy formal artifact without generation provenance is not distributable",
+                    "legacy formal artifact without complete provenance/state metadata is not distributable",
                     response.status_code == 409,
                     f"status={response.status_code}",
                 )
@@ -253,16 +266,51 @@ def main() -> int:
                 participant.participant_code = "P01"
                 db.session.commit()
 
+                analysis = db.session.get(AIAnalysis, analysis_id)
+                analysis, unresolved = set_analysis_review_status(
+                    analysis,
+                    "approved",
+                    "review metadata changed",
+                )
+                failures += check(
+                    "reapproval with current source succeeds",
+                    not unresolved and analysis.review_status == "approved",
+                    f"unresolved={unresolved}",
+                )
+
+                response = client.get(f"/api/outputs/{formal_id}/download")
+                failures += check(
+                    "review-state drift blocks an older formal artifact even when source is unchanged",
+                    response.status_code == 409,
+                    f"status={response.status_code}",
+                )
+                response.close()
+
+                refreshed = register_bytes(
+                    "承認済AI分析_refreshed.xlsx",
+                    "approved_analysis",
+                    b"formal-refreshed",
+                    formal_params(analysis),
+                )
+                refreshed_id = int(refreshed.id)
+                response = client.get(f"/api/outputs/{refreshed_id}/download")
+                failures += check(
+                    "refreshed formal artifact is current after review metadata change",
+                    response.status_code == 200 and response.data == b"formal-refreshed",
+                    f"status={response.status_code}",
+                )
+                response.close()
+
                 second_provenance = capture_analysis_source_provenance(
                     "per_question",
                     project_id,
-                    interview_id=int(interview.id),
-                    question_id=int(question.id),
+                    interview_id=interview_id,
+                    question_id=question_id,
                 )
                 second = AIAnalysis(
                     project_id=project_id,
-                    interview_id=int(interview.id),
-                    question_id=int(question.id),
+                    interview_id=interview_id,
+                    question_id=question_id,
                     analysis_type="per_question",
                     title="Q1 second",
                     summary_text="second",
@@ -270,7 +318,7 @@ def main() -> int:
                         "findings": [{
                             "point": "second",
                             "evidence_quote": source_text,
-                            "source_segment_ids": [int(segment.id)],
+                            "source_segment_ids": [segment_id],
                             "participant_codes": ["P01"],
                             "question_codes": ["Q1"],
                             "confidence": "high",
@@ -285,13 +333,22 @@ def main() -> int:
                 db.session.add(second)
                 db.session.commit()
 
-                response = client.get(f"/api/outputs/{formal_id}/download")
+                response = client.get(f"/api/outputs/{refreshed_id}/download")
                 failures += check(
                     "formal artifact becomes historical when current approved set changes",
                     response.status_code == 409,
                     f"status={response.status_code}",
                 )
                 response.close()
+
+                report_source = (repo_root / "services" / "report_approved_analysis.py").read_text(
+                    encoding="utf-8"
+                )
+                failures += check(
+                    "formal exporter records source and exported-analysis state hashes",
+                    '"source_provenance_sha256"' in report_source
+                    and '"formal_analysis_state_sha256"' in report_source,
+                )
 
                 db.session.rollback()
                 db.session.remove()
