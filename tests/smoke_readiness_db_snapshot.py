@@ -112,6 +112,19 @@ def main() -> int:
                 f"info={report.get('info', {})} warnings={report.get('warnings', [])}",
             )
 
+            blocker_codes = {item.get("code") for item in report.get("blockers", [])}
+            start_version = report.get("info", {}).get("database_data_version_start")
+            end_version = report.get("info", {}).get("database_data_version_end")
+            failures += check(
+                "readiness fails closed when the live database changes during the pinned audit",
+                "database_changed_during_audit" in blocker_codes
+                and report.get("info", {}).get("database_changed_during_audit") is True
+                and isinstance(start_version, int)
+                and isinstance(end_version, int)
+                and start_version != end_version,
+                f"blockers={report.get('blockers', [])} start={start_version} end={end_version}",
+            )
+
             verify = sqlite3.connect(db_path)
             try:
                 durable_count = int(
@@ -119,12 +132,29 @@ def main() -> int:
                         "SELECT COUNT(*) FROM processing_jobs WHERE status='pending'"
                     ).fetchone()[0]
                 )
+                verify.execute(
+                    "UPDATE processing_jobs SET status='completed' WHERE status='pending'"
+                )
+                verify.commit()
             finally:
                 verify.close()
             failures += check(
                 "writer commit is durable outside the pinned readiness snapshot",
                 durable_count == 1,
                 f"pending_jobs={durable_count}",
+            )
+
+            stable_report = audit_mod.audit(db_path, output_dir, backup_dir)
+            stable_codes = {item.get("code") for item in stable_report.get("blockers", [])}
+            stable_start = stable_report.get("info", {}).get("database_data_version_start")
+            stable_end = stable_report.get("info", {}).get("database_data_version_end")
+            failures += check(
+                "quiescent readiness does not raise a database-change blocker",
+                "database_changed_during_audit" not in stable_codes
+                and "database_change_detection_failed" not in stable_codes
+                and stable_report.get("info", {}).get("database_changed_during_audit") is False
+                and stable_start == stable_end,
+                f"blockers={stable_report.get('blockers', [])} start={stable_start} end={stable_end}",
             )
         finally:
             config.DATABASE_URI = original["DATABASE_URI"]
