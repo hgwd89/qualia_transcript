@@ -52,6 +52,7 @@ def main() -> int:
             from models.project import Project
             from models.segment import Segment, UtteranceMapping
             from services.analysis_review import set_analysis_review_status
+            from services.analysis_source_provenance import AnalysisSourceProvenanceError
             from scripts.audit_production_readiness import audit
             import services.analyzer as analyzer
 
@@ -127,6 +128,7 @@ def main() -> int:
                 interview_id = int(interview.id)
                 question_id = int(question.id)
                 participant_id = int(participant.id)
+                segment_id = int(segment.id)
                 duplicate_id = int(duplicate.id)
 
                 prompts: list[str] = []
@@ -201,6 +203,51 @@ def main() -> int:
 
                 participant = db.session.get(Participant, participant_id)
                 participant.participant_code = "P01"
+                db.session.commit()
+
+                before_count = AIAnalysis.query.count()
+                original_source_reader = analyzer._mapped_respondent_segments
+                source_reader_mutated = {"value": False}
+
+                def mutating_source_reader(*args, **kwargs):
+                    if not source_reader_mutated["value"]:
+                        source_reader_mutated["value"] = True
+                        current = db.session.get(Segment, segment_id)
+                        current.text = source_text + " 読取時変更"
+                        db.session.commit()
+                    return original_source_reader(*args, **kwargs)
+
+                analyzer._mapped_respondent_segments = mutating_source_reader
+                analyzer.call_structured = provider
+                prompt_snapshot_rejected = False
+                prompt_snapshot_error = ""
+                try:
+                    analyzer.analyze_per_question(
+                        interview_id,
+                        question_id,
+                        result_write_guard=result_write_guard,
+                    )
+                except AnalysisSourceProvenanceError as exc:
+                    prompt_snapshot_rejected = True
+                    prompt_snapshot_error = str(exc)
+                    db.session.rollback()
+                finally:
+                    analyzer._mapped_respondent_segments = original_source_reader
+                    analyzer.call_structured = original_call
+
+                failures += check(
+                    "generation fingerprint is captured before prompt source reads",
+                    prompt_snapshot_rejected
+                    and source_reader_mutated["value"]
+                    and AIAnalysis.query.count() == before_count
+                    and "changed after generation" in prompt_snapshot_error,
+                    f"rejected={prompt_snapshot_rejected} mutated={source_reader_mutated['value']} analyses={AIAnalysis.query.count()} error={prompt_snapshot_error}",
+                )
+
+                current = db.session.get(Segment, segment_id)
+                current.text = source_text
+                db.session.commit()
+
                 legacy = AIAnalysis(
                     project_id=project_id,
                     interview_id=interview_id,
@@ -212,7 +259,7 @@ def main() -> int:
                         "findings": [{
                             "point": "legacy",
                             "evidence_quote": source_text,
-                            "source_segment_ids": [int(segment.id)],
+                            "source_segment_ids": [segment_id],
                             "participant_codes": ["P01"],
                             "question_codes": ["Q1"],
                             "confidence": "high",
