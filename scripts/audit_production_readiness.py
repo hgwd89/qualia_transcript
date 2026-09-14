@@ -341,9 +341,14 @@ def audit(
             if str(r["status"] or "") in FINAL_INTERVIEW_STATUSES and seg_count == 0:
                 _issue(warnings, "final_interview_without_segments", "Interview is in a downstream status but has zero segments", interview_id=r["id"], status=r["status"])
 
+        root = _root()
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from services.analysis_source_provenance_sqlite import validate_analysis_source_provenance
+
         approved_rows = con.execute(
             """
-            SELECT id, project_id, interview_id, analysis_type, content_json
+            SELECT id, project_id, interview_id, question_id, analysis_type, content_json
             FROM ai_analyses
             WHERE review_status='approved'
             ORDER BY id
@@ -360,6 +365,24 @@ def audit(
             except Exception as exc:
                 _issue(blockers, "approved_analysis_invalid_json", "Approved AIAnalysis content_json is invalid", analysis_id=aid, error=f"{type(exc).__name__}: {exc}")
                 continue
+
+            provenance_ok, provenance_reason = validate_analysis_source_provenance(
+                con,
+                analysis_type=str(row["analysis_type"] or ""),
+                project_id=project_id,
+                interview_id=(int(row["interview_id"]) if row["interview_id"] is not None else None),
+                question_id=(int(row["question_id"]) if row["question_id"] is not None else None),
+                content=content if isinstance(content, dict) else {},
+            )
+            if not provenance_ok:
+                _issue(
+                    blockers,
+                    "approved_analysis_source_provenance_invalid",
+                    "Approved AIAnalysis cannot be formally exported from current canonical inputs",
+                    analysis_id=aid,
+                    reason=provenance_reason,
+                )
+
             findings = content.get("findings") if isinstance(content, dict) else None
             if not isinstance(findings, list) or not findings:
                 _issue(blockers, "approved_analysis_no_findings", "Approved AIAnalysis has no findings", analysis_id=aid)
@@ -436,9 +459,6 @@ def audit(
             if fmt and path.suffix.lower() != f".{fmt}":
                 _issue(warnings, "generated_file_extension_mismatch", "GeneratedFile extension differs from file_format", generated_file_id=row["id"], file_format=fmt, path=str(path))
 
-        root = _root()
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
         from services.readiness_validation import (
             load_raw_snapshot_tombstone_names,
             load_raw_text_snapshots,
