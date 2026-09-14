@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import sqlite3
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +52,43 @@ def _latest_backup_path(backup_dir: Path) -> Path | None:
     if not archives:
         return None
     return max(archives, key=_backup_recency_key)
+
+
+def _backup_generation_token(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        int(info.st_dev),
+        int(info.st_ino),
+        int(info.st_mode),
+        int(info.st_size),
+        int(info.st_mtime_ns),
+        int(info.st_ctime_ns),
+    )
+
+
+def _backup_archive_fingerprint(path: Path) -> tuple[tuple[int, int, int, int, int, int], str]:
+    """Hash one pinned archive generation and prove its pathname still names it."""
+    try:
+        with path.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode):
+                raise ValueError("backup archive is not a regular file")
+            opened_token = _backup_generation_token(opened)
+            digest = hashlib.sha256()
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+            after_read = os.fstat(stream.fileno())
+            try:
+                path_after = path.stat()
+            except OSError as exc:
+                raise ValueError("backup archive pathname changed during fingerprint") from exc
+            if (
+                _backup_generation_token(after_read) != opened_token
+                or _backup_generation_token(path_after) != opened_token
+            ):
+                raise ValueError("backup archive generation changed during fingerprint")
+            return opened_token, digest.hexdigest()
+    except OSError as exc:
+        raise ValueError("backup archive could not be fingerprinted safely") from exc
 
 
 def _snapshot_connection_database(connection: sqlite3.Connection, destination: Path) -> None:
@@ -121,6 +161,27 @@ def _entry_index(
     return index
 
 
+def _comparison_failure(
+    latest: Path,
+    error: Exception | str,
+    *,
+    backup_file_count: int = 0,
+    current_file_count: int = 0,
+) -> BackupRecoverySetComparison:
+    detail = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
+    return BackupRecoverySetComparison(
+        latest_backup=latest,
+        validation_error=None,
+        comparison_error=str(detail),
+        matches_current=None,
+        backup_file_count=backup_file_count,
+        current_file_count=current_file_count,
+        missing_from_backup=[],
+        extra_in_backup=[],
+        changed_files=[],
+    )
+
+
 def compare_latest_backup_to_current_recovery_set(
     connection: sqlite3.Connection,
     backup_dir: Path,
@@ -136,8 +197,13 @@ def compare_latest_backup_to_current_recovery_set(
     The database is compared as a logical recovery member because its ZIP member
     pathname is explicitly declared by the validated backup manifest and restore
     supports safe noncanonical database member names.
+
+    The selected newest archive is fingerprinted before validation and again after
+    recovery-set comparison. The comparison fails closed if its bytes/generation
+    change or if a different archive becomes newest while readiness is running.
     """
-    latest = _latest_backup_path(Path(backup_dir).resolve())
+    backup_root = Path(backup_dir).resolve()
+    latest = _latest_backup_path(backup_root)
     if latest is None:
         return BackupRecoverySetComparison(
             latest_backup=None,
@@ -152,6 +218,7 @@ def compare_latest_backup_to_current_recovery_set(
         )
 
     try:
+        initial_generation, initial_archive_sha256 = _backup_archive_fingerprint(latest)
         manifest = validate_backup(latest)
     except Exception as exc:
         return BackupRecoverySetComparison(
@@ -181,17 +248,7 @@ def compare_latest_backup_to_current_recovery_set(
         if _DATABASE_KEY not in backup_index or _DATABASE_KEY not in current_index:
             raise ValueError("recovery set has no logical database member")
     except Exception as exc:
-        return BackupRecoverySetComparison(
-            latest_backup=latest,
-            validation_error=None,
-            comparison_error=f"{type(exc).__name__}: {exc}",
-            matches_current=None,
-            backup_file_count=0,
-            current_file_count=0,
-            missing_from_backup=[],
-            extra_in_backup=[],
-            changed_files=[],
-        )
+        return _comparison_failure(latest, exc)
 
     backup_keys = set(backup_index)
     current_keys = set(current_index)
@@ -210,6 +267,24 @@ def compare_latest_backup_to_current_recovery_set(
                 "backup_sha256": before["sha256"],
                 "current_sha256": current["sha256"],
             })
+
+    try:
+        latest_after = _latest_backup_path(backup_root)
+        if latest_after is None or latest_after.resolve() != latest.resolve():
+            raise ValueError("newest backup selection changed during readiness comparison")
+        final_generation, final_archive_sha256 = _backup_archive_fingerprint(latest_after)
+        if (
+            final_generation != initial_generation
+            or final_archive_sha256 != initial_archive_sha256
+        ):
+            raise ValueError("newest backup archive changed during readiness comparison")
+    except Exception as exc:
+        return _comparison_failure(
+            latest,
+            exc,
+            backup_file_count=len(backup_index),
+            current_file_count=len(current_index),
+        )
 
     matches = not missing_from_backup and not extra_in_backup and not changed_files
     return BackupRecoverySetComparison(
