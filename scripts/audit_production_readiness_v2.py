@@ -452,49 +452,56 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             str(row["name"])
             for row in con.execute("PRAGMA table_info(media_files)").fetchall()
         }
-        media_size_select = (
-            "file_size_bytes"
-            if "file_size_bytes" in media_columns
-            else "NULL AS file_size_bytes"
-        )
-        media_sha_select = (
-            "content_sha256"
-            if "content_sha256" in media_columns
-            else "NULL AS content_sha256"
-        )
-        media_rows = con.execute(
-            f"""
-            SELECT id, interview_id, stored_path, {media_size_select}, {media_sha_select}
-            FROM media_files
-            ORDER BY id
-            """
-        ).fetchall()
-        import config as app_config
-        upload_dir = Path(app_config.UPLOAD_DIR).resolve()
         media_integrity_counts = {"verified": 0, "unproven": 0, "invalid": 0}
-        for row in media_rows:
-            integrity_status, integrity_reason = media_file_integrity_status(row, upload_dir)
-            media_integrity_counts[integrity_status] += 1
-            if integrity_status == "invalid":
-                _issue(
-                    blockers,
-                    "media_file_byte_integrity_invalid",
-                    "Registered source media is missing, unsafe, or no longer matches its upload metadata",
-                    media_file_id=int(row["id"]),
-                    interview_id=int(row["interview_id"]) if row["interview_id"] is not None else None,
-                    stored_path=str(row["stored_path"] or ""),
-                    reason=integrity_reason,
-                )
-            elif integrity_status == "unproven":
-                _issue(
-                    warnings,
-                    "media_file_byte_integrity_unproven",
-                    "Legacy source media has no registered SHA-256; current bytes cannot be proven to match the original upload",
-                    media_file_id=int(row["id"]),
-                    interview_id=int(row["interview_id"]) if row["interview_id"] is not None else None,
-                    stored_path=str(row["stored_path"] or ""),
-                    reason=integrity_reason,
-                )
+        if "stored_path" not in media_columns:
+            _issue(
+                blockers,
+                "media_file_stored_path_column_missing",
+                "media_files.stored_path is missing; start the upgraded app once before professional use",
+            )
+        else:
+            media_size_select = (
+                "file_size_bytes"
+                if "file_size_bytes" in media_columns
+                else "NULL AS file_size_bytes"
+            )
+            media_sha_select = (
+                "content_sha256"
+                if "content_sha256" in media_columns
+                else "NULL AS content_sha256"
+            )
+            media_rows = con.execute(
+                f"""
+                SELECT id, interview_id, stored_path, {media_size_select}, {media_sha_select}
+                FROM media_files
+                ORDER BY id
+                """
+            ).fetchall()
+            import config as app_config
+            upload_dir = Path(app_config.UPLOAD_DIR).resolve()
+            for row in media_rows:
+                integrity_status, integrity_reason = media_file_integrity_status(row, upload_dir)
+                media_integrity_counts[integrity_status] += 1
+                if integrity_status == "invalid":
+                    _issue(
+                        blockers,
+                        "media_file_byte_integrity_invalid",
+                        "Registered source media is missing, unsafe, or no longer matches its upload metadata",
+                        media_file_id=int(row["id"]),
+                        interview_id=int(row["interview_id"]) if row["interview_id"] is not None else None,
+                        stored_path=str(row["stored_path"] or ""),
+                        reason=integrity_reason,
+                    )
+                elif integrity_status == "unproven":
+                    _issue(
+                        warnings,
+                        "media_file_byte_integrity_unproven",
+                        "Legacy source media has no registered SHA-256; current bytes cannot be proven to match the original upload",
+                        media_file_id=int(row["id"]),
+                        interview_id=int(row["interview_id"]) if row["interview_id"] is not None else None,
+                        stored_path=str(row["stored_path"] or ""),
+                        reason=integrity_reason,
+                    )
         info["media_file_byte_integrity"] = media_integrity_counts
 
         generated_columns = {
