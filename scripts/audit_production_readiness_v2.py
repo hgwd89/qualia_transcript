@@ -361,6 +361,11 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             str(row["name"])
             for row in con.execute("PRAGMA table_info(generated_files)").fetchall()
         }
+        file_type_select = (
+            "file_type"
+            if "file_type" in generated_columns
+            else "NULL AS file_type"
+        )
         generation_params_select = (
             "generation_params_json"
             if "generation_params_json" in generated_columns
@@ -368,7 +373,7 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
         )
         generated = con.execute(
             f"""
-            SELECT id, file_type, file_format, stored_path, {generation_params_select}
+            SELECT id, {file_type_select}, file_format, stored_path, {generation_params_select}
             FROM generated_files
             ORDER BY id
             """
