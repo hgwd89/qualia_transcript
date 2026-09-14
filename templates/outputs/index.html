@@ -79,12 +79,15 @@
       <h2 class="font-semibold text-green-900">承認済AI分析</h2>
       <span class="text-xs rounded-full bg-green-100 text-green-700 px-2 py-0.5">正式出力</span>
     </div>
-    <p class="text-xs text-gray-500 mb-2">人が承認し、根拠発言の source_segment_ids が確定したAI分析だけをExcel化します。</p>
-    <p class="text-xs text-gray-500 mb-4">承認済み {{ approved_count }} / 全AI分析 {{ analysis_count }} 件</p>
+    <p class="text-xs text-gray-500 mb-2">人が承認し、生成元入力が現在のcanonical dataと一致するAI分析だけを正式出力します。</p>
+    <p class="text-xs text-gray-500 mb-2">現在有効 {{ current_approved_count }} / 承認状態 {{ approved_count }} / 全AI分析 {{ analysis_count }} 件</p>
+    {% if invalid_approved_count > 0 %}
+    <p class="text-xs text-red-700 mb-3">承認状態のうち {{ invalid_approved_count }} 件は生成元入力が古いか検証不能です。再承認または再生成が必要です。</p>
+    {% endif %}
     <button id="btn-approved-analysis" onclick="generateApprovedAnalysis()"
-            {% if approved_count == 0 %}disabled{% endif %}
+            {% if not formal_ready %}disabled{% endif %}
             class="w-full text-sm px-4 py-2 rounded transition
-              {% if approved_count > 0 %}bg-green-600 text-white hover:bg-green-700{% else %}bg-gray-200 text-gray-400 cursor-not-allowed{% endif %}">
+              {% if formal_ready %}bg-green-600 text-white hover:bg-green-700{% else %}bg-gray-200 text-gray-400 cursor-not-allowed{% endif %}">
       承認済AI分析を生成
     </button>
   </section>
@@ -105,12 +108,14 @@
           <th class="px-4 py-3 text-left">種類</th>
           <th class="px-4 py-3 text-left">形式</th>
           <th class="px-4 py-3 text-left">ファイル名</th>
+          <th class="px-4 py-3 text-left">現在性</th>
           <th class="px-4 py-3 text-right">操作</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-gray-100">
         {% set type_labels = {'verbatim':'発言録', 'formatted_sheet':'整形シート', 'analysis':'分析データ', 'approved_analysis':'承認済AI分析', 'report':'レポート', 'integrated':'統合分析'} %}
-        {% for f in files %}
+        {% for item in files %}
+        {% set f = item.obj %}
         <tr class="hover:bg-gray-50">
           <td class="px-4 py-3 text-gray-500 whitespace-nowrap">
             {{ f.created_at.strftime('%Y/%m/%d %H:%M') if f.created_at else '' }}
@@ -118,15 +123,31 @@
           <td class="px-4 py-3">{{ type_labels.get(f.file_type, f.file_type) }}</td>
           <td class="px-4 py-3 uppercase text-gray-500">{{ f.file_format }}</td>
           <td class="px-4 py-3 font-medium text-gray-800 break-all">{{ f.original_filename }}</td>
+          <td class="px-4 py-3 text-xs">
+            {% if f.file_type == 'approved_analysis' %}
+              {% if item.formal_current %}
+              <span class="rounded-full bg-green-100 text-green-700 px-2 py-0.5">現在有効</span>
+              {% else %}
+              <span class="rounded-full bg-amber-100 text-amber-800 px-2 py-0.5" title="{{ item.formal_reason }}">履歴・配布不可</span>
+              {% endif %}
+            {% else %}
+            <span class="text-gray-400">—</span>
+            {% endif %}
+          </td>
           <td class="px-4 py-3 text-right">
+            {% if f.file_type != 'approved_analysis' or item.formal_current %}
             <a href="{{ url_for('outputs.download', file_id=f.id) }}"
                class="text-brand-500 hover:underline text-xs">ダウンロード</a>
+            {% else %}
+            <span class="text-gray-400 text-xs" title="{{ item.formal_reason }}">配布不可</span>
+            {% endif %}
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
+  <p class="text-xs text-gray-500 mt-2">正式出力は生成時点の履歴として保持されます。現在のcanonical dataと一致しない履歴ファイルは通常の配布導線からダウンロードできません。</p>
   {% else %}
   <div class="text-center py-10 text-gray-400 bg-white rounded-lg border border-dashed border-gray-300">
     <p class="text-sm">生成済みファイルはありません。</p>
