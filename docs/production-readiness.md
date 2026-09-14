@@ -51,6 +51,7 @@ Custom paths can be supplied when validating a copy or recovery environment:
 python scripts/audit_production_readiness_project.py `
   --project-id 123 `
   --db C:\path\to\qualia_transcript.db `
+  --upload-dir C:\path\to\uploads `
   --output-dir C:\path\to\outputs `
   --backup-dir C:\path\to\backups `
   --strict
@@ -70,6 +71,7 @@ The audit:
 - does not modify `Segment.text`
 - does not modify raw transcript snapshots
 - does not create or restore backups
+- may create temporary local snapshots of the audited SQLite read transaction and managed upload/output files solely to hash and compare the current recovery set; those temporary files are deleted before the audit returns
 
 ## Scope semantics
 
@@ -82,6 +84,9 @@ Project-specific active/orphan `ProcessingJob` findings are filtered to the sele
 - existence/schema protection of the shared `processing_jobs` table
 - structural/hash validity of the shared raw-transcript snapshot store
 - validity/existence of the newest shared local backup archive
+- exact freshness of the newest valid backup against the audited DB/uploads/outputs recovery set
+
+Backup freshness is content-based, not timestamp-based. Readiness validates the newest archive and compares its manifest against a temporary snapshot of the current recovery set using exact path membership, byte size, and SHA-256. The database side is materialized from the same already-established SQLite read transaction used by the rest of readiness, so WAL state or a concurrent later commit cannot silently switch the database generation used for the backup comparison.
 
 A project-scoped PASS therefore means the selected project's content/traceability checks passed and the shared persistence/recovery substrate was also acceptable. It does not certify unrelated project content.
 
@@ -112,6 +117,8 @@ The audit currently blocks on:
 - registered `approved_analysis` artifacts whose `artifact_sha256` metadata is missing/invalid or whose pinned managed bytes do not match that registered SHA-256; this is the same byte-integrity condition enforced by the standard formal download route
 - a project that already has registered `approved_analysis` history but has no artifact that still matches the current approved-analysis set, exported source-provenance hashes, exact exported analysis/review state, and current canonical source; stale predecessors remain valid history, but at least one current distributable formal artifact must exist once formal history exists
 - invalid newest backup archive
+- inability to snapshot/compare the current recovery set against the newest valid backup
+- a newest valid backup whose database snapshot, uploads, or outputs differ from the currently audited recovery set by path membership, byte size, or SHA-256
 
 A foreign-key blocker means the database already contains at least one child row whose referenced parent row is missing. FK enforcement prevents new invalid writes, but it does not repair corruption that predates enforcement; the affected rows must be reconciled before release.
 
@@ -122,6 +129,8 @@ Chunk-manifest JSON under `outputs/raw_transcripts/` is metadata and does not sa
 Formal approved-analysis artifacts are checked through the same pinned managed-reader and SHA-256 verification boundary used by delivery. The audit remains read-only: it creates only a temporary in-process verification snapshot and never rewrites the registered workbook. Legacy formal artifacts that predate `artifact_sha256` fail closed because the final acceptance gate cannot prove that their bytes are the bytes registered by the formal exporter.
 
 Formal currentness is evaluated separately from byte integrity. Readiness mirrors the delivery contract against the current approved-analysis ID set, each analysis's exported source-provenance SHA-256, the exact formal workbook state hash (including review metadata), and current canonical-source provenance. Old formal files are deliberately retained as history and may be stale; their presence alone is not a blocker. The blocker applies only when a project has formal history but none of its registered formal artifacts is current enough for the standard delivery route.
+
+The backup freshness blocker is deliberately stronger than "a backup exists" or "the ZIP validates." A backup taken before a later database commit, upload replacement, generated-output change, raw-snapshot addition/removal, or any other recovery-set byte change is a valid historical backup but is stale for the current release. Creating a new verified backup of the current DB/uploads/outputs state restores this readiness condition.
 
 ## Warning conditions
 
@@ -147,15 +156,19 @@ Before treating one project as ready for delivery:
 
 1. Run `scripts/check_all.ps1 -AllLocal`.
 2. Run `scripts/check_local_data_integrity.ps1` with a baseline for important production datasets.
-3. Create and validate a backup with `scripts/backup_local_data.py`.
-4. Run `scripts/check_production_readiness.ps1 --project-id <ID> --strict` against the database, outputs, and backup set you intend to accept. Omit `--project-id` only when you deliberately want whole-database acceptance.
+3. Create and validate a backup with `scripts/backup_local_data.py` after the release dataset has reached its intended final state.
+4. Run `scripts/check_production_readiness.ps1 --project-id <ID> --strict` against the exact database, uploads, outputs, and backup set you intend to accept. Omit `--project-id` only when you deliberately want whole-database acceptance.
 5. Open the final Word/Excel files and compare them with the agreed deliverable template/golden file.
 6. Only then copy or send the deliverables outside the workstation.
 
-The backup precedes the strict audit deliberately: `no_backup_archive` is a readiness warning, and `--strict` converts warnings into a non-zero result. On a fresh workstation, running strict readiness before creating the first backup would therefore fail by design.
+The backup precedes the strict audit deliberately: `no_backup_archive` is a readiness warning, and `--strict` converts warnings into a non-zero result. On a fresh workstation, running strict readiness before creating the first backup would therefore fail by design. If any DB/upload/output byte changes after the backup, readiness now blocks with `latest_backup_stale`; create a new verified backup before release.
 
-A clean project-scoped strict readiness audit means the selected project's structural/traceability checks, formal-artifact byte-integrity/currentness checks, and the shared database/recovery-set checks passed. It does not replace human qualitative-research review of interpretation quality, moderation context, or client-specific formatting requirements.
+A clean project-scoped strict readiness audit means the selected project's structural/traceability checks, formal-artifact byte-integrity/currentness checks, and the shared database/recovery-set checks passed. It also means the newest valid backup exactly reproduces the audited recovery-set file membership and bytes. It does not replace human qualitative-research review of interpretation quality, moderation context, or client-specific formatting requirements.
 
 ## CI coverage
 
-The real-data audit remains manual-only. Required CI includes focused temporary-fixture regressions for readiness foreign-key/orphan behavior, traceability rules such as flow ownership/per-source evidence matching, project-scope isolation, and delivery/readiness parity for formal approved-analysis artifact integrity/currentness. The project-scope regression proves that unrelated project content defects do not leak into the selected project and that the source SQLite bytes remain unchanged. Formal-artifact regressions run on Windows and Ubuntu. They prove current bytes are accepted by both delivery and readiness, in-place tampering is rejected by both, exact-byte restoration returns both gates to acceptance, review-state or approved-set drift leaves old artifacts historical/non-distributable, regeneration restores readiness without deleting stale history, and project-scoped readiness does not import another project's stale formal history. The broader `tests/smoke_production_readiness.py` uses a temporary SQLite database and temporary outputs to verify the hardened audit, artifact validation, raw-snapshot validation, backup validation, and job-quiescence logic; it remains part of `scripts/check_all.ps1 -AllLocal` rather than reading the real project database.
+The real-data audit remains manual-only. Required CI includes focused temporary-fixture regressions for readiness foreign-key/orphan behavior, traceability rules such as flow ownership/per-source evidence matching, project-scope isolation, and delivery/readiness parity for formal approved-analysis artifact integrity/currentness. The project-scope regression proves that unrelated project content defects do not leak into the selected project and that the source SQLite bytes remain unchanged. Formal-artifact regressions run on Windows and Ubuntu. They prove current bytes are accepted by both delivery and readiness, in-place tampering is rejected by both, exact-byte restoration returns both gates to acceptance, review-state or approved-set drift leaves old artifacts historical/non-distributable, regeneration restores readiness without deleting stale history, and project-scoped readiness does not import another project's stale formal history.
+
+`tests/smoke_backup_readiness_freshness.py` runs on Windows and Ubuntu. It proves a fresh backup matches the current DB/uploads/outputs recovery set, the comparison remains bound to an already-established SQLite read snapshot, later database changes and same-size upload byte changes are detected by SHA-256, current-only and backup-only output membership drift are detected, and creating/restoring the exact current recovery state returns the gate to acceptance.
+
+The broader `tests/smoke_production_readiness.py` uses a temporary SQLite database and temporary outputs to verify the hardened audit, artifact validation, raw-snapshot validation, backup validation, and job-quiescence logic; it remains part of `scripts/check_all.ps1 -AllLocal` rather than reading the real project database.
