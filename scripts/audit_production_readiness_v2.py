@@ -34,9 +34,8 @@ from services.formal_artifact_integrity import (
     verified_artifact_snapshot,
 )
 from services.readiness_media_integrity import media_file_integrity_status
+from services.readiness_raw_snapshot_integrity import load_raw_snapshot_readiness_state
 from services.readiness_validation import (
-    load_raw_snapshot_tombstone_names,
-    load_raw_text_snapshots,
     missing_raw_snapshot_transcription_ids,
     validate_generated_artifact,
     validate_generated_artifact_stream,
@@ -666,10 +665,16 @@ def audit(
                 count=len(unscoped_formal_currentness),
             )
 
-        raw_by_transcription, invalid_raw = load_raw_text_snapshots(output_dir)
-        tombstoned_snapshot_names = load_raw_snapshot_tombstone_names(con)
+        raw_state = load_raw_snapshot_readiness_state(con, output_dir)
+        raw_by_transcription = raw_state.by_transcription
+        tombstoned_snapshot_names = raw_state.tombstoned_names
+        invalid_raw = raw_state.invalid_snapshots
         info["raw_text_snapshot_count"] = sum(len(v) for v in raw_by_transcription.values())
         info["raw_snapshot_tombstone_count"] = len(tombstoned_snapshot_names)
+        info["raw_snapshot_unproven_hash_count"] = len(raw_state.unproven_text_snapshots)
+        info["raw_snapshot_tombstone_integrity_issue_count"] = len(
+            raw_state.tombstone_integrity_issues
+        )
         if invalid_raw:
             _issue(
                 blockers,
@@ -677,6 +682,22 @@ def audit(
                 "Raw transcript snapshot failed structural/hash validation",
                 files=invalid_raw[:100],
                 count=len(invalid_raw),
+            )
+        if raw_state.tombstone_integrity_issues:
+            _issue(
+                blockers,
+                "raw_snapshot_tombstone_integrity_invalid",
+                "Retained tombstoned raw transcript source is missing or no longer matches its recorded full-file SHA-256",
+                files=raw_state.tombstone_integrity_issues[:100],
+                count=len(raw_state.tombstone_integrity_issues),
+            )
+        if raw_state.unproven_text_snapshots:
+            _issue(
+                warnings,
+                "raw_snapshot_byte_integrity_unproven",
+                "Legacy raw text snapshots have no recorded SHA-256; current text bytes cannot be proven against their original snapshot hash",
+                files=raw_state.unproven_text_snapshots[:100],
+                count=len(raw_state.unproven_text_snapshots),
             )
 
         done_rows = con.execute(
