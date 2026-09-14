@@ -211,7 +211,8 @@ def _cross_participant_manifest(
 
     interviews = con.execute(
         """
-        SELECT i.id, i.participant_id, p.participant_code
+        SELECT i.id, i.participant_id, p.id AS resolved_participant_id,
+               p.participant_code
         FROM interviews i
         LEFT JOIN participants p ON p.id=i.participant_id
         WHERE i.project_id=? AND i.flow_id=?
@@ -221,14 +222,14 @@ def _cross_participant_manifest(
     ).fetchall()
     participants: list[dict[str, Any]] = []
     for interview in interviews:
-        if interview["participant_id"] is None:
+        if interview["resolved_participant_id"] is None:
             continue
         segments = _mapped_respondent_segments(con, int(interview["id"]), int(question_id))
         if not segments:
             continue
         participants.append({
             "interview_id": int(interview["id"]),
-            "participant_id": int(interview["participant_id"]),
+            "participant_id": int(interview["resolved_participant_id"]),
             "participant_code": str(interview["participant_code"] or ""),
             "segments": segments,
         })
@@ -260,7 +261,8 @@ def _resolve_integrated_scope(
 
     interviews = con.execute(
         """
-        SELECT i.id, i.flow_id, i.participant_id, i.status, p.participant_code
+        SELECT i.id, i.flow_id, i.participant_id, i.status,
+               p.id AS resolved_participant_id, p.participant_code
         FROM interviews i
         LEFT JOIN participants p ON p.id=i.participant_id
         WHERE i.project_id=? AND i.participant_id IS NOT NULL
@@ -314,8 +316,14 @@ def _integrated_manifest(con: sqlite3.Connection, project_id: int) -> dict[str, 
     source_interviews = [
         {
             "id": int(interview["id"]),
-            "participant_id": int(interview["participant_id"]),
-            "participant_code": str(interview["participant_code"] or ""),
+            "participant_id": (
+                int(interview["resolved_participant_id"])
+                if interview["resolved_participant_id"] is not None else None
+            ),
+            "participant_code": (
+                str(interview["participant_code"] or "")
+                if interview["resolved_participant_id"] is not None else ""
+            ),
         }
         for interview in interviews
     ]
@@ -344,6 +352,8 @@ def _integrated_manifest(con: sqlite3.Connection, project_id: int) -> dict[str, 
         for question in question_rows:
             sources: list[dict[str, Any]] = []
             for interview in interviews:
+                if interview["resolved_participant_id"] is None:
+                    continue
                 segments = _mapped_respondent_segments(
                     con,
                     int(interview["id"]),
@@ -353,7 +363,7 @@ def _integrated_manifest(con: sqlite3.Connection, project_id: int) -> dict[str, 
                     continue
                 sources.append({
                     "interview_id": int(interview["id"]),
-                    "participant_id": int(interview["participant_id"]),
+                    "participant_id": int(interview["resolved_participant_id"]),
                     "participant_code": str(interview["participant_code"] or ""),
                     "segments": segments,
                 })
@@ -374,7 +384,6 @@ def _integrated_manifest(con: sqlite3.Connection, project_id: int) -> dict[str, 
     return {
         "version": PROVENANCE_VERSION,
         "analysis_type": "integrated",
-        "project_id": int(project_id),
         "project": {
             "id": int(project["id"]),
             "name": str(project["name"] or ""),
