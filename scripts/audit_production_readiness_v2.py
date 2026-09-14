@@ -611,6 +611,21 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             con.rollback()
         except Exception as exc:
             rollback_error = f"{type(exc).__name__}: {exc}"
+
+    try:
+        latest_backup, backup_error = validate_latest_backup(backup_dir)
+        info["latest_validated_backup"] = str(latest_backup) if latest_backup else None
+        if latest_backup is None:
+            _issue(warnings, "no_backup_archive", "No local backup archive exists yet")
+        elif backup_error:
+            _issue(
+                blockers,
+                "latest_backup_invalid",
+                "Newest local backup failed full manifest/hash/SQLite validation",
+                path=str(latest_backup),
+                error=backup_error,
+            )
+    finally:
         if rollback_error is None:
             try:
                 end_data_version = int(con.execute("PRAGMA data_version").fetchone()[0])
@@ -626,7 +641,7 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
         _issue(
             blockers,
             "database_change_detection_failed",
-            "Could not prove that the database remained unchanged during readiness; rerun before professional delivery",
+            "Could not prove that the database remained unchanged through the final readiness checks; rerun before professional delivery",
             error=rollback_error,
             data_version_start=start_data_version,
             data_version_end=end_data_version,
@@ -638,19 +653,6 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             "Database changed from another connection while readiness was running; rerun against a quiescent dataset before professional delivery",
             data_version_start=start_data_version,
             data_version_end=end_data_version,
-        )
-
-    latest_backup, backup_error = validate_latest_backup(backup_dir)
-    info["latest_validated_backup"] = str(latest_backup) if latest_backup else None
-    if latest_backup is None:
-        _issue(warnings, "no_backup_archive", "No local backup archive exists yet")
-    elif backup_error:
-        _issue(
-            blockers,
-            "latest_backup_invalid",
-            "Newest local backup failed full manifest/hash/SQLite validation",
-            path=str(latest_backup),
-            error=backup_error,
         )
 
     def dedupe(items: list[dict]) -> list[dict]:
