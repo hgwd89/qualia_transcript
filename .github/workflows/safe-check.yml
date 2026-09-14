@@ -51,6 +51,9 @@ jobs:
       - name: Run OOXML readiness package validation regression
         run: python tests/smoke_ooxml_readiness_validation.py
 
+      - name: Run latest-backup ordering regression
+        run: python tests/smoke_latest_backup_ordering.py
+
       - name: Run readiness single-database-snapshot regression
         run: python tests/smoke_readiness_db_snapshot.py
 
@@ -108,6 +111,9 @@ jobs:
 
       - name: Run OOXML readiness package validation regression
         run: python tests/smoke_ooxml_readiness_validation.py
+
+      - name: Run latest-backup ordering regression
+        run: python tests/smoke_latest_backup_ordering.py
 
       - name: Run readiness single-database-snapshot regression
         run: python tests/smoke_readiness_db_snapshot.py
