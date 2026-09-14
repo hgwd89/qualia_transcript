@@ -4,11 +4,26 @@ from __future__ import annotations
 import hashlib
 import json
 import zipfile
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
 from services.raw_snapshot_storage import read_raw_snapshot_batch
+
+
+_OOXML_RULES = {
+    "xlsx": {
+        "main_part": "xl/workbook.xml",
+        "main_root": "workbook",
+        "main_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+    },
+    "docx": {
+        "main_part": "word/document.xml",
+        "main_root": "document",
+        "main_content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
+    },
+}
 
 
 def load_raw_text_snapshots(output_dir: Path) -> tuple[dict[int, list[dict]], list[dict]]:
@@ -188,13 +203,85 @@ def missing_raw_snapshot_transcription_ids(
     return missing
 
 
+def _xml_local_name(tag: object) -> str:
+    text = str(tag or "")
+    return text.rsplit("}", 1)[-1]
+
+
+def _ooxml_xml_root(archive: zipfile.ZipFile, member: str) -> str:
+    """Read only the first XML element so large document bodies stay streaming."""
+    with archive.open(member, "r") as stream:
+        for _, element in ET.iterparse(stream, events=("start",)):
+            return _xml_local_name(element.tag)
+    return ""
+
+
+def _validate_ooxml_package(path: Path, fmt: str) -> str | None:
+    rule = _OOXML_RULES[fmt]
+    main_part = str(rule["main_part"])
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            names = archive.namelist()
+            if len(names) != len(set(names)):
+                return f"{fmt} OOXML package contains duplicate member paths"
+
+            bad_member = archive.testzip()
+            if bad_member is not None:
+                return f"{fmt} OOXML package has a corrupt ZIP member: {bad_member}"
+
+            required = {"[Content_Types].xml", "_rels/.rels", main_part}
+            missing = sorted(required - set(names))
+            if missing:
+                return f"{fmt} OOXML package is missing required parts: {', '.join(missing)}"
+
+            try:
+                with archive.open("[Content_Types].xml", "r") as stream:
+                    content_types_root = ET.parse(stream).getroot()
+                with archive.open("_rels/.rels", "r") as stream:
+                    relationships_root = ET.parse(stream).getroot()
+                main_root = _ooxml_xml_root(archive, main_part)
+            except (ET.ParseError, UnicodeError, ValueError) as exc:
+                return f"{fmt} OOXML package contains invalid XML: {exc}"
+
+            if _xml_local_name(content_types_root.tag) != "Types":
+                return f"{fmt} OOXML content-types root is invalid"
+            if _xml_local_name(relationships_root.tag) != "Relationships":
+                return f"{fmt} OOXML relationships root is invalid"
+            if main_root != str(rule["main_root"]):
+                return f"{fmt} OOXML main part root is invalid: {main_root or '<missing>'}"
+
+            expected_part_name = f"/{main_part}"
+            expected_content_type = str(rule["main_content_type"])
+            has_content_type = any(
+                _xml_local_name(element.tag) == "Override"
+                and str(element.attrib.get("PartName") or "") == expected_part_name
+                and str(element.attrib.get("ContentType") or "") == expected_content_type
+                for element in content_types_root
+            )
+            if not has_content_type:
+                return f"{fmt} OOXML package does not declare the expected main content type"
+
+            has_office_relationship = any(
+                _xml_local_name(element.tag) == "Relationship"
+                and str(element.attrib.get("Type") or "").endswith("/officeDocument")
+                and str(element.attrib.get("Target") or "").lstrip("/") == main_part
+                for element in relationships_root
+            )
+            if not has_office_relationship:
+                return f"{fmt} OOXML package has no officeDocument relationship to {main_part}"
+    except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
+        return f"{fmt} is not a valid ZIP/OOXML container: {exc}"
+
+    return None
+
+
 def validate_generated_artifact(path: Path, file_format: str) -> str | None:
     """Return an error reason when a registered deliverable is structurally invalid."""
     fmt = (file_format or path.suffix.lstrip(".")).lower().strip()
-    if fmt in {"xlsx", "docx"}:
+    if fmt in _OOXML_RULES:
         if not zipfile.is_zipfile(path):
             return f"{fmt} is not a valid ZIP/OOXML container"
-        return None
+        return _validate_ooxml_package(path, fmt)
 
     if fmt == "csv":
         try:
