@@ -331,7 +331,10 @@ def main() -> int:
                     calls.append((args, kwargs)) or _integrated_stub_result()
                 )
                 try:
-                    analysis = analyzer.analyze_project_integrated(int(single.id))
+                    analysis = analyzer.analyze_project_integrated(
+                        int(single.id),
+                        result_write_guard=lambda: None,
+                    )
                 finally:
                     analyzer.call_structured = original_call_structured
 

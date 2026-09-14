@@ -388,7 +388,11 @@ def main() -> int:
 
                 analyzer.call_structured = fake_call_structured
                 try:
-                    cross = analyzer.analyze_cross_participants(project.id, q1.id)
+                    cross = analyzer.analyze_cross_participants(
+                        project.id,
+                        q1.id,
+                        result_write_guard=lambda: None,
+                    )
                     cross_content = json.loads(cross.content_json)
                     failures += check(
                         "cross analysis persists canonical question identity instead of model label",

@@ -44,9 +44,9 @@ def run_mapping(
     interview に紐づく全発言を質問項目にマッピングして DB 保存。
     戻り値: マッピング件数
 
-    Durable worker callers can pass result_write_guard. It is invoked after the
-    external AI response is fully normalized but before any existing mapping is
-    deleted or new mapping is written.
+    Canonical AI mappings may only be saved by a durable worker. The guard is
+    required before provider work starts, then invoked again immediately before
+    the canonical replacement commit to verify the current attempt lease.
     """
     interview = Interview.query.get(interview_id)
     if not interview or not interview.flow_id:
@@ -71,6 +71,9 @@ def run_mapping(
 
     if not questions:
         return 0
+
+    if result_write_guard is None:
+        raise RuntimeError("mapping save requires a durable result-write guard")
 
     # プロンプト構築
     q_list = "\n".join(
@@ -121,10 +124,9 @@ def run_mapping(
             "is_unclassified": is_unclassified,
         })
 
-    # External work is complete. Durable callers now acquire/verify their result
-    # write lease before any canonical data is mutated.
-    if result_write_guard is not None:
-        result_write_guard()
+    # External work is complete. Verify the durable attempt lease before any
+    # existing canonical mapping is deleted or replaced.
+    result_write_guard()
 
     # 既存マッピングを ORM 経由で削除し、DELETE を先に flush する。
     # SQLite は削除直後の ROWID を再利用し得るため、bulk delete のまま新規
