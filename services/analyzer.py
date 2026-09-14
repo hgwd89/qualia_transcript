@@ -7,12 +7,13 @@ import json
 from models import db
 from models.interview import Interview
 from models.interview_flow import InterviewFlowQuestion
-from models.segment import Segment, UtteranceMapping
+from models.segment import Segment
 from models.analysis import AIAnalysis
 from services.ai_client import call_structured, MODEL
 from services.analysis_source_provenance import (
     PROVENANCE_KEY,
     AnalysisSourceProvenanceError,
+    _mapped_respondent_segments,
     capture_analysis_source_provenance,
     source_provenance_matches_scope,
 )
@@ -136,17 +137,11 @@ def analyze_per_question(
     if interview.flow_id is None or question_flow_id != int(interview.flow_id):
         raise ValueError("question が interview の割当フローに属していません")
 
-    mappings = (
-        UtteranceMapping.query
-        .filter_by(question_id=question_id)
-        .join(Segment, UtteranceMapping.segment_id == Segment.id)
-        .filter(Segment.interview_id == interview_id, Segment.speaker_role == "respondent")
-        .all()
-    )
+    segments = _mapped_respondent_segments(interview_id, question_id)
 
     participant = interview.participant
     code        = participant.participant_code if participant else "P??"
-    utterances  = "\n".join(f'- {code}:「{m.segment.text}」' for m in mappings)
+    utterances  = "\n".join(f'- {code}:「{segment.text}」' for segment in segments)
 
     system = (
         "あなたは定性調査の専門アナリストです。"
@@ -323,15 +318,9 @@ def analyze_cross_participants(
             continue
         code = participant.participant_code
 
-        mappings = (
-            UtteranceMapping.query
-            .filter_by(question_id=question_id)
-            .join(Segment, UtteranceMapping.segment_id == Segment.id)
-            .filter(Segment.interview_id == interview.id, Segment.speaker_role == "respondent")
-            .all()
-        )
-        if mappings:
-            texts = "／".join(f'「{m.segment.text}」' for m in mappings)
+        segments = _mapped_respondent_segments(interview.id, question_id)
+        if segments:
+            texts = "／".join(f'「{segment.text}」' for segment in segments)
             utterances_by_participant.append(f"{code}: {texts}")
 
     if not utterances_by_participant:
@@ -428,16 +417,9 @@ def analyze_project_integrated(
                 if not participant:
                     continue
                 code = participant.participant_code
-                mappings = (
-                    UtteranceMapping.query
-                    .filter_by(question_id=q.id)
-                    .join(Segment, UtteranceMapping.segment_id == Segment.id)
-                    .filter(Segment.interview_id == interview.id,
-                            Segment.speaker_role == "respondent")
-                    .all()
-                )
-                if mappings:
-                    texts = "／".join(f'「{m.segment.text}」' for m in mappings)
+                segments = _mapped_respondent_segments(interview.id, q.id)
+                if segments:
+                    texts = "／".join(f'「{segment.text}」' for segment in segments)
                     utterances_by_p.append(f"{code}: {texts}")
             if utterances_by_p:
                 questions_data.append(
