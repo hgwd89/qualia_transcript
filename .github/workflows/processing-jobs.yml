@@ -47,19 +47,8 @@ jobs:
       - name: Run processing job readiness schema regression
         run: python tests/smoke_processing_job_readiness_schema.py
 
-      - name: Run isolated analysis provider-smoke regression
-        shell: bash
-        if: runner.os != 'Windows'
-        env:
-          QUALIA_ANALYSIS_SMOKE_FAKE_PROVIDER: "1"
-        run: python tests/smoke_analysis.py
-
-      - name: Run isolated analysis provider-smoke regression (Windows)
-        shell: pwsh
-        if: runner.os == 'Windows'
-        env:
-          QUALIA_ANALYSIS_SMOKE_FAKE_PROVIDER: "1"
-        run: python tests/smoke_analysis.py
+      - name: Run analysis provider-smoke isolation contract
+        run: python tests/smoke_analysis_provider_isolation.py
 
       - name: Run role normalization regression
         run: python tests/smoke_role_normalization.py
