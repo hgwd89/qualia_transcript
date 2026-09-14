@@ -186,6 +186,7 @@ def audit_project(
     output_dir: Path,
     backup_dir: Path,
     project_id: int,
+    upload_dir: Path | None = None,
 ) -> dict:
     project_id = int(project_id)
     if project_id <= 0:
@@ -215,7 +216,7 @@ def audit_project(
     base_readiness.sqlite3 = scoped_sqlite
     readiness_v2.sqlite3 = scoped_sqlite
     try:
-        report = readiness_v2.audit(db_path, output_dir, backup_dir)
+        report = readiness_v2.audit(db_path, output_dir, backup_dir, upload_dir)
     finally:
         base_readiness.sqlite3 = original_base_sqlite
         readiness_v2.sqlite3 = original_v2_sqlite
@@ -260,6 +261,7 @@ def main() -> int:
     parser.add_argument("--db", help="SQLite DB path; defaults to config.DATABASE_URI")
     parser.add_argument("--output-dir", help="outputs directory; defaults to config.OUTPUT_DIR")
     parser.add_argument("--backup-dir", help="backup directory; defaults to config.BACKUP_DIR")
+    parser.add_argument("--upload-dir", help="uploads directory; defaults to config.UPLOAD_DIR")
     parser.add_argument("--json", action="store_true", help="print JSON report")
     parser.add_argument("--strict", action="store_true", help="treat warnings as a failing exit status")
     args = parser.parse_args()
@@ -272,6 +274,7 @@ def main() -> int:
                     base_readiness._resolve_output_dir(args.output_dir),
                     base_readiness._resolve_backup_dir(args.backup_dir),
                     args.project_id,
+                    readiness_v2._resolve_upload_dir(args.upload_dir),
                 )
             except Exception as exc:
                 report = {
