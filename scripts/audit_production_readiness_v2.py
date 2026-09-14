@@ -73,6 +73,13 @@ ACTIVE_JOB_REPORT_LIMIT = 100
 PROJECT_JOB_SAMPLE_LIMIT = 5
 
 
+def _resolve_upload_dir(explicit: str | None = None) -> Path:
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    import config
+    return Path(config.UPLOAD_DIR).resolve()
+
+
 def _issue(bucket: list[dict], code: str, message: str, **context) -> None:
     item = {"code": code, "message": message}
     if context:
@@ -297,7 +304,13 @@ def _run_base_audit_on_snapshot(
         globals_map["_connect_ro"] = original_connect_ro
 
 
-def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
+def audit(
+    db_path: Path,
+    output_dir: Path,
+    backup_dir: Path,
+    upload_dir: Path | None = None,
+) -> dict:
+    upload_root = Path(upload_dir).resolve() if upload_dir is not None else _resolve_upload_dir()
     con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     start_data_version = int(con.execute("PRAGMA data_version").fetchone()[0])
@@ -315,6 +328,7 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
         info = report["info"]
         info["database_snapshot"] = "single_read_transaction"
         info["database_data_version_start"] = start_data_version
+        info["upload_dir"] = str(upload_root)
 
         warnings[:] = [
             item for item in warnings
@@ -477,10 +491,8 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 ORDER BY id
                 """
             ).fetchall()
-            import config as app_config
-            upload_dir = Path(app_config.UPLOAD_DIR).resolve()
             for row in media_rows:
-                integrity_status, integrity_reason = media_file_integrity_status(row, upload_dir)
+                integrity_status, integrity_reason = media_file_integrity_status(row, upload_root)
                 media_integrity_counts[integrity_status] += 1
                 if integrity_status == "invalid":
                     _issue(
@@ -759,6 +771,7 @@ def main() -> int:
     parser.add_argument("--db", help="SQLite DB path; defaults to config.DATABASE_URI")
     parser.add_argument("--output-dir", help="outputs directory; defaults to config.OUTPUT_DIR")
     parser.add_argument("--backup-dir", help="backup directory; defaults to config.BACKUP_DIR")
+    parser.add_argument("--upload-dir", help="uploads directory; defaults to config.UPLOAD_DIR")
     parser.add_argument("--json", action="store_true", help="print JSON report")
     parser.add_argument("--strict", action="store_true", help="treat warnings as a failing exit status")
     args = parser.parse_args()
@@ -770,6 +783,7 @@ def main() -> int:
                     _resolve_db_path(args.db),
                     _resolve_output_dir(args.output_dir),
                     _resolve_backup_dir(args.backup_dir),
+                    _resolve_upload_dir(args.upload_dir),
                 )
             except Exception as exc:
                 report = {
