@@ -14,6 +14,7 @@ from services.approved_analysis_currentness import (
     formal_approved_analysis_readiness,
     formal_artifact_expected_sha256,
 )
+from services.file_manager import generated_file_expected_sha256
 from services.formal_artifact_integrity import (
     FormalArtifactIntegrityError,
     verified_artifact_snapshot,
@@ -188,9 +189,22 @@ def download(file_id):
             raise
     else:
         try:
+            expected_artifact_sha256 = generated_file_expected_sha256(gf)
+        except ValueError as exc:
+            abort(409, description=f"生成済みファイルのbytes整合性メタデータを検証できません: {exc}")
+
+        try:
             opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
         except (OSError, ValueError):
             abort(404)
+
+        if expected_artifact_sha256 is not None:
+            try:
+                opened = verified_artifact_snapshot(opened, expected_artifact_sha256)
+            except FormalArtifactIntegrityError as exc:
+                if opened is not None:
+                    opened.close()
+                abort(409, description=f"生成済みファイルのbytes整合性を検証できません: {exc}")
 
     info = opened.stat_result
     try:
