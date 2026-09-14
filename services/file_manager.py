@@ -10,7 +10,6 @@ from uuid import uuid4
 import config
 from models import db
 from models.generated_file import GeneratedFile
-from services.formal_artifact_integrity import sha256_managed_generation
 from services.managed_write_commit_guard import open_managed_write_commit_guard
 from services.storage_paths import (
     ManagedWriteFile,
@@ -240,10 +239,10 @@ def register_generated_file(
     guard re-pins the current exact file generation and its ancestor chain, stays
     live through DB commit, and verifies the public managed pathname again after
     commit. Newly registered ordinary artifacts receive a SHA-256 of that exact
-    generation so later downloads can reject in-place byte tampering. Formal
-    artifacts retain their stricter exporter-owned metadata contract; when formal
-    metadata is supplied, its hash is rechecked against the same bytes here.
-    Rollback cleanup is performed through the pinned guard rather than
+    pinned generation so later downloads can reject in-place byte tampering.
+    Formal artifacts retain their stricter exporter-owned metadata contract; when
+    formal metadata is supplied, its hash is rechecked against the same pinned
+    bytes here. Rollback cleanup is performed through the pinned guard rather than
     check-then-unlink on the mutable pathname.
     """
     expected = target.written_stat
@@ -261,11 +260,7 @@ def register_generated_file(
         )
         guard.verify_namespace()
 
-        artifact_sha256 = sha256_managed_generation(
-            config.OUTPUT_DIR,
-            target.stored_path,
-            expected,
-        )
+        artifact_sha256 = guard.sha256()
         if file_type != "approved_analysis" or generation_params_json:
             generation_params_json = _generation_params_with_artifact_sha256(
                 generation_params_json,
