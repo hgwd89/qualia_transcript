@@ -3,10 +3,16 @@ import json
 import re
 from datetime import datetime, timezone
 
+from sqlalchemy import text
+
 from models import db
 from models.analysis import AIAnalysis
 from models.interview import Interview
 from models.segment import Segment
+from services.analysis_source_provenance import (
+    AnalysisSourceProvenanceError,
+    require_current_analysis_source_provenance,
+)
 
 
 ALLOWED_REVIEW_STATUSES = {"draft", "approved", "rejected"}
@@ -259,6 +265,31 @@ def prepare_analysis_for_approval(analysis: AIAnalysis) -> tuple[dict, list[dict
     return normalized_content, unresolved
 
 
+def _begin_approval_write(analysis: AIAnalysis) -> AIAnalysis:
+    """Serialize provenance/evidence validation with the approval commit."""
+    analysis_id = int(analysis.id)
+    project_id = int(analysis.project_id)
+    if db.session.new or db.session.dirty or db.session.deleted:
+        raise RuntimeError("analysis approval requires a clean database session")
+
+    db.session.rollback()
+    if db.engine.dialect.name == "sqlite":
+        db.session.execute(text("BEGIN IMMEDIATE"))
+        current = db.session.get(AIAnalysis, analysis_id)
+    else:
+        current = (
+            AIAnalysis.query
+            .filter_by(id=analysis_id)
+            .with_for_update()
+            .first()
+        )
+
+    if current is None or int(current.project_id) != project_id:
+        db.session.rollback()
+        raise ValueError("AIAnalysis が見つかりません")
+    return current
+
+
 def set_analysis_review_status(
     analysis: AIAnalysis,
     status: str,
@@ -270,8 +301,20 @@ def set_analysis_review_status(
 
     unresolved = []
     if status == "approved":
+        analysis = _begin_approval_write(analysis)
+        try:
+            require_current_analysis_source_provenance(analysis)
+        except AnalysisSourceProvenanceError as exc:
+            db.session.rollback()
+            return analysis, [{
+                "finding_no": None,
+                "reason": "analysis source provenance is stale or unprovable",
+                "detail": str(exc),
+            }]
+
         content, unresolved = prepare_analysis_for_approval(analysis)
         if unresolved:
+            db.session.rollback()
             return analysis, unresolved
         analysis.content_json = json.dumps(content, ensure_ascii=False)
         analysis.reviewed_at = datetime.now(timezone.utc)
