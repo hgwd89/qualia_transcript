@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 from services.raw_snapshot_storage import read_raw_snapshot_batch
 
@@ -218,11 +219,11 @@ def _ooxml_xml_root(archive: zipfile.ZipFile, member: str) -> str:
     return ""
 
 
-def _validate_ooxml_package(path: Path, fmt: str) -> str | None:
+def _validate_ooxml_package(source, fmt: str) -> str | None:
     rule = _OOXML_RULES[fmt]
     main_part = str(rule["main_part"])
     try:
-        with zipfile.ZipFile(path, "r") as archive:
+        with zipfile.ZipFile(source, "r") as archive:
             names = archive.namelist()
             if len(names) != len(set(names)):
                 return f"{fmt} OOXML package contains duplicate member paths"
@@ -271,27 +272,46 @@ def _validate_ooxml_package(path: Path, fmt: str) -> str | None:
             )
             if not has_office_relationship:
                 return f"{fmt} OOXML package has no officeDocument relationship to {main_part}"
-    except (zipfile.BadZipFile, RuntimeError, OSError) as exc:
+    except (zipfile.BadZipFile, RuntimeError, NotImplementedError, EOFError, OSError) as exc:
         return f"{fmt} is not a valid ZIP/OOXML container: {exc}"
 
+    return None
+
+
+def validate_generated_artifact_stream(stream: BinaryIO, file_format: str) -> str | None:
+    """Validate one already-pinned/snapshotted artifact byte stream."""
+    fmt = str(file_format or "").lower().strip()
+    try:
+        stream.seek(0)
+    except (AttributeError, OSError, ValueError) as exc:
+        return f"artifact stream is not seekable: {exc}"
+
+    if fmt in _OOXML_RULES:
+        return _validate_ooxml_package(stream, fmt)
+
+    if fmt == "csv":
+        try:
+            stream.seek(0)
+            chunk = stream.read(4096)
+            if isinstance(chunk, str):
+                chunk.encode("utf-8")
+            else:
+                bytes(chunk).decode("utf-8-sig")
+        except UnicodeError as exc:
+            return f"csv is not readable as UTF-8/UTF-8-SIG: {exc}"
+        except (OSError, ValueError, TypeError) as exc:
+            return f"csv cannot be read for structural validation: {exc}"
     return None
 
 
 def validate_generated_artifact(path: Path, file_format: str) -> str | None:
     """Return an error reason when a registered deliverable is structurally invalid."""
     fmt = (file_format or path.suffix.lstrip(".")).lower().strip()
-    if fmt in _OOXML_RULES:
-        if not zipfile.is_zipfile(path):
-            return f"{fmt} is not a valid ZIP/OOXML container"
-        return _validate_ooxml_package(path, fmt)
-
-    if fmt == "csv":
-        try:
-            with path.open("r", encoding="utf-8-sig", newline="") as handle:
-                handle.read(4096)
-        except UnicodeError as exc:
-            return f"csv is not readable as UTF-8/UTF-8-SIG: {exc}"
-    return None
+    try:
+        with path.open("rb") as stream:
+            return validate_generated_artifact_stream(stream, fmt)
+    except OSError as exc:
+        return f"artifact cannot be opened for structural validation: {exc}"
 
 
 def _backup_recency_key(path: Path) -> tuple[str, int, str]:
