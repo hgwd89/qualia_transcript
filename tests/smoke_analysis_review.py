@@ -62,6 +62,11 @@ def create_fixture(
     UtteranceMapping,
     AIAnalysis,
 ):
+    from services.analysis_source_provenance import (
+        PROVENANCE_KEY,
+        capture_analysis_source_provenance,
+    )
+
     project = Project(name="Analysis Review Smoke", client="Smoke Client")
     db.session.add(project)
     db.session.flush()
@@ -124,8 +129,17 @@ def create_fixture(
             is_unclassified=False,
         )
     )
+    db.session.flush()
+
+    source_provenance = capture_analysis_source_provenance(
+        "per_question",
+        int(project.id),
+        interview_id=int(interview.id),
+        question_id=int(question.id),
+    )
 
     good_content = {
+        PROVENANCE_KEY: source_provenance,
         "findings": [
             {
                 "point": "保湿によって心理的な安心感も得ている",
@@ -139,6 +153,7 @@ def create_fixture(
         "unresolved": "他参加者でも確認が必要",
     }
     bad_content = {
+        PROVENANCE_KEY: source_provenance,
         "findings": [
             {
                 "point": "原文に存在しない主張",
