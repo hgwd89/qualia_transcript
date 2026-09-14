@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from services.approved_analysis_currentness_sqlite import (
+    validate_approved_analysis_artifact_currentness,
+)
 from services.formal_artifact_integrity import (
     FormalArtifactIntegrityError,
     verified_artifact_snapshot,
@@ -361,6 +364,11 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             str(row["name"])
             for row in con.execute("PRAGMA table_info(generated_files)").fetchall()
         }
+        project_id_select = (
+            "project_id"
+            if "project_id" in generated_columns
+            else "NULL AS project_id"
+        )
         file_type_select = (
             "file_type"
             if "file_type" in generated_columns
@@ -373,11 +381,15 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
         )
         generated = con.execute(
             f"""
-            SELECT id, {file_type_select}, file_format, stored_path, {generation_params_select}
+            SELECT id, {project_id_select}, {file_type_select}, file_format, stored_path,
+                   {generation_params_select}
             FROM generated_files
             ORDER BY id
             """
         ).fetchall()
+
+        formal_currentness_by_project: dict[int, list[dict]] = {}
+        unscoped_formal_currentness: list[dict] = []
         for row in generated:
             path = _safe_output_path(output_dir.resolve(), str(row["stored_path"] or ""))
             if path is None or not path.is_file() or path.stat().st_size <= 0:
@@ -404,6 +416,60 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                         path=str(path),
                         reason=byte_reason,
                     )
+
+                current_ok, current_reason = validate_approved_analysis_artifact_currentness(
+                    con,
+                    project_id=row["project_id"],
+                    generation_params_json=row["generation_params_json"],
+                )
+                currentness_item = {
+                    "generated_file_id": int(row["id"]),
+                    "current": bool(current_ok),
+                    "reason": current_reason,
+                }
+                if row["project_id"] is None:
+                    unscoped_formal_currentness.append(currentness_item)
+                else:
+                    project_id = int(row["project_id"])
+                    formal_currentness_by_project.setdefault(project_id, []).append(currentness_item)
+
+        info["approved_analysis_artifact_currentness"] = {
+            str(project_id): {
+                "artifact_count": len(items),
+                "current_count": sum(1 for item in items if item["current"]),
+                "historical_count": sum(1 for item in items if not item["current"]),
+            }
+            for project_id, items in sorted(formal_currentness_by_project.items())
+        }
+        for project_id, items in sorted(formal_currentness_by_project.items()):
+            if any(item["current"] for item in items):
+                continue
+            _issue(
+                blockers,
+                "approved_analysis_artifact_currentness_invalid",
+                "Registered formal approved-analysis history has no artifact that the delivery gate considers current",
+                project_id=project_id,
+                generated_file_ids=[item["generated_file_id"] for item in items[:JOB_REPORT_LIMIT]],
+                reasons=[
+                    {
+                        "generated_file_id": item["generated_file_id"],
+                        "reason": item["reason"],
+                    }
+                    for item in items[:JOB_REPORT_LIMIT]
+                ],
+                count=len(items),
+            )
+        if unscoped_formal_currentness:
+            _issue(
+                blockers,
+                "approved_analysis_artifact_currentness_invalid",
+                "Registered formal approved-analysis artifacts cannot be tied to a project for currentness validation",
+                generated_file_ids=[
+                    item["generated_file_id"]
+                    for item in unscoped_formal_currentness[:JOB_REPORT_LIMIT]
+                ],
+                count=len(unscoped_formal_currentness),
+            )
 
         raw_by_transcription, invalid_raw = load_raw_text_snapshots(output_dir)
         tombstoned_snapshot_names = load_raw_snapshot_tombstone_names(con)

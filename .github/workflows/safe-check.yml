@@ -39,6 +39,9 @@ jobs:
       - name: Run approved-artifact currentness regression
         run: python tests/smoke_approved_artifact_currentness.py
 
+      - name: Run readiness formal-artifact currentness parity regression
+        run: python tests/smoke_approved_artifact_readiness_currentness.py
+
       - name: Run production transcription dispatch fencing regression
         run: python tests/smoke_transcription_dispatch_fencing.py
 
@@ -81,6 +84,9 @@ jobs:
 
       - name: Run approved-artifact currentness regression
         run: python tests/smoke_approved_artifact_currentness.py
+
+      - name: Run readiness formal-artifact currentness parity regression
+        run: python tests/smoke_approved_artifact_readiness_currentness.py
 
       - name: Run POSIX snapshot fencing regression
         run: python tests/smoke_backup_snapshot_fencing.py
