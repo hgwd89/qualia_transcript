@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 
 from sqlalchemy import text
 
@@ -19,6 +20,7 @@ _JOB_SCOPE = {
     "transcribe": (True, False),
     "map": (True, False),
     "analyze": (True, False),
+    "analyze_semantic": (True, False),
     "analyze_question": (True, True),
     "analyze_cross": (False, True),
     "analyze_integrated": (False, False),
@@ -112,6 +114,56 @@ def _validate_job_scope(
             raise ValueError(f"{exc.code}: {exc}") from exc
 
 
+def _normalize_request_payload(job_type: str, request_payload: dict | None) -> dict | None:
+    if job_type != "analyze_semantic":
+        if request_payload not in (None, {}):
+            raise ValueError(f"{job_type} processing job does not accept request payload")
+        return None
+
+    raw = request_payload or {}
+    if not isinstance(raw, dict):
+        raise ValueError("analyze_semantic request payload must be an object")
+    unknown = set(raw) - {"max_segments", "no_ai"}
+    if unknown:
+        raise ValueError(f"unsupported analyze_semantic request field(s): {', '.join(sorted(unknown))}")
+
+    max_segments = raw.get("max_segments")
+    if max_segments is not None:
+        try:
+            max_segments = int(max_segments)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("analyze_semantic max_segments must be a positive integer or null") from exc
+        if max_segments <= 0:
+            raise ValueError("analyze_semantic max_segments must be a positive integer or null")
+
+    no_ai = raw.get("no_ai", False)
+    if not isinstance(no_ai, bool):
+        raise ValueError("analyze_semantic no_ai must be boolean")
+    return {"max_segments": max_segments, "no_ai": no_ai}
+
+
+def _canonical_request_json(payload: dict | None) -> str | None:
+    if payload is None:
+        return None
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _job_request_json(job: ProcessingJob) -> str | None:
+    if job.request_json:
+        try:
+            payload = json.loads(job.request_json)
+        except (TypeError, json.JSONDecodeError):
+            return str(job.request_json)
+        return _canonical_request_json(payload)
+    if job.job_type == "analyze_semantic":
+        return _canonical_request_json({"max_segments": None, "no_ai": False})
+    return None
+
+
+def _same_request(job: ProcessingJob, request_json: str | None) -> bool:
+    return _job_request_json(job) == request_json
+
+
 def _same_scope(
     job: ProcessingJob,
     job_type: str,
@@ -154,6 +206,7 @@ def admit_processing_job(
     interview_id: int | None = None,
     *,
     question_id: int | None = None,
+    request_payload: dict | None = None,
 ) -> JobAdmission:
     """Atomically validate, reuse, reject, or create one processing job.
 
@@ -167,6 +220,8 @@ def admit_processing_job(
     project_id = int(project_id)
     interview_id = int(interview_id) if interview_id is not None else None
     question_id = int(question_id) if question_id is not None else None
+    normalized_request = _normalize_request_payload(job_type, request_payload)
+    request_json = _canonical_request_json(normalized_request)
 
     recover_stale_jobs(project_id=project_id)
     try:
@@ -182,7 +237,9 @@ def admit_processing_job(
         for job in active:
             if _same_scope(job, job_type, interview_id, question_id):
                 db.session.commit()
-                return JobAdmission(job_id=job.id, created=False)
+                if _same_request(job, request_json):
+                    return JobAdmission(job_id=job.id, created=False)
+                return JobAdmission(job_id=job.id, conflict_job_id=job.id)
 
         for job in active:
             if _conflicts(job, job_type, interview_id, question_id):
@@ -196,6 +253,7 @@ def admit_processing_job(
             job_type=job_type,
             status="pending",
             progress_json=_json_dump({"stage": "queued"}),
+            request_json=request_json,
         )
         db.session.add(job)
         db.session.flush()

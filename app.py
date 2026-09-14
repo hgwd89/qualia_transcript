@@ -281,6 +281,11 @@ def _run_migrations(app):
                     "ALTER TABLE processing_jobs ADD COLUMN question_id INTEGER"
                 ))
                 db.session.commit()
+            if "request_json" not in job_cols:
+                db.session.execute(text(
+                    "ALTER TABLE processing_jobs ADD COLUMN request_json TEXT"
+                ))
+                db.session.commit()
             _install_processing_job_question_guards()
 
         if "participants" in existing_tables:

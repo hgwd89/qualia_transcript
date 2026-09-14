@@ -271,10 +271,13 @@ def run_semantic_cluster_analysis(
     save: bool = False,
     max_segments: int | None = None,
     no_ai: bool = False,
+    result_write_guard=None,
 ) -> dict[str, Any]:
     interview = db.session.get(Interview, interview_id)
     if not interview:
         raise ValueError(f"interview_id={interview_id} not found")
+    if save and result_write_guard is None:
+        raise RuntimeError("semantic analysis save requires a durable result-write guard")
 
     candidates = collect_candidate_segments(interview_id)
     if max_segments:
@@ -446,6 +449,7 @@ def run_semantic_cluster_analysis(
 
     saved_analysis_id = None
     if save:
+        result_write_guard()
         analysis = AIAnalysis(
             project_id=interview.project_id,
             interview_id=interview.id,

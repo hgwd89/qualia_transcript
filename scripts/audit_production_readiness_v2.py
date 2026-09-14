@@ -44,6 +44,7 @@ JOB_SCOPE_RULES = {
     "transcribe": (True, False),
     "map": (True, False),
     "analyze": (True, False),
+    "analyze_semantic": (True, False),
     "analyze_question": (True, True),
     "analyze_cross": (False, True),
     "analyze_integrated": (False, False),
@@ -235,6 +236,12 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                 str(row["name"])
                 for row in con.execute("PRAGMA table_info(processing_jobs)").fetchall()
             }
+            if "request_json" not in job_columns:
+                _issue(
+                    blockers,
+                    "processing_job_request_json_column_missing",
+                    "processing_jobs.request_json is missing; start the upgraded app once before professional use",
+                )
             if "question_id" not in job_columns:
                 _issue(
                     blockers,

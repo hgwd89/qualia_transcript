@@ -8,6 +8,11 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from app import create_app
+from models import db
+from models.interview import Interview
+from models.processing_job import ProcessingJob
+from services.job_admission import admit_processing_job
+from services.processing_jobs import execute_job
 from services.runtime_lock import RuntimeLockError, runtime_lock
 from services.semantic_analysis import run_semantic_cluster_analysis
 
@@ -30,19 +35,62 @@ def main() -> int:
     if not args.save and not args.dry_run:
         save = False  # default dry-run
 
-    # create_app() can run idempotent migrations and Windows secret migration even
-    # when semantic analysis itself is a dry-run. Treat this CLI as a normal shared
-    # runtime writer for its full lifetime so backup/applied restore cannot overlap.
     try:
         with runtime_lock("worker"):
             app = create_app()
             with app.app_context():
-                result = run_semantic_cluster_analysis(
-                    interview_id=args.interview_id,
-                    save=save,
-                    max_segments=args.max_segments,
-                    no_ai=bool(args.no_ai),
-                )
+                if not save:
+                    result = run_semantic_cluster_analysis(
+                        interview_id=args.interview_id,
+                        save=False,
+                        max_segments=args.max_segments,
+                        no_ai=bool(args.no_ai),
+                    )
+                else:
+                    interview = db.session.get(Interview, int(args.interview_id))
+                    if interview is None:
+                        raise ValueError(f"interview_id={args.interview_id} not found")
+
+                    admission = admit_processing_job(
+                        int(interview.project_id),
+                        "analyze_semantic",
+                        int(interview.id),
+                        request_payload={
+                            "max_segments": args.max_segments,
+                            "no_ai": bool(args.no_ai),
+                        },
+                    )
+                    if admission.error:
+                        result = {
+                            "ok": False,
+                            "error_type": "JobAdmissionError",
+                            "error_message": admission.error,
+                        }
+                    elif admission.conflict_job_id is not None:
+                        result = {
+                            "ok": False,
+                            "error_type": "JobConflict",
+                            "error_message": "another processing job is active for this analysis scope",
+                            "conflict_job_id": int(admission.conflict_job_id),
+                        }
+                    elif not admission.created:
+                        job = db.session.get(ProcessingJob, int(admission.job_id))
+                        result = {
+                            "ok": False,
+                            "in_progress": True,
+                            "error_type": "JobAlreadyActive",
+                            "error_message": "same-scope semantic analysis is still pending or running",
+                            "job": job.to_dict() if job else None,
+                        }
+                    else:
+                        completed = execute_job(
+                            int(admission.job_id),
+                            worker_pid=os.getpid(),
+                        )
+                        result = {
+                            "ok": completed.status == "succeeded",
+                            "job": completed.to_dict(),
+                        }
     except RuntimeLockError as exc:
         print(json.dumps({
             "ok": False,
@@ -59,6 +107,8 @@ def main() -> int:
         return 1
 
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if result.get("in_progress"):
+        return 2
     if not result.get("ok", False):
         return 1
     return 0

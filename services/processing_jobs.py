@@ -16,7 +16,7 @@ from models.processing_job import ProcessingJob
 
 
 ACTIVE_STATUSES = {"pending", "running"}
-JOB_TYPES = {"transcribe", "map", "analyze", "analyze_question", "analyze_cross", "analyze_integrated", "project_pipeline"}
+JOB_TYPES = {"transcribe", "map", "analyze", "analyze_semantic", "analyze_question", "analyze_cross", "analyze_integrated", "project_pipeline"}
 _KEY_RE = re.compile(r"sk-[A-Za-z0-9_\-]+")
 _LAUNCH_RESERVED_PID = 0
 
@@ -617,6 +617,80 @@ def _perform_integrated_analysis(job: ProcessingJob) -> dict:
     return {"analysis_id": analysis.id}
 
 
+def _semantic_job_request(job: ProcessingJob) -> dict:
+    raw = None
+    if job.request_json:
+        try:
+            raw = json.loads(job.request_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"invalid semantic job request_json for job_id={job.id}") from exc
+    if raw is None:
+        raw = {"max_segments": None, "no_ai": False}
+    if not isinstance(raw, dict):
+        raise ValueError(f"invalid semantic job request payload for job_id={job.id}")
+
+    max_segments = raw.get("max_segments")
+    if max_segments is not None:
+        max_segments = int(max_segments)
+        if max_segments <= 0:
+            raise ValueError(f"invalid semantic max_segments for job_id={job.id}")
+    no_ai = raw.get("no_ai", False)
+    if not isinstance(no_ai, bool):
+        raise ValueError(f"invalid semantic no_ai for job_id={job.id}")
+    return {"max_segments": max_segments, "no_ai": no_ai}
+
+
+def _perform_semantic_analysis(job: ProcessingJob) -> dict:
+    from models.interview import Interview
+    from services.processing_result_guard import find_completed_analysis_for_scope
+    from services.semantic_analysis import run_semantic_cluster_analysis
+
+    interview = db.session.get(Interview, job.interview_id)
+    if not interview or interview.project_id != job.project_id:
+        raise ValueError("interview not found in job project")
+
+    existing = find_completed_analysis_for_scope(job, "semantic_clusters")
+    if existing:
+        update_progress(job, "analyzing_semantic", analysis_id=existing.id, already_done=True)
+        return {"analysis_id": existing.id, "already_done": True}
+
+    request_payload = _semantic_job_request(job)
+    update_progress(job, "analyzing_semantic", **request_payload)
+    result = run_semantic_cluster_analysis(
+        interview.id,
+        save=True,
+        max_segments=request_payload["max_segments"],
+        no_ai=request_payload["no_ai"],
+        result_write_guard=lambda: begin_job_result_write(job),
+    )
+    if not result.get("ok", False):
+        diagnostic = {
+            key: result.get(key)
+            for key in (
+                "reason",
+                "candidate_segment_count",
+                "fragment_count",
+                "excluded_count",
+                "excluded_counts",
+            )
+            if key in result
+        }
+        raise RuntimeError(
+            "semantic analysis produced no savable result: "
+            + json.dumps(diagnostic, ensure_ascii=False, sort_keys=True)
+        )
+
+    analysis_id = result.get("saved_analysis_id")
+    if not analysis_id:
+        raise RuntimeError("semantic analysis completed without a saved AIAnalysis row")
+    return {
+        "analysis_id": int(analysis_id),
+        "cluster_count": int(result.get("cluster_count") or 0),
+        "embedding_api_call_count": int(result.get("embedding_api_call_count") or 0),
+        "summary_api_call_count": int(result.get("summary_api_call_count") or 0),
+    }
+
+
 def _perform_project_pipeline(job: ProcessingJob) -> dict:
     from services.project_pipeline import run_project_pipeline
 
@@ -645,6 +719,7 @@ def execute_job(
         "transcribe": _perform_transcription,
         "map": _perform_mapping,
         "analyze": _perform_analysis,
+        "analyze_semantic": _perform_semantic_analysis,
         "analyze_question": _perform_question_analysis,
         "analyze_cross": _perform_cross_analysis,
         "analyze_integrated": _perform_integrated_analysis,
