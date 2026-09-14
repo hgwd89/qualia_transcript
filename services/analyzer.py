@@ -10,6 +10,12 @@ from models.interview_flow import InterviewFlowQuestion
 from models.segment import Segment, UtteranceMapping
 from models.analysis import AIAnalysis
 from services.ai_client import call_structured, MODEL
+from services.analysis_source_provenance import (
+    PROVENANCE_KEY,
+    AnalysisSourceProvenanceError,
+    capture_analysis_source_provenance,
+    source_provenance_matches_scope,
+)
 from services.project_flow_scope import resolve_integrated_analysis_scope
 
 ResultWriteGuard = Callable[[], object]
@@ -93,6 +99,26 @@ def _require_result_write_guard(result_write_guard: ResultWriteGuard | None) -> 
     return result_write_guard
 
 
+def _require_unchanged_source_provenance(
+    expected: dict,
+    analysis_type: str,
+    project_id: int,
+    *,
+    interview_id: int | None = None,
+    question_id: int | None = None,
+) -> None:
+    """Fail closed when provider inputs changed before the result commit."""
+    ok, reason = source_provenance_matches_scope(
+        expected,
+        analysis_type,
+        project_id,
+        interview_id=interview_id,
+        question_id=question_id,
+    )
+    if not ok:
+        raise AnalysisSourceProvenanceError(reason)
+
+
 # ── インタビュー単位の分析 ────────────────────────────────────
 
 def analyze_per_question(
@@ -139,6 +165,12 @@ def analyze_per_question(
     )
 
     result_write_guard = _require_result_write_guard(result_write_guard)
+    source_provenance = capture_analysis_source_provenance(
+        "per_question",
+        int(interview.project_id),
+        interview_id=int(interview_id),
+        question_id=int(question_id),
+    )
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="analysis_result")
 
     canonical_q_code = _canonical_question_code(question)
@@ -160,6 +192,14 @@ def analyze_per_question(
     }
 
     result_write_guard()
+    _require_unchanged_source_provenance(
+        source_provenance,
+        "per_question",
+        int(interview.project_id),
+        interview_id=int(interview_id),
+        question_id=int(question_id),
+    )
+    normalized_result[PROVENANCE_KEY] = source_provenance
 
     analysis = AIAnalysis(
         project_id=interview.project_id,
@@ -219,17 +259,30 @@ def analyze_interview_summary(
     )
 
     result_write_guard = _require_result_write_guard(result_write_guard)
+    source_provenance = capture_analysis_source_provenance(
+        "per_participant",
+        int(interview.project_id),
+        interview_id=int(interview_id),
+    )
     result = call_structured(system, user, FINDINGS_SCHEMA, schema_name="summary_result")
 
     result_write_guard()
+    _require_unchanged_source_provenance(
+        source_provenance,
+        "per_participant",
+        int(interview.project_id),
+        interview_id=int(interview_id),
+    )
+    normalized_result = dict(result)
+    normalized_result[PROVENANCE_KEY] = source_provenance
 
     analysis = AIAnalysis(
         project_id=interview.project_id,
         interview_id=interview_id,
         analysis_type="per_participant",
         title=f"{code} インタビュー総括",
-        summary_text=result.get("implications", ""),
-        content_json=json.dumps(result, ensure_ascii=False),
+        summary_text=normalized_result.get("implications", ""),
+        content_json=json.dumps(normalized_result, ensure_ascii=False),
         model_used=MODEL,
     )
     db.session.add(analysis)
@@ -299,6 +352,11 @@ def analyze_cross_participants(
     )
 
     result_write_guard = _require_result_write_guard(result_write_guard)
+    source_provenance = capture_analysis_source_provenance(
+        "cross_participant",
+        int(project_id),
+        question_id=int(question_id),
+    )
     result = call_structured(system, user, CROSS_SCHEMA, schema_name="cross_analysis_result")
     canonical_q_code = _canonical_question_code(question)
     normalized_findings = []
@@ -314,6 +372,13 @@ def analyze_cross_participants(
     normalized_result["findings"] = normalized_findings
 
     result_write_guard()
+    _require_unchanged_source_provenance(
+        source_provenance,
+        "cross_participant",
+        int(project_id),
+        question_id=int(question_id),
+    )
+    normalized_result[PROVENANCE_KEY] = source_provenance
 
     analysis = AIAnalysis(
         project_id=project_id,
@@ -403,6 +468,10 @@ def analyze_project_integrated(
     )
 
     result_write_guard = _require_result_write_guard(result_write_guard)
+    source_provenance = capture_analysis_source_provenance(
+        "integrated",
+        int(project_id),
+    )
     result = call_structured(system, user, INTEGRATED_SCHEMA, schema_name="integrated_result")
     normalized_findings = []
     for finding in (result.get("findings") or []):
@@ -423,6 +492,12 @@ def analyze_project_integrated(
     normalized_result["findings"] = normalized_findings
 
     result_write_guard()
+    _require_unchanged_source_provenance(
+        source_provenance,
+        "integrated",
+        int(project_id),
+    )
+    normalized_result[PROVENANCE_KEY] = source_provenance
 
     analysis = AIAnalysis(
         project_id=project_id,
