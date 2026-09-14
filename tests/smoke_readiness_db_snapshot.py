@@ -78,8 +78,10 @@ def main() -> int:
                 try:
                     writer.execute(
                         """
-                        INSERT INTO processing_jobs (project_id, job_type, status)
-                        VALUES (?, 'project_pipeline', 'pending')
+                        INSERT INTO processing_jobs (
+                            project_id, job_type, status, attempt_count
+                        )
+                        VALUES (?, 'project_pipeline', 'pending', 0)
                         """,
                         (project_id,),
                     )
