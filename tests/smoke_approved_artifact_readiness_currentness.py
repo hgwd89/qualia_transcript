@@ -230,7 +230,7 @@ def main() -> int:
                 orm_state = approved_analysis_artifact_currentness(first_artifact)
                 failures += check(
                     "delivery currentness accepts freshly generated formal artifact",
-                    orm_state.is_current,
+                    orm_state.current,
                     orm_state.reason,
                 )
 
