@@ -12,7 +12,7 @@ Run:
 powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 ```
 
-The same required category is run by `.github/workflows/safe-check.yml` as the Windows `safe-smoke` job and by `scripts/check_all.ps1` with no flags. CI also runs focused managed-storage, transcription-dispatch, transcription-lifecycle, question-identity, question-code-readiness, and project-flow-scope regressions directly where platform coverage matters. The Ubuntu jobs exercise backup snapshot fencing, managed-storage ancestry-replacement read/write behavior, write identity, the DB commit-window replacement race, providerless transcription lifecycle fencing, question identity/readiness, and project-flow-scope checks on a POSIX filesystem rather than leaving those paths Windows-only or source-assertion-only.
+The same required category is run by `.github/workflows/safe-check.yml` as the Windows `safe-smoke` job and by `scripts/check_all.ps1` with no flags. CI also runs focused managed-storage, transcription-dispatch, transcription-lifecycle, question-identity, question-code-readiness, project-flow-scope, and provider-check isolation regressions directly where platform coverage matters. The Ubuntu jobs exercise backup snapshot fencing, managed-storage ancestry-replacement read/write behavior, write identity, the DB commit-window replacement race, providerless transcription lifecycle fencing, question identity/readiness, project-flow-scope checks, and the providerless analysis-check isolation contract on a POSIX filesystem rather than leaving those paths Windows-only or source-assertion-only.
 
 Safe checks use temporary fixtures where data or storage is needed. They must not depend on existing research-data IDs, must not change `Segment.text` or raw transcript snapshots, and must leave the repository's real runtime data directories unchanged.
 
@@ -145,7 +145,7 @@ powershell -ExecutionPolicy Bypass -File scripts/check_analysis.ps1
 powershell -ExecutionPolicy Bypass -File scripts/check_transcription.ps1
 ```
 
-These are not part of safe-smoke or the normal CI path.
+These are not part of safe-smoke or the normal CI path. `check_analysis.ps1` still performs exactly one paid OpenAI request, but all project/participant/interview/segment/analysis writes occur only in a temporary SQLite fixture. If the OpenAI key is stored in the application database, the check reads only that single setting through SQLite `mode=ro` + `query_only` and copies the stored credential into the disposable fixture; it never opens the research database through SQLAlchemy and never mutates research rows. `.github/workflows/processing-jobs.yml` runs only the providerless source-contract regression `tests/smoke_analysis_provider_isolation.py`, not the paid analysis smoke itself.
 
 ## Semantic analysis
 
