@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from dataclasses import dataclass, field
@@ -45,17 +46,46 @@ class ManagedWriteCommitGuard:
     def _name(self) -> str:
         return self.relative.parts[-1]
 
-    def verify_pinned_file(self) -> None:
+    def _file_fd(self) -> int:
         fd = self._posix_file_fd
         if fd is None:
             fd = self._windows_file_fd
         if fd is None:
             raise ValueError("managed write commit guard is closed")
+        return fd
+
+    def verify_pinned_file(self) -> None:
+        fd = self._file_fd()
         current = os.fstat(fd)
         if not stat.S_ISREG(current.st_mode):
             raise ValueError("managed write commit target is not a regular file")
         if _file_generation(current) != _file_generation(self.expected):
             raise ValueError("managed write commit target changed after write")
+
+    def sha256(self) -> str:
+        """Hash the already-pinned exact generation without reopening its pathname."""
+        fd = self._file_fd()
+        self.verify_pinned_file()
+        original_offset = os.lseek(fd, 0, os.SEEK_CUR)
+        hasher = hashlib.sha256()
+        total = 0
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                total += len(chunk)
+            after = os.fstat(fd)
+            if (
+                _file_generation(after) != _file_generation(self.expected)
+                or total != int(self.expected.st_size)
+            ):
+                raise ValueError("managed write commit target changed while hashing")
+            return hasher.hexdigest()
+        finally:
+            os.lseek(fd, original_offset, os.SEEK_SET)
 
     def verify_namespace(self) -> None:
         """Require the public managed pathname to still name the pinned generation."""
