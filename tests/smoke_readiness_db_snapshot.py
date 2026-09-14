@@ -144,11 +144,11 @@ def main() -> int:
                 f"pending_jobs={durable_count}",
             )
 
-            original_validate_latest_backup = audit_mod.validate_latest_backup
+            original_compare_backup = audit_mod.compare_latest_backup_to_current_recovery_set
             late_mutation = {"committed": False}
 
-            def validate_backup_then_mutate(path):
-                result = original_validate_latest_backup(path)
+            def compare_backup_then_mutate(*args, **kwargs):
+                result = original_compare_backup(*args, **kwargs)
                 if late_mutation["committed"]:
                     return result
                 writer = sqlite3.connect(db_path, timeout=5.0)
@@ -168,23 +168,23 @@ def main() -> int:
                     writer.close()
                 return result
 
-            audit_mod.validate_latest_backup = validate_backup_then_mutate
+            audit_mod.compare_latest_backup_to_current_recovery_set = compare_backup_then_mutate
             try:
                 late_report = audit_mod.audit(db_path, output_dir, backup_dir)
             finally:
-                audit_mod.validate_latest_backup = original_validate_latest_backup
+                audit_mod.compare_latest_backup_to_current_recovery_set = original_compare_backup
 
             late_codes = {item.get("code") for item in late_report.get("blockers", [])}
             late_start = late_report.get("info", {}).get("database_data_version_start")
             late_end = late_report.get("info", {}).get("database_data_version_end")
             failures += check(
-                "writer can commit after the SQLite snapshot is released but before readiness returns",
+                "writer can commit during final recovery-set comparison while readiness retains its SQLite snapshot",
                 late_mutation["committed"]
                 and late_report.get("info", {}).get("active_processing_job_count") == 0,
                 f"info={late_report.get('info', {})}",
             )
             failures += check(
-                "readiness final change detector covers backup validation and fails closed on a late commit",
+                "readiness final change detector covers backup freshness comparison and fails closed on a late commit",
                 "database_changed_during_audit" in late_codes
                 and late_report.get("info", {}).get("database_changed_during_audit") is True
                 and isinstance(late_start, int)
