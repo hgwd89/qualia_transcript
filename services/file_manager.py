@@ -4,13 +4,14 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from uuid import uuid4
 
 import config
 from models import db
 from models.generated_file import GeneratedFile
 from models.interview import Interview
+from services.generated_file_ownership import stored_path_project_id
 from services.managed_write_commit_guard import open_managed_write_commit_guard
 from services.storage_paths import (
     ManagedWriteFile,
@@ -152,21 +153,6 @@ def generated_file_expected_sha256(gf: GeneratedFile) -> str | None:
     return digest
 
 
-def _stored_path_project_id(stored_path: str) -> int | None:
-    """Return the numeric project namespace encoded by a managed output path."""
-    normalized = str(stored_path or "").replace("\\", "/").strip("/")
-    if not normalized:
-        return None
-    parts = PurePosixPath(normalized).parts
-    if len(parts) < 2:
-        return None
-    try:
-        project_id = int(parts[0])
-    except (TypeError, ValueError):
-        return None
-    return project_id if project_id > 0 else None
-
-
 def _validate_generated_file_ownership(
     target: OutputTarget,
     *,
@@ -178,7 +164,7 @@ def _validate_generated_file_ownership(
     if project_id <= 0:
         raise ValueError("generated-file project_id must be positive")
 
-    path_project_id = _stored_path_project_id(target.stored_path)
+    path_project_id = stored_path_project_id(target.stored_path)
     if path_project_id != project_id:
         raise ValueError(
             "generated output stored_path project namespace does not match project_id"
