@@ -12,6 +12,11 @@ from models.generated_file import GeneratedFile
 from services.approved_analysis_currentness import (
     approved_analysis_artifact_currentness,
     formal_approved_analysis_readiness,
+    formal_artifact_expected_sha256,
+)
+from services.formal_artifact_integrity import (
+    FormalArtifactIntegrityError,
+    verified_artifact_snapshot,
 )
 from services.report_verbatim import generate_verbatim
 from services.report_formatted import generate_formatted_sheet
@@ -33,7 +38,7 @@ def _managed_download_etag(info) -> str:
 
 
 def _begin_formal_download_snapshot() -> None:
-    """Serialize formal-artifact validation until its exact bytes are pinned."""
+    """Serialize formal-artifact validation until verified bytes are snapshotted."""
     if db.session.new or db.session.dirty or db.session.deleted:
         raise RuntimeError("formal artifact download requires a clean database session")
     db.session.rollback()
@@ -157,13 +162,20 @@ def download(file_id):
                     + currentness.reason
                 ))
 
+            expected_artifact_sha256 = formal_artifact_expected_sha256(gf)
             stored_path = str(gf.stored_path)
             download_name = gf.original_filename or Path(stored_path).name
             opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
-            # Retain both the exact managed-file handle and its download metadata
-            # before releasing the serialized DB snapshot. No ORM reload is
-            # needed after the write reservation is released.
+            opened = verified_artifact_snapshot(opened, expected_artifact_sha256)
+            # The DB reservation is retained until the pinned managed bytes have
+            # been copied into a hash-verified immutable response snapshot. Later
+            # in-place writes to the managed file cannot change the served bytes.
             db.session.commit()
+        except FormalArtifactIntegrityError as exc:
+            db.session.rollback()
+            if opened is not None:
+                opened.close()
+            abort(409, description=f"承認済AI分析ファイルのbytes整合性を検証できません: {exc}")
         except (OSError, ValueError):
             db.session.rollback()
             if opened is not None:
@@ -190,12 +202,12 @@ def download(file_id):
             etag=False,
             last_modified=float(info.st_mtime),
         )
-        response.content_length = int(info.st_size)
+        response.content_length = int(getattr(opened, "size", info.st_size))
         response.set_etag(_managed_download_etag(info))
         response.make_conditional(
             request,
             accept_ranges=True,
-            complete_length=int(info.st_size),
+            complete_length=int(getattr(opened, "size", info.st_size)),
         )
     except Exception:
         opened.close()

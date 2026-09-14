@@ -24,6 +24,7 @@ from services.file_manager import (
     prepare_output_target,
     register_generated_file,
 )
+from services.formal_artifact_integrity import sha256_managed_generation
 
 
 SUMMARY_HEADERS = [
@@ -242,6 +243,11 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
         finally:
             opened.close()
 
+        artifact_sha256 = sha256_managed_generation(
+            config.OUTPUT_DIR,
+            target.stored_path,
+            target.written_stat,
+        )
         params = {
             "approved_only": True,
             "analysis_count": len(summary_rows) - 1,
@@ -249,6 +255,7 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
             "analysis_ids": analysis_ids,
             "source_provenance_sha256": provenance_hashes,
             "formal_analysis_state_sha256": formal_state_hashes,
+            "artifact_sha256": artifact_sha256,
         }
         return register_generated_file(
             target,
