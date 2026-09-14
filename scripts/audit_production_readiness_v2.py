@@ -26,6 +26,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from services.formal_artifact_integrity import (
+    FormalArtifactIntegrityError,
+    verified_artifact_snapshot,
+)
 from services.readiness_validation import (
     load_raw_snapshot_tombstone_names,
     load_raw_text_snapshots,
@@ -34,6 +38,7 @@ from services.readiness_validation import (
     validate_latest_backup,
 )
 from services.runtime_lock import RuntimeLockError, runtime_lock
+from services.storage_paths import open_managed_file_for_read
 
 
 QUESTION_GUARD_TRIGGERS = {
@@ -182,6 +187,35 @@ def _job_issue_context(jobs: list[dict], report_limit: int) -> dict:
     }
 
 
+def _formal_artifact_hash_reason(row: sqlite3.Row, output_dir: Path) -> str | None:
+    """Return why a registered formal artifact cannot pass the delivery byte gate."""
+    try:
+        params = json.loads(row["generation_params_json"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return "formal artifact generation metadata is invalid"
+    if not isinstance(params, dict):
+        return "formal artifact generation metadata is invalid"
+
+    expected_sha256 = str(params.get("artifact_sha256") or "").strip().lower()
+    if len(expected_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in expected_sha256):
+        return "formal artifact SHA-256 metadata is missing or invalid"
+
+    opened = None
+    verified = None
+    try:
+        opened = open_managed_file_for_read(output_dir, str(row["stored_path"] or ""))
+        verified = verified_artifact_snapshot(opened, expected_sha256)
+        opened = None
+        return None
+    except (FormalArtifactIntegrityError, OSError, ValueError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    finally:
+        if opened is not None:
+            opened.close()
+        if verified is not None:
+            verified.close()
+
+
 def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
     report = base_audit(db_path, output_dir, backup_dir)
     blockers = report["blockers"]
@@ -323,8 +357,21 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                     **_job_issue_context(active_jobs, ACTIVE_JOB_REPORT_LIMIT),
                 )
 
+        generated_columns = {
+            str(row["name"])
+            for row in con.execute("PRAGMA table_info(generated_files)").fetchall()
+        }
+        generation_params_select = (
+            "generation_params_json"
+            if "generation_params_json" in generated_columns
+            else "NULL AS generation_params_json"
+        )
         generated = con.execute(
-            "SELECT id, file_format, stored_path FROM generated_files ORDER BY id"
+            f"""
+            SELECT id, file_type, file_format, stored_path, {generation_params_select}
+            FROM generated_files
+            ORDER BY id
+            """
         ).fetchall()
         for row in generated:
             path = _safe_output_path(output_dir.resolve(), str(row["stored_path"] or ""))
@@ -340,6 +387,18 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                     path=str(path),
                     reason=reason,
                 )
+
+            if str(row["file_type"] or "") == "approved_analysis":
+                byte_reason = _formal_artifact_hash_reason(row, output_dir)
+                if byte_reason:
+                    _issue(
+                        blockers,
+                        "approved_analysis_artifact_integrity_invalid",
+                        "Registered formal approved-analysis artifact would be rejected by the delivery byte-integrity gate",
+                        generated_file_id=row["id"],
+                        path=str(path),
+                        reason=byte_reason,
+                    )
 
         raw_by_transcription, invalid_raw = load_raw_text_snapshots(output_dir)
         tombstoned_snapshot_names = load_raw_snapshot_tombstone_names(con)
