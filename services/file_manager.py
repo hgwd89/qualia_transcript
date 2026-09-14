@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from sqlalchemy import text
+
 import config
 from models import db
 from models.generated_file import GeneratedFile
@@ -154,6 +156,15 @@ def generated_file_expected_sha256(gf: GeneratedFile) -> str | None:
     return digest
 
 
+def _begin_generated_file_registration() -> None:
+    """Serialize ownership validation with the GeneratedFile commit."""
+    if db.session.new or db.session.dirty or db.session.deleted:
+        raise RuntimeError("generated-file registration requires a clean database session")
+    db.session.rollback()
+    if db.engine.dialect.name == "sqlite":
+        db.session.execute(text("BEGIN IMMEDIATE"))
+
+
 def _validate_generated_file_ownership(
     target: OutputTarget,
     *,
@@ -164,7 +175,12 @@ def _validate_generated_file_ownership(
     project_id = int(project_id)
     if project_id <= 0:
         raise ValueError("generated-file project_id must be positive")
-    if db.session.get(Project, project_id) is None:
+
+    if db.engine.dialect.name == "sqlite":
+        project = db.session.get(Project, project_id)
+    else:
+        project = Project.query.filter_by(id=project_id).with_for_update().first()
+    if project is None:
         raise ValueError("generated-file project does not exist")
 
     path_project_id = stored_path_project_id(target.stored_path)
@@ -178,7 +194,15 @@ def _validate_generated_file_ownership(
         normalized_interview_id = int(interview_id)
         if normalized_interview_id <= 0:
             raise ValueError("generated-file interview_id must be positive")
-        interview = db.session.get(Interview, normalized_interview_id)
+        if db.engine.dialect.name == "sqlite":
+            interview = db.session.get(Interview, normalized_interview_id)
+        else:
+            interview = (
+                Interview.query
+                .filter_by(id=normalized_interview_id)
+                .with_for_update()
+                .first()
+            )
         if interview is None:
             raise ValueError("generated-file interview does not exist")
         if int(interview.project_id) != project_id:
@@ -274,8 +298,8 @@ def register_generated_file(
     pinned generation so later downloads can reject in-place byte tampering.
     Formal artifacts retain their stricter exporter-owned metadata contract; when
     formal metadata is supplied, its hash is rechecked against the same pinned
-    bytes here. Project/interview ownership is validated against the target's
-    project-scoped storage namespace before the row can be committed. Registration
+    bytes here. Project/interview ownership is serialized with the row commit and
+    validated against the target's project-scoped storage namespace. Registration
     also requires a clean SQLAlchemy session so its internal commit cannot publish
     unrelated caller mutations. Rollback cleanup is performed through the pinned
     guard rather than check-then-unlink on the mutable pathname.
@@ -288,8 +312,7 @@ def register_generated_file(
     gf = None
     committed = False
     try:
-        if db.session.new or db.session.dirty or db.session.deleted:
-            raise RuntimeError("generated-file registration requires a clean database session")
+        _begin_generated_file_registration()
 
         normalized_project_id, normalized_interview_id = _validate_generated_file_ownership(
             target,
