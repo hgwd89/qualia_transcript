@@ -137,6 +137,8 @@ def gen_approved_analysis(project_id):
 def download(file_id):
     gf = GeneratedFile.query.get_or_404(file_id)
     opened = None
+    stored_path = str(gf.stored_path)
+    download_name = gf.original_filename or Path(stored_path).name
 
     if gf.file_type == "approved_analysis":
         try:
@@ -155,10 +157,12 @@ def download(file_id):
                     + currentness.reason
                 ))
 
-            opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
-            # The DB write reservation is held until the exact managed-file
-            # generation has been pinned. Source edits may proceed after this
-            # point without redirecting the response to another artifact.
+            stored_path = str(gf.stored_path)
+            download_name = gf.original_filename or Path(stored_path).name
+            opened = open_managed_file_for_read(config.OUTPUT_DIR, stored_path)
+            # Retain both the exact managed-file handle and its download metadata
+            # before releasing the serialized DB snapshot. No ORM reload is
+            # needed after the write reservation is released.
             db.session.commit()
         except (OSError, ValueError):
             db.session.rollback()
@@ -172,12 +176,11 @@ def download(file_id):
             raise
     else:
         try:
-            opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
+            opened = open_managed_file_for_read(config.OUTPUT_DIR, stored_path)
         except (OSError, ValueError):
             abort(404)
 
     info = opened.stat_result
-    download_name = gf.original_filename or Path(gf.stored_path).name
     try:
         response = send_file(
             opened.stream,
