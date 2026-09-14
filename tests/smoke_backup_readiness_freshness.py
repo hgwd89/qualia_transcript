@@ -111,6 +111,17 @@ def main() -> int:
         backup_dir.mkdir()
         create_fixture(db_path)
 
+        setup = sqlite3.connect(db_path)
+        try:
+            journal_mode = setup.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        finally:
+            setup.close()
+        failures += check(
+            "fixture uses WAL so a writer can commit while freshness holds a pinned read snapshot",
+            str(journal_mode).lower() == "wal",
+            f"journal_mode={journal_mode}",
+        )
+
         upload_path = upload_dir / "source.bin"
         output_path = output_dir / "report.txt"
         upload_path.write_bytes(b"source-v1")
