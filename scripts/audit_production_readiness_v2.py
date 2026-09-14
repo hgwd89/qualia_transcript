@@ -38,6 +38,7 @@ from services.readiness_validation import (
     load_raw_text_snapshots,
     missing_raw_snapshot_transcription_ids,
     validate_generated_artifact,
+    validate_generated_artifact_stream,
     validate_latest_backup,
 )
 from services.runtime_lock import RuntimeLockError, runtime_lock
@@ -190,71 +191,80 @@ def _job_issue_context(jobs: list[dict], report_limit: int) -> dict:
     }
 
 
-def _formal_artifact_hash_reason(row: sqlite3.Row, output_dir: Path) -> str | None:
-    """Return why a registered formal artifact cannot pass the delivery byte gate."""
+def _verified_artifact_validation(
+    row: sqlite3.Row,
+    output_dir: Path,
+    expected_sha256: str,
+) -> tuple[str | None, str | None]:
+    """Verify hash and structure against one immutable managed-file snapshot."""
+    opened = None
+    verified = None
+    try:
+        opened = open_managed_file_for_read(output_dir, str(row["stored_path"] or ""))
+        verified = verified_artifact_snapshot(opened, expected_sha256)
+        opened = None
+        structural_reason = validate_generated_artifact_stream(
+            verified.stream,
+            str(row["file_format"] or ""),
+        )
+        return None, structural_reason
+    except (FormalArtifactIntegrityError, OSError, ValueError) as exc:
+        return f"{type(exc).__name__}: {exc}", None
+    finally:
+        if opened is not None:
+            opened.close()
+        if verified is not None:
+            verified.close()
+
+
+def _formal_artifact_validation(
+    row: sqlite3.Row,
+    output_dir: Path,
+) -> tuple[str | None, str | None]:
+    """Return byte-integrity and structural reasons for one formal artifact snapshot."""
     try:
         params = json.loads(row["generation_params_json"] or "{}")
     except (json.JSONDecodeError, TypeError):
-        return "formal artifact generation metadata is invalid"
+        return "formal artifact generation metadata is invalid", None
     if not isinstance(params, dict):
-        return "formal artifact generation metadata is invalid"
+        return "formal artifact generation metadata is invalid", None
 
     expected_sha256 = str(params.get("artifact_sha256") or "").strip().lower()
     if len(expected_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in expected_sha256):
-        return "formal artifact SHA-256 metadata is missing or invalid"
-
-    opened = None
-    verified = None
-    try:
-        opened = open_managed_file_for_read(output_dir, str(row["stored_path"] or ""))
-        verified = verified_artifact_snapshot(opened, expected_sha256)
-        opened = None
-        return None
-    except (FormalArtifactIntegrityError, OSError, ValueError) as exc:
-        return f"{type(exc).__name__}: {exc}"
-    finally:
-        if opened is not None:
-            opened.close()
-        if verified is not None:
-            verified.close()
+        return "formal artifact SHA-256 metadata is missing or invalid", None
+    return _verified_artifact_validation(row, output_dir, expected_sha256)
 
 
-def _ordinary_artifact_hash_status(
+def _ordinary_artifact_validation(
     row: sqlite3.Row,
     output_dir: Path,
-) -> tuple[str, str | None]:
-    """Return verified/unproven/invalid for an ordinary generated artifact."""
+) -> tuple[str, str | None, str | None]:
+    """Return verified/unproven/invalid plus integrity/structure reasons."""
     raw_params = row["generation_params_json"]
     if raw_params in {None, ""}:
-        return "unproven", "artifact SHA-256 metadata is absent on this legacy row"
+        return "unproven", "artifact SHA-256 metadata is absent on this legacy row", None
     try:
         params = json.loads(raw_params)
     except (json.JSONDecodeError, TypeError):
-        return "invalid", "generated artifact generation metadata is invalid"
+        return "invalid", "generated artifact generation metadata is invalid", None
     if not isinstance(params, dict):
-        return "invalid", "generated artifact generation metadata is invalid"
+        return "invalid", "generated artifact generation metadata is invalid", None
 
     raw_sha256 = params.get("artifact_sha256")
     if raw_sha256 in {None, ""}:
-        return "unproven", "artifact SHA-256 metadata is absent on this legacy row"
+        return "unproven", "artifact SHA-256 metadata is absent on this legacy row", None
     expected_sha256 = str(raw_sha256).strip().lower()
     if len(expected_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in expected_sha256):
-        return "invalid", "generated artifact SHA-256 metadata is invalid"
+        return "invalid", "generated artifact SHA-256 metadata is invalid", None
 
-    opened = None
-    verified = None
-    try:
-        opened = open_managed_file_for_read(output_dir, str(row["stored_path"] or ""))
-        verified = verified_artifact_snapshot(opened, expected_sha256)
-        opened = None
-        return "verified", None
-    except (FormalArtifactIntegrityError, OSError, ValueError) as exc:
-        return "invalid", f"{type(exc).__name__}: {exc}"
-    finally:
-        if opened is not None:
-            opened.close()
-        if verified is not None:
-            verified.close()
+    integrity_reason, structural_reason = _verified_artifact_validation(
+        row,
+        output_dir,
+        expected_sha256,
+    )
+    if integrity_reason:
+        return "invalid", integrity_reason, None
+    return "verified", None, structural_reason
 
 
 class _BorrowedConnection:
@@ -472,19 +482,9 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
             path = _safe_output_path(output_dir.resolve(), str(row["stored_path"] or ""))
             if path is None or not path.is_file() or path.stat().st_size <= 0:
                 continue
-            reason = validate_generated_artifact(path, str(row["file_format"] or ""))
-            if reason:
-                _issue(
-                    blockers,
-                    "generated_file_invalid",
-                    "Registered generated artifact is structurally invalid",
-                    generated_file_id=row["id"],
-                    path=str(path),
-                    reason=reason,
-                )
 
             if str(row["file_type"] or "") == "approved_analysis":
-                byte_reason = _formal_artifact_hash_reason(row, output_dir)
+                byte_reason, structural_reason = _formal_artifact_validation(row, output_dir)
                 if byte_reason:
                     _issue(
                         blockers,
@@ -493,6 +493,15 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                         generated_file_id=row["id"],
                         path=str(path),
                         reason=byte_reason,
+                    )
+                elif structural_reason:
+                    _issue(
+                        blockers,
+                        "generated_file_invalid",
+                        "Registered generated artifact is structurally invalid",
+                        generated_file_id=row["id"],
+                        path=str(path),
+                        reason=structural_reason,
                     )
 
                 current_ok, current_reason = validate_approved_analysis_artifact_currentness(
@@ -511,7 +520,10 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                     project_id = int(row["project_id"])
                     formal_currentness_by_project.setdefault(project_id, []).append(currentness_item)
             else:
-                integrity_status, integrity_reason = _ordinary_artifact_hash_status(row, output_dir)
+                integrity_status, integrity_reason, structural_reason = _ordinary_artifact_validation(
+                    row,
+                    output_dir,
+                )
                 ordinary_integrity_counts[integrity_status] += 1
                 if integrity_status == "invalid":
                     _issue(
@@ -522,15 +534,29 @@ def audit(db_path: Path, output_dir: Path, backup_dir: Path) -> dict:
                         path=str(path),
                         reason=integrity_reason,
                     )
-                elif integrity_status == "unproven":
-                    _issue(
-                        warnings,
-                        "generated_file_byte_integrity_unproven",
-                        "Legacy generated artifact has no registered SHA-256; current bytes cannot be proven to match its original generated bytes",
-                        generated_file_id=row["id"],
-                        path=str(path),
-                        reason=integrity_reason,
-                    )
+                else:
+                    if integrity_status == "unproven":
+                        structural_reason = validate_generated_artifact(
+                            path,
+                            str(row["file_format"] or ""),
+                        )
+                        _issue(
+                            warnings,
+                            "generated_file_byte_integrity_unproven",
+                            "Legacy generated artifact has no registered SHA-256; current bytes cannot be proven to match its original generated bytes",
+                            generated_file_id=row["id"],
+                            path=str(path),
+                            reason=integrity_reason,
+                        )
+                    if structural_reason:
+                        _issue(
+                            blockers,
+                            "generated_file_invalid",
+                            "Registered generated artifact is structurally invalid",
+                            generated_file_id=row["id"],
+                            path=str(path),
+                            reason=structural_reason,
+                        )
 
         info["generated_file_byte_integrity"] = ordinary_integrity_counts
         info["approved_analysis_artifact_currentness"] = {
