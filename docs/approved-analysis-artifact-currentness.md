@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`approved_analysis` XLSX files are immutable generated history, but the normal professional-delivery path must not treat an old workbook as current after the canonical research state or the approved-analysis set changes.
+`approved_analysis` XLSX files are immutable generated history, but the normal professional-delivery path must not treat an old workbook as current after the canonical research state, the reviewed analysis state, or the approved-analysis set changes.
 
 Generation-time analysis provenance protects new approval and new formal export. Artifact currentness extends that contract to already-generated formal workbooks so a user cannot bypass the current export gate by downloading an older registered file.
 
@@ -10,13 +10,14 @@ Generation-time analysis provenance protects new approval and new formal export.
 
 A registered `GeneratedFile` with `file_type=approved_analysis` is distributable through the standard output/download route only when all of the following remain true:
 
-1. `generation_params_json` proves it was generated as `approved_only` and contains a non-empty `analysis_ids` list plus the `source_provenance_sha256` map recorded by the formal exporter.
+1. `generation_params_json` proves it was generated as `approved_only` and contains a non-empty `analysis_ids` list, the `source_provenance_sha256` map, and the `formal_analysis_state_sha256` map recorded by the formal exporter.
 2. The recorded analysis IDs exactly equal the project's current `review_status=approved` analysis set. Adding a newly approved analysis, rejecting an included analysis, or otherwise changing that set makes the old workbook historical.
 3. Every referenced analysis still belongs to the same project and is still approved.
 4. Every recorded source-provenance hash equals the hash stored with that analysis at generation time.
-5. Every included analysis still passes the live `analysis-input-v1` canonical-source provenance check.
+5. Every recorded formal-analysis-state hash still matches the exact analysis/review fields represented by the workbook, including title, participant/question labels, summary, implications, unresolved text, findings/evidence fields, review status/note/time, model, and creation time. Re-approving an analysis with changed review metadata therefore makes an older workbook historical even when its research source is unchanged.
+6. Every included analysis still passes the live `analysis-input-v1` canonical-source provenance check.
 
-Legacy formal artifacts that predate this metadata fail closed because their currentness cannot be proven. They remain stored as historical records; this gate does not delete generated files.
+Legacy formal artifacts that predate the complete provenance/state metadata fail closed because their currentness cannot be proven. They remain stored as historical records; this gate does not delete generated files.
 
 ## Download serialization
 
@@ -41,10 +42,12 @@ The report writer and download route remain authoritative. UI currentness is adv
 `tests/smoke_approved_artifact_currentness.py` is providerless and uses a temporary SQLite database/output tree. It verifies:
 
 - current formal artifacts download their exact registered bytes;
-- legacy formal artifacts without generation provenance are rejected;
+- legacy formal artifacts without complete generation provenance/state metadata are rejected;
 - canonical-source drift blocks a previously generated formal artifact;
+- review-state drift blocks an older artifact even when canonical source is unchanged;
 - ordinary generated files remain downloadable;
 - the output screen distinguishes current versus stale approved state;
-- changing the current approved-analysis set makes an older workbook historical.
+- changing the current approved-analysis set makes an older workbook historical;
+- the formal exporter records both source-provenance and formal-analysis-state hashes.
 
 `.github/workflows/safe-check.yml` runs this regression on both Windows and Ubuntu.
