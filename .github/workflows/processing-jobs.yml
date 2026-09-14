@@ -47,6 +47,9 @@ jobs:
       - name: Run canonical AI service guard regression
         run: python tests/smoke_ai_result_service_guards.py
 
+      - name: Run analysis source provenance regression
+        run: python tests/smoke_analysis_source_provenance.py
+
       - name: Run processing job readiness schema regression
         run: python tests/smoke_processing_job_readiness_schema.py
 
