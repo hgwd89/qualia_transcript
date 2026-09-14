@@ -36,6 +36,9 @@ jobs:
         shell: powershell
         run: powershell -ExecutionPolicy Bypass -File scripts/check_safe.ps1
 
+      - name: Run generated-file registration boundary regression
+        run: python tests/smoke_generated_file_registration_boundary.py
+
       - name: Run approved-artifact currentness regression
         run: python tests/smoke_approved_artifact_currentness.py
 
@@ -87,6 +90,9 @@ jobs:
 
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+
+      - name: Run generated-file registration boundary regression
+        run: python tests/smoke_generated_file_registration_boundary.py
 
       - name: Run approved-artifact currentness regression
         run: python tests/smoke_approved_artifact_currentness.py
