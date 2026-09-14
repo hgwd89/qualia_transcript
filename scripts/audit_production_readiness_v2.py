@@ -33,13 +33,13 @@ from services.formal_artifact_integrity import (
     FormalArtifactIntegrityError,
     verified_artifact_snapshot,
 )
+from services.readiness_backup_freshness import compare_latest_backup_to_current_recovery_set
 from services.readiness_media_integrity import media_file_integrity_status
 from services.readiness_raw_snapshot_integrity import load_raw_snapshot_readiness_state
 from services.readiness_validation import (
     missing_raw_snapshot_transcription_ids,
     validate_generated_artifact,
     validate_generated_artifact_stream,
-    validate_latest_backup,
 )
 from services.runtime_lock import RuntimeLockError, runtime_lock
 from services.storage_paths import open_managed_file_for_read
@@ -722,32 +722,63 @@ def audit(
                 transcription_ids=missing[:JOB_REPORT_LIMIT],
                 count=len(missing),
             )
+
+        backup_comparison = compare_latest_backup_to_current_recovery_set(
+            con,
+            backup_dir,
+            upload_root,
+            output_dir,
+        )
+        latest_backup = backup_comparison.latest_backup
+        info["latest_validated_backup"] = str(latest_backup) if latest_backup else None
+        info["latest_backup_matches_current_recovery_set"] = backup_comparison.matches_current
+        info["latest_backup_recovery_set_file_counts"] = {
+            "backup": backup_comparison.backup_file_count,
+            "current": backup_comparison.current_file_count,
+        }
+        if latest_backup is None:
+            _issue(warnings, "no_backup_archive", "No local backup archive exists yet")
+        elif backup_comparison.validation_error:
+            _issue(
+                blockers,
+                "latest_backup_invalid",
+                "Newest local backup failed full manifest/hash/SQLite validation",
+                path=str(latest_backup),
+                error=backup_comparison.validation_error,
+            )
+        elif backup_comparison.comparison_error:
+            _issue(
+                blockers,
+                "backup_recovery_set_comparison_failed",
+                "Could not prove that the newest valid backup reproduces the audited DB/uploads/outputs recovery set",
+                path=str(latest_backup),
+                error=backup_comparison.comparison_error,
+            )
+        elif backup_comparison.matches_current is False:
+            _issue(
+                blockers,
+                "latest_backup_stale",
+                "Newest valid backup does not reproduce the currently audited DB/uploads/outputs recovery set",
+                path=str(latest_backup),
+                missing_from_backup=backup_comparison.missing_from_backup[:100],
+                missing_from_backup_count=len(backup_comparison.missing_from_backup),
+                extra_in_backup=backup_comparison.extra_in_backup[:100],
+                extra_in_backup_count=len(backup_comparison.extra_in_backup),
+                changed_files=backup_comparison.changed_files[:100],
+                changed_file_count=len(backup_comparison.changed_files),
+            )
     finally:
         try:
             con.rollback()
         except Exception as exc:
             rollback_error = f"{type(exc).__name__}: {exc}"
 
-    try:
-        latest_backup, backup_error = validate_latest_backup(backup_dir)
-        info["latest_validated_backup"] = str(latest_backup) if latest_backup else None
-        if latest_backup is None:
-            _issue(warnings, "no_backup_archive", "No local backup archive exists yet")
-        elif backup_error:
-            _issue(
-                blockers,
-                "latest_backup_invalid",
-                "Newest local backup failed full manifest/hash/SQLite validation",
-                path=str(latest_backup),
-                error=backup_error,
-            )
-    finally:
-        if rollback_error is None:
-            try:
-                end_data_version = int(con.execute("PRAGMA data_version").fetchone()[0])
-            except Exception as exc:
-                rollback_error = f"data_version read failed: {type(exc).__name__}: {exc}"
-        con.close()
+    if rollback_error is None:
+        try:
+            end_data_version = int(con.execute("PRAGMA data_version").fetchone()[0])
+        except Exception as exc:
+            rollback_error = f"data_version read failed: {type(exc).__name__}: {exc}"
+    con.close()
 
     info["database_data_version_end"] = end_data_version
     info["database_changed_during_audit"] = (
