@@ -18,6 +18,7 @@ from services.analysis_source_provenance import (
     AnalysisSourceProvenanceError,
     require_current_analysis_source_provenance,
 )
+from services.approved_analysis_currentness import formal_analysis_state_sha256
 from services.file_manager import (
     open_output_target_for_write,
     prepare_output_target,
@@ -95,7 +96,9 @@ def _begin_formal_export_snapshot() -> None:
         db.session.execute(text("BEGIN IMMEDIATE"))
 
 
-def _approved_rows(project_id: int) -> tuple[list[list], list[list], int, list[int], dict[str, str]]:
+def _approved_rows(
+    project_id: int,
+) -> tuple[list[list], list[list], int, list[int], dict[str, str], dict[str, str]]:
     analyses = (
         AIAnalysis.query
         .filter_by(project_id=project_id, review_status="approved")
@@ -110,6 +113,7 @@ def _approved_rows(project_id: int) -> tuple[list[list], list[list], int, list[i
     finding_count = 0
     analysis_ids = []
     provenance_hashes: dict[str, str] = {}
+    formal_state_hashes: dict[str, str] = {}
 
     for analysis in analyses:
         try:
@@ -173,7 +177,16 @@ def _approved_rows(project_id: int) -> tuple[list[list], list[list], int, list[i
             ])
             finding_count += 1
 
-    return summary_rows, evidence_rows, finding_count, analysis_ids, provenance_hashes
+        formal_state_hashes[str(int(analysis.id))] = formal_analysis_state_sha256(analysis)
+
+    return (
+        summary_rows,
+        evidence_rows,
+        finding_count,
+        analysis_ids,
+        provenance_hashes,
+        formal_state_hashes,
+    )
 
 
 def _style_sheet(ws):
@@ -205,6 +218,7 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
             finding_count,
             analysis_ids,
             provenance_hashes,
+            formal_state_hashes,
         ) = _approved_rows(project_id)
 
         wb = Workbook()
@@ -234,6 +248,7 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
             "finding_count": finding_count,
             "analysis_ids": analysis_ids,
             "source_provenance_sha256": provenance_hashes,
+            "formal_analysis_state_sha256": formal_state_hashes,
         }
         return register_generated_file(
             target,
