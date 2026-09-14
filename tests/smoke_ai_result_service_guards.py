@@ -164,6 +164,8 @@ def main() -> int:
                 finally:
                     analyzer.call_structured = original_analyzer_call
                     mapper.call_structured = original_mapper_call
+                    db.session.remove()
+                    db.engine.dispose()
         finally:
             config.DATABASE_URI = original["DATABASE_URI"]
             config.UPLOAD_DIR = original["UPLOAD_DIR"]
