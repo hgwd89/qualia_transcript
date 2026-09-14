@@ -1,3 +1,5 @@
+import hashlib
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -103,6 +105,7 @@ def main() -> int:
                     file_type="analysis",
                     file_format="xlsx",
                 )
+                params = json.loads(gf.generation_params_json or "{}")
                 failures += check(
                     "successful registration keeps exact managed write and DB row aligned",
                     target.written_stat is not None
@@ -113,6 +116,11 @@ def main() -> int:
                     and Path(get_full_path(gf)) == target_path
                     and target_path.read_bytes() == b"generated",
                     f"file_id={gf.id} stored_path={gf.stored_path}",
+                )
+                failures += check(
+                    "ordinary generated-file registration records exact SHA-256",
+                    params.get("artifact_sha256") == hashlib.sha256(b"generated").hexdigest(),
+                    f"params={params}",
                 )
 
                 first_collision = prepare_output_target(project_id, "同時生成.xlsx")
@@ -235,7 +243,7 @@ def main() -> int:
                 range_headers = dict(range_response.headers)
                 range_response.close()
                 failures += check(
-                    "download route preserves byte-range behavior",
+                    "download route preserves byte-range behavior through verified snapshot",
                     range_status == 206
                     and range_data == b"ner"
                     and range_headers.get("Content-Range") == "bytes 2-4/9"
@@ -247,13 +255,34 @@ def main() -> int:
                     ),
                 )
 
+                target_path.write_bytes(b"tampered!")
+                tampered_response = client.get(f"/api/outputs/{gf.id}/download")
+                tampered_status = tampered_response.status_code
+                tampered_response.close()
+                failures += check(
+                    "hash-bound ordinary download rejects later in-place byte tampering",
+                    tampered_status == 409,
+                    f"status={tampered_status}",
+                )
+
+                target_path.write_bytes(b"generated")
+                restored_response = client.get(f"/api/outputs/{gf.id}/download")
+                restored_status = restored_response.status_code
+                restored_data = restored_response.data
+                restored_response.close()
+                failures += check(
+                    "restoring exact registered bytes restores ordinary download",
+                    restored_status == 200 and restored_data == b"generated",
+                    f"status={restored_status} data={restored_data!r}",
+                )
+
                 legacy_response = client.get(f"/api/outputs/{legacy.id}/download")
                 legacy_status = legacy_response.status_code
                 legacy_data = legacy_response.data
                 legacy_disposition = legacy_response.headers.get("Content-Disposition", "")
                 legacy_response.close()
                 failures += check(
-                    "download route supports legacy rows without original filename",
+                    "download route supports legacy rows without registered byte hash",
                     legacy_status == 200
                     and legacy_data == b"generated"
                     and Path(gf.stored_path).name in legacy_disposition,
