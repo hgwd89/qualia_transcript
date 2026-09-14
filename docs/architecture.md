@@ -40,10 +40,10 @@ The core architecture rule is separation of raw source data from derived analysi
 4. Speaker assignment classifies labels as respondent, moderator, observer, or other roles.
 5. Mapping links respondent utterances to interview-flow questions.
 6. Segment flags mark favorite, quote, exclude, and needs-review states without changing segment text.
-7. AI analysis and semantic analysis create derived `AIAnalysis` records or dry-run results. Newly generated `AIAnalysis` rows are not formally approved by default.
-8. A human reviewer may approve, reject, or return an AI analysis to draft. Approval resolves each finding's `evidence_quote` against respondent `Segment` rows inside the analysis scope and persists `source_segment_ids`; unresolved findings block approval.
+7. Persisted per-question, participant-summary, cross-participant, and integrated AI analysis captures a canonical `analysis-input-v1` source fingerprint before provider work. After provider work, the durable result-write reservation is acquired and the same canonical inputs are fingerprinted again; drift aborts the `AIAnalysis` commit. Newly generated `AIAnalysis` rows are not formally approved by default.
+8. A human reviewer may approve, reject, or return an AI analysis to draft. Approval holds a serialized database write reservation, proves the generation-time fingerprint still matches current canonical inputs, resolves each finding's `evidence_quote` against respondent `Segment` rows inside the analysis scope, and persists `source_segment_ids`; stale source provenance or unresolved findings block approval.
 9. Integrated no-ai analysis previews existing derived data without saving.
-10. Word and Excel output services generate files and register `GeneratedFile` rows. Formal AI-analysis XLSX output selects `review_status=approved` rows only and carries evidence quotes plus source segment IDs.
+10. Word and Excel output services generate files and register `GeneratedFile` rows. Formal AI-analysis XLSX output selects `review_status=approved` rows only, revalidates each row's generation-time source provenance under the same serialized snapshot used through file registration, carries evidence quotes plus source segment IDs, and records the validated analysis IDs/provenance hashes in generation metadata.
 
 ## Raw Data vs Derived Data
 
@@ -65,9 +65,11 @@ On Windows, raw evidence is created with `CREATE_NEW` plus `FILE_FLAG_WRITE_THRO
 
 `AIAnalysis.review_status` is one of `draft`, `approved`, or `rejected`. Existing and newly generated analyses default to `draft`; model generation never implies human approval.
 
-Approval requires a non-empty `findings` array. Every finding must have a non-empty `evidence_quote`, and that quote must resolve to one or more respondent `Segment` rows scoped to the analysis project and, when present, the analysis interview. Participant codes and question codes further constrain resolution when those fields are supplied by the finding.
+Persisted per-question, per-participant, cross-participant, and integrated analyses store `content_json.source_provenance` with version `analysis-input-v1` and a SHA-256 fingerprint of the canonical inputs actually supplied to the provider. The fingerprint covers only canonical research state relevant to that analysis scope, including question/flow identity, participant identity where used by the prompt, respondent source segments and their mapped question scope, and integrated project metadata used in the prompt. The source snapshot is captured before provider work. Immediately before result commit, after the durable result-write reservation is acquired, the current canonical source manifest is rebuilt and must produce the same fingerprint. This prevents provider output generated from an earlier input state from being attached to a later state merely because an unfenced edit occurred during the provider call.
 
-Successful approval writes `source_segment_ids` into each finding in `content_json` and records `reviewed_at`. Failed evidence resolution leaves the analysis unapproved. The formal analysis workbook reads approved rows only and refuses approved findings that lack evidence quotes or source segment IDs.
+Approval is also provenance-gated. On SQLite, approval starts `BEGIN IMMEDIATE` before reloading the analysis and validating its source fingerprint, so source mutation and approval commit are serialized. A missing, unsupported, or stale generation fingerprint fails closed; historical rows are not silently grandfathered into formal approval. After provenance validation, approval requires a non-empty `findings` array. Every finding must have a non-empty `evidence_quote`, and that quote must resolve to one or more respondent `Segment` rows scoped to the analysis project and, when present, the analysis interview. Participant codes and question codes further constrain resolution when those fields are supplied by the finding.
+
+Successful approval writes `source_segment_ids` into each finding in `content_json` and records `reviewed_at`. Failed provenance/evidence resolution leaves the analysis unapproved. The formal approved-analysis workbook begins from its own serialized snapshot, revalidates every included approved row against current canonical inputs, refuses stale or unprovable analyses, and records the included analysis IDs plus source-provenance SHA-256 values in `GeneratedFile.generation_params_json`.
 
 This review layer is derived-data governance. It must not rewrite `Segment.text` or raw transcript snapshots.
 
@@ -83,7 +85,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `UtteranceMapping`: derived link from segment to question.
 - `SegmentFlag`: derived flags for review and output behavior.
 - `SpeakerAssignment`: derived mapping from speaker label to role and participant.
-- `AIAnalysis`: derived structured analysis payload plus human review state (`review_status`, `review_note`, `reviewed_at`).
+- `AIAnalysis`: derived structured analysis payload plus human review state (`review_status`, `review_note`, `reviewed_at`); persisted provider-backed analyses also carry generation-time source provenance inside `content_json`.
 - `ProcessingJob`: durable background-work record for transcription, mapping, semantic analysis, other AI analysis, and project pipelines; question-scoped jobs may reference `InterviewFlowQuestion`, while `request_json` preserves immutable execution options needed by retries.
 - `GeneratedFile`: generated output metadata, including `approved_analysis` XLSX outputs.
 - `AppSetting`: local application settings. Secret values are storage records and must be consumed through the secret-store service rather than read as plaintext directly.
@@ -105,8 +107,9 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/transcription.py`: OpenAI or Whisper transcription and raw transcript snapshot writing.
 - `services/raw_snapshot_storage.py`: ancestry-pinned exclusive creation, crash-durable publication, byte verification, and batch reads for immutable raw transcript JSON evidence.
 - `services/mapper.py`: OpenAI-backed mapping of respondent utterances to questions; canonical AI mapping saves require a durable result-write guard before provider work and revalidate that guard before replacement commit.
-- `services/analyzer.py`: OpenAI-backed interview, question, cross-participant, and integrated AI analysis; every canonical `AIAnalysis` save requires a durable result-write guard before provider work and revalidates it immediately before commit.
-- `services/analysis_review.py`: human review transitions and evidence-quote → respondent source-segment resolution.
+- `services/analyzer.py`: OpenAI-backed interview, question, cross-participant, and integrated AI analysis; every canonical `AIAnalysis` save requires a durable result-write guard before provider work, captures generation-time source provenance before provider work, and revalidates both lease ownership and canonical source provenance before commit.
+- `services/analysis_source_provenance.py`: canonical source-manifest construction, `analysis-input-v1` SHA-256 fingerprinting, generation-time capture, and current-source validation for persisted formal AI-analysis types.
+- `services/analysis_review.py`: human review transitions, serialized generation-provenance validation, and evidence-quote → respondent source-segment resolution.
 - `services/semantic_analysis.py`: semantic clustering and dry-run/no-ai support.
 - `services/integrated_analysis.py`: no-ai integrated analysis assembly from existing local data.
 - `services/job_admission.py`: authoritative durable-job project/interview/question ownership and job-type scope validation, plus serialized admission/retry and conflict handling.
@@ -120,7 +123,7 @@ This review layer is derived-data governance. It must not rewrite `Segment.text`
 - `services/report_verbatim.py`: Word verbatim report generation.
 - `services/report_formatted.py`: Excel formatted sheet generation.
 - `services/report_analysis.py`: flat utterance/mapping analysis CSV/XLSX generation.
-- `services/report_approved_analysis.py`: formal XLSX generation from approved `AIAnalysis` rows only, with separate analysis-summary and evidence sheets.
+- `services/report_approved_analysis.py`: formal XLSX generation from approved `AIAnalysis` rows only; it revalidates generation-time provenance under a serialized source snapshot and records the validated analysis IDs/provenance hashes with the registered output.
 - `services/secret_store.py`: protected application-secret storage/read boundary.
 - `services/product_hint.py`, `services/domain_glossary.py`, `services/fragmentation.py`: derived text-analysis helpers that must not alter source transcript text.
 
@@ -145,6 +148,8 @@ After scope validation, same-scope active work is reused only when its durable r
 Canonical result writes have an additional fence. After expensive external work and before changing canonical result rows, `begin_job_result_write()` acquires a database write reservation (`BEGIN IMMEDIATE` on SQLite, row lock on databases that support it) and revalidates the worker's attempt token. That closes the race where stale recovery/retry could supersede a worker between its final lease check and its result commit. Analysis handlers receive this result-write guard before committing `AIAnalysis`; transcription/mapping paths have corresponding cleanup/invalidation helpers in `services/processing_result_guard.py`. Transcription applies the same reservation to preflight cleanup and attempt creation, `running`/`error` status commits, immutable raw-evidence publication, chunk manifests, and final success so no stale worker can mutate state or add evidence after a later attempt takes ownership.
 
 The canonical AI save services themselves are also fail-closed boundaries. `services/analyzer.py`, persisted `services/semantic_analysis.py`, and the write-producing path in `services/mapper.py` refuse to start provider-backed canonical work unless a durable result-write guard was supplied by the owning worker. The guard is checked for presence before paid/provider work begins and is invoked again after provider output has been normalized but before any `AIAnalysis` or `UtteranceMapping` mutation is committed. Direct programmatic service calls therefore cannot silently bypass job admission, attempt generation, lease ownership, source-input fencing, or crash-window reconciliation merely by omitting the guard.
+
+Persisted formal AI analyses add a second, long-lived source fence on top of the worker lease. `services/analyzer.py` fingerprints the canonical provider inputs before the provider call. After `begin_job_result_write()` has serialized the commit boundary, it rebuilds the source manifest and requires the fingerprint to match before inserting `AIAnalysis`. This defense is intentionally redundant with active-job input fencing: the job/input fence prevents normal concurrent edits, while the fingerprint catches a direct/unexpected mutation that bypassed that fence and would otherwise let an old provider response be committed against newer research inputs. The same fingerprint is required again at human approval and formal approved-analysis export, so a successful job does not make a derived result permanently valid after its canonical research inputs change.
 
 Crash-window idempotency is explicit. `services/processing_result_guard.py` can detect mapping or analysis results that were already committed after the durable job was created but before the worker managed to mark the job `succeeded`. A retry reuses that committed result instead of duplicating canonical analysis rows. Stale transcription attempts can be invalidated and their partial derived segments removed without rewriting immutable raw transcript snapshots.
 
@@ -212,6 +217,8 @@ Smoke tests live in `tests/smoke_*.py`. PowerShell wrappers live in `scripts/che
 
 The default aggregate runner is `scripts/check_all.ps1`. With no flags, it runs the CI-safe smoke check only. `scripts/check_all.ps1 -AllLocal` runs the broader non-paid local suite using temporary fixtures/directories where applicable, including the AI-analysis review/approved-export smoke. Paid/API checks remain opt-in and are not part of the safe or `-AllLocal` path.
 
+Generation-source validity is permanently covered by `tests/smoke_analysis_source_provenance.py` in the Windows/Ubuntu Durable Processing Jobs matrix. The regression is providerless and verifies fingerprint persistence, provider-time source drift rejection, stale-draft approval rejection, stale-approved formal-export rejection, export provenance metadata, and fail-closed handling of historical analyses that have no generation fingerprint.
+
 Existing research data is protected by a separate manual `local-data-integrity` check. That check opens the SQLite database read-only, verifies key table relationships, reports source-segment fingerprints and analysis counts, and can compare minimum counts and raw-transcript file hashes against an optional baseline. It is deliberately not a CI-required check because CI does not have the local research dataset.
 
 ## Generated Files and Non-Git Data
@@ -236,7 +243,7 @@ OpenAI API usage appears in transcription, mapping, analyzer, and semantic-analy
 
 Whisper usage appears in transcription paths. It must not be run unless transcription has been explicitly requested.
 
-Human AI-analysis review, source-evidence resolution, approved-analysis export, no-ai integrated analysis, and preview checks are local operations and do not require OpenAI or Whisper.
+Human AI-analysis review, source-evidence resolution, generation-source provenance validation, approved-analysis export, no-ai integrated analysis, and preview checks are local operations and do not require OpenAI or Whisper.
 
 ## Unconfirmed Items
 
