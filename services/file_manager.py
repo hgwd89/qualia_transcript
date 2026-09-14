@@ -156,10 +156,16 @@ def generated_file_expected_sha256(gf: GeneratedFile) -> str | None:
     return digest
 
 
-def _begin_generated_file_registration() -> None:
+def _begin_generated_file_registration(*, existing_write_reservation: bool) -> None:
     """Serialize ownership validation with the GeneratedFile commit."""
     if db.session.new or db.session.dirty or db.session.deleted:
         raise RuntimeError("generated-file registration requires a clean database session")
+
+    if existing_write_reservation:
+        if not db.session().in_transaction():
+            raise RuntimeError("generated-file existing write reservation is not active")
+        return
+
     db.session.rollback()
     if db.engine.dialect.name == "sqlite":
         db.session.execute(text("BEGIN IMMEDIATE"))
@@ -288,6 +294,7 @@ def register_generated_file(
     file_format: str,
     interview_id: int | None = None,
     generation_params_json: str | None = None,
+    existing_write_reservation: bool = False,
 ) -> GeneratedFile:
     """Register only the exact file generation produced by the managed writer.
 
@@ -301,8 +308,11 @@ def register_generated_file(
     bytes here. Project/interview ownership is serialized with the row commit and
     validated against the target's project-scoped storage namespace. Registration
     also requires a clean SQLAlchemy session so its internal commit cannot publish
-    unrelated caller mutations. Rollback cleanup is performed through the pinned
-    guard rather than check-then-unlink on the mutable pathname.
+    unrelated caller mutations. Formal exporters that already hold their own
+    serialized source snapshot may pass ``existing_write_reservation=True`` so the
+    registrar preserves that transaction instead of replacing it. Rollback cleanup
+    is performed through the pinned guard rather than check-then-unlink on the
+    mutable pathname.
     """
     expected = target.written_stat
     if expected is None:
@@ -312,7 +322,9 @@ def register_generated_file(
     gf = None
     committed = False
     try:
-        _begin_generated_file_registration()
+        _begin_generated_file_registration(
+            existing_write_reservation=bool(existing_write_reservation),
+        )
 
         normalized_project_id, normalized_interview_id = _validate_generated_file_ownership(
             target,
