@@ -44,6 +44,9 @@ jobs:
       - name: Run canonical media selection regression
         run: python tests/smoke_canonical_media_selection.py
 
+      - name: Run speaker and flag input fencing regression
+        run: python tests/smoke_interview_aux_input_fencing.py
+
       - name: Run flow input fencing regression
         run: python tests/smoke_flow_input_fencing.py
 
