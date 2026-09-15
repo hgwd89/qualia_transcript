@@ -20,6 +20,9 @@ from services.file_manager import (
     prepare_output_target,
     register_generated_file,
 )
+from services.generated_file_source_provenance import (
+    capture_generated_file_source_provenance,
+)
 
 
 ROLE_LABELS = {
@@ -72,6 +75,22 @@ def _speaker_name(interview: Interview, seg, assignment_map: dict) -> str:
 
 
 def generate_verbatim(interview_id: int) -> GeneratedFile:
+    # Resolve only the owning project ID before capturing the canonical source
+    # snapshot.  Do not load the mutable Interview object first; otherwise the
+    # SQLAlchemy identity map could retain pre-snapshot values used by the export.
+    project_id = (
+        db.session.query(Interview.project_id)
+        .filter(Interview.id == int(interview_id))
+        .scalar()
+    )
+    if project_id is None:
+        raise ValueError("interview が見つかりません")
+    source_provenance = capture_generated_file_source_provenance(
+        "verbatim",
+        int(project_id),
+        interview_id=int(interview_id),
+    )
+
     interview = Interview.query.get(interview_id)
     if not interview:
         raise ValueError("interview が見つかりません")
@@ -139,4 +158,5 @@ def generate_verbatim(interview_id: int) -> GeneratedFile:
         interview_id=interview_id,
         file_type="verbatim",
         file_format="docx",
+        source_provenance=source_provenance,
     )
