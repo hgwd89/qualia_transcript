@@ -136,6 +136,7 @@ def run_isolated_provider_smoke(
         os.environ.pop(key, None)
 
     app = None
+    release_runtime_locks = None
     try:
         with tempfile.TemporaryDirectory(prefix="qualia_analysis_provider_smoke_") as tmp:
             root = Path(tmp)
@@ -155,6 +156,7 @@ def run_isolated_provider_smoke(
                 from models.project import Project
                 from models.segment import Segment
                 from models.setting import AppSetting
+                from services.runtime_lock import release_process_runtime_locks
                 import services.analyzer as analyzer
             except Exception as exc:
                 failures += 0 if print_result(
@@ -164,164 +166,169 @@ def run_isolated_provider_smoke(
                 ) else 1
                 return 1
 
-            app = create_app()
-            app.config["TESTING"] = True
+            release_runtime_locks = release_process_runtime_locks
+            try:
+                app = create_app()
+                app.config["TESTING"] = True
 
-            with app.app_context():
-                if stored_openai_secret and not config.OPENAI_API_KEY:
-                    AppSetting.set("openai_api_key", stored_openai_secret)
+                with app.app_context():
+                    if stored_openai_secret and not config.OPENAI_API_KEY:
+                        AppSetting.set("openai_api_key", stored_openai_secret)
 
-                project = Project(name="Provider smoke fixture", client="Test")
-                db.session.add(project)
-                db.session.flush()
-                participant = Participant(
-                    project_id=project.id,
-                    participant_code="P01",
-                    display_name="Smoke Participant",
-                )
-                db.session.add(participant)
-                db.session.flush()
-                interview = Interview(
-                    project_id=project.id,
-                    participant_id=participant.id,
-                    status="transcribed",
-                )
-                db.session.add(interview)
-                db.session.flush()
-                db.session.add(Segment(
-                    interview_id=interview.id,
-                    participant_id=participant.id,
-                    speaker_label="SPEAKER_00",
-                    speaker_role="respondent",
-                    start_sec=0.0,
-                    end_sec=1.0,
-                    text="テスト用の回答です",
-                    seq=1,
-                ))
-                db.session.commit()
-                interview_id = int(interview.id)
-
-                failures += 0 if print_result(
-                    "SQLAlchemy is bound to disposable database",
-                    temp_db.resolve() != source_db
-                    and temp_db.as_posix() in str(db.engine.url),
-                    f"engine={db.engine.url}",
-                ) else 1
-
-                count_before = AIAnalysis.query.count()
-                counter = {"n": 0}
-                original_call = analyzer.call_structured
-                chosen_call = provider_call or original_call
-
-                def counted_call(*args, **kwargs):
-                    counter["n"] += 1
-                    return chosen_call(*args, **kwargs)
-
-                analyzer.call_structured = counted_call
-                analyze_ok = True
-                error_detail = ""
-                saved_id = None
-                try:
-                    analysis = analyzer.analyze_interview_summary(
-                        interview_id,
-                        result_write_guard=lambda: None,
+                    project = Project(name="Provider smoke fixture", client="Test")
+                    db.session.add(project)
+                    db.session.flush()
+                    participant = Participant(
+                        project_id=project.id,
+                        participant_code="P01",
+                        display_name="Smoke Participant",
                     )
-                    saved_id = int(analysis.id)
-                except Exception as exc:
-                    analyze_ok = False
-                    error_detail = f"{type(exc).__name__}: {exc}"
-                finally:
-                    analyzer.call_structured = original_call
+                    db.session.add(participant)
+                    db.session.flush()
+                    interview = Interview(
+                        project_id=project.id,
+                        participant_id=participant.id,
+                        status="transcribed",
+                    )
+                    db.session.add(interview)
+                    db.session.flush()
+                    db.session.add(Segment(
+                        interview_id=interview.id,
+                        participant_id=participant.id,
+                        speaker_label="SPEAKER_00",
+                        speaker_role="respondent",
+                        start_sec=0.0,
+                        end_sec=1.0,
+                        text="テスト用の回答です",
+                        seq=1,
+                    ))
+                    db.session.commit()
+                    interview_id = int(interview.id)
 
-                failures += 0 if print_result(
-                    "isolated analyze_interview_summary executed",
-                    analyze_ok,
-                    error_detail,
-                ) else 1
-                failures += 0 if print_result(
-                    "provider call count == 1",
-                    counter["n"] == 1,
-                    f"count={counter['n']}",
-                ) else 1
-
-                count_after = AIAnalysis.query.count()
-                failures += 0 if print_result(
-                    "disposable AIAnalysis count increased",
-                    count_after == count_before + 1,
-                    f"before={count_before}, after={count_after}",
-                ) else 1
-
-                interview_after = db.session.get(Interview, interview_id)
-                failures += 0 if print_result(
-                    "only disposable interview becomes analyzed",
-                    interview_after is not None and interview_after.status == "analyzed",
-                    f"status={interview_after.status if interview_after else None}",
-                ) else 1
-
-                latest = db.session.get(AIAnalysis, saved_id) if saved_id else None
-                failures += 0 if print_result(
-                    "disposable analysis exists",
-                    latest is not None,
-                ) else 1
-
-                if latest is not None:
                     failures += 0 if print_result(
-                        "analysis_type is per_participant",
-                        latest.analysis_type == "per_participant",
-                        f"type={latest.analysis_type}",
+                        "SQLAlchemy is bound to disposable database",
+                        temp_db.resolve() != source_db
+                        and temp_db.as_posix() in str(db.engine.url),
+                        f"engine={db.engine.url}",
                     ) else 1
-                    payload = {}
+
+                    count_before = AIAnalysis.query.count()
+                    counter = {"n": 0}
+                    original_call = analyzer.call_structured
+                    chosen_call = provider_call or original_call
+
+                    def counted_call(*args, **kwargs):
+                        counter["n"] += 1
+                        return chosen_call(*args, **kwargs)
+
+                    analyzer.call_structured = counted_call
+                    analyze_ok = True
+                    error_detail = ""
+                    saved_id = None
                     try:
-                        payload = json.loads(latest.content_json or "{}")
+                        analysis = analyzer.analyze_interview_summary(
+                            interview_id,
+                            result_write_guard=lambda: None,
+                        )
+                        saved_id = int(analysis.id)
                     except Exception as exc:
-                        failures += 0 if print_result(
-                            "content_json parse",
-                            False,
-                            f"{type(exc).__name__}: {exc}",
-                        ) else 1
+                        analyze_ok = False
+                        error_detail = f"{type(exc).__name__}: {exc}"
+                    finally:
+                        analyzer.call_structured = original_call
 
-                    findings = payload.get("findings", []) if isinstance(payload, dict) else []
-                    evidence_quotes = [
-                        str(item.get("evidence_quote") or "").strip()
-                        for item in findings
-                        if isinstance(item, dict)
-                        and str(item.get("evidence_quote") or "").strip()
-                    ]
                     failures += 0 if print_result(
-                        "content_json exists",
-                        isinstance(payload, dict) and bool(payload),
+                        "isolated analyze_interview_summary executed",
+                        analyze_ok,
+                        error_detail,
                     ) else 1
                     failures += 0 if print_result(
-                        "evidence_quote exists",
-                        bool(evidence_quotes),
+                        "provider call count == 1",
+                        counter["n"] == 1,
+                        f"count={counter['n']}",
                     ) else 1
-                    text_for_lang = " ".join(
-                        [
-                            str(payload.get("implications", "")),
-                            str(payload.get("unresolved", "")),
-                        ]
-                        + [
-                            str(item.get("point", ""))
+
+                    count_after = AIAnalysis.query.count()
+                    failures += 0 if print_result(
+                        "disposable AIAnalysis count increased",
+                        count_after == count_before + 1,
+                        f"before={count_before}, after={count_after}",
+                    ) else 1
+
+                    interview_after = db.session.get(Interview, interview_id)
+                    failures += 0 if print_result(
+                        "only disposable interview becomes analyzed",
+                        interview_after is not None and interview_after.status == "analyzed",
+                        f"status={interview_after.status if interview_after else None}",
+                    ) else 1
+
+                    latest = db.session.get(AIAnalysis, saved_id) if saved_id else None
+                    failures += 0 if print_result(
+                        "disposable analysis exists",
+                        latest is not None,
+                    ) else 1
+
+                    if latest is not None:
+                        failures += 0 if print_result(
+                            "analysis_type is per_participant",
+                            latest.analysis_type == "per_participant",
+                            f"type={latest.analysis_type}",
+                        ) else 1
+                        payload = {}
+                        try:
+                            payload = json.loads(latest.content_json or "{}")
+                        except Exception as exc:
+                            failures += 0 if print_result(
+                                "content_json parse",
+                                False,
+                                f"{type(exc).__name__}: {exc}",
+                            ) else 1
+
+                        findings = payload.get("findings", []) if isinstance(payload, dict) else []
+                        evidence_quotes = [
+                            str(item.get("evidence_quote") or "").strip()
                             for item in findings
                             if isinstance(item, dict)
+                            and str(item.get("evidence_quote") or "").strip()
                         ]
-                    )
-                    failures += 0 if print_result(
-                        "Japanese output (simple check)",
-                        contains_japanese(text_for_lang),
-                    ) else 1
+                        failures += 0 if print_result(
+                            "content_json exists",
+                            isinstance(payload, dict) and bool(payload),
+                        ) else 1
+                        failures += 0 if print_result(
+                            "evidence_quote exists",
+                            bool(evidence_quotes),
+                        ) else 1
+                        text_for_lang = " ".join(
+                            [
+                                str(payload.get("implications", "")),
+                                str(payload.get("unresolved", "")),
+                            ]
+                            + [
+                                str(item.get("point", ""))
+                                for item in findings
+                                if isinstance(item, dict)
+                            ]
+                        )
+                        failures += 0 if print_result(
+                            "Japanese output (simple check)",
+                            contains_japanese(text_for_lang),
+                        ) else 1
 
-                db.session.remove()
-                db.engine.dispose()
-    finally:
-        if app is not None:
-            try:
-                from models import db
-                with app.app_context():
                     db.session.remove()
                     db.engine.dispose()
-            except Exception:
-                pass
+            finally:
+                if app is not None:
+                    try:
+                        from models import db
+                        with app.app_context():
+                            db.session.remove()
+                            db.engine.dispose()
+                    except Exception:
+                        pass
+                if release_runtime_locks is not None:
+                    release_runtime_locks()
+    finally:
         config.DATABASE_URI = original_config["DATABASE_URI"]
         config.UPLOAD_DIR = original_config["UPLOAD_DIR"]
         config.OUTPUT_DIR = original_config["OUTPUT_DIR"]
