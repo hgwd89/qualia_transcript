@@ -337,14 +337,6 @@ def upsert_speaker_assignment(interview_id, speaker_label):
     if not label:
         return jsonify({"ok": False, "error": "speaker_label is required"}), 400
 
-    exists = (
-        Segment.query
-        .filter_by(interview_id=interview.id, speaker_label=label)
-        .first()
-    )
-    if not exists:
-        return jsonify({"ok": False, "error": "speaker_label not found in interview"}), 400
-
     data = request.get_json(force=True, silent=True) or {}
     speaker_role = (data.get("speaker_role") or "unknown").strip()
     participant_id = data.get("participant_id")
@@ -360,8 +352,27 @@ def upsert_speaker_assignment(interview_id, speaker_label):
             participant_id = int(participant_id)
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "invalid participant_id"}), 400
-        participant = Participant.query.get(participant_id)
-        if not participant or participant.project_id != interview.project_id:
+
+    try:
+        interview = begin_interview_input_write(interview.id)
+    except ResearchInputWriteBlocked as exc:
+        return _input_write_blocked_response(exc)
+    except ValueError:
+        return jsonify({"ok": False, "error": "interview not found"}), 404
+
+    exists = (
+        Segment.query
+        .filter_by(interview_id=interview.id, speaker_label=label)
+        .first()
+    )
+    if not exists:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "speaker_label not found in interview"}), 400
+
+    if participant_id is not None:
+        participant = db.session.get(Participant, int(participant_id))
+        if not participant or int(participant.project_id) != int(interview.project_id):
+            db.session.rollback()
             return jsonify({"ok": False, "error": "participant does not belong to project"}), 400
 
     assignment = SpeakerAssignment.query.filter_by(
@@ -478,6 +489,22 @@ def create_segment_flag(segment_id):
     if flag_type not in FLAG_TYPES:
         return jsonify({"ok": False, "error": "invalid flag_type"}), 400
 
+    interview_id = int(seg.interview_id)
+    try:
+        interview = begin_interview_input_write(interview_id)
+    except ResearchInputWriteBlocked as exc:
+        return _input_write_blocked_response(exc)
+    except ValueError:
+        return jsonify({"ok": False, "error": "interview not found"}), 404
+
+    seg = db.session.get(Segment, int(segment_id))
+    if seg is None:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "segment not found"}), 404
+    if int(seg.interview_id) != int(interview.id):
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "segment does not belong to interview"}), 400
+
     flag = SegmentFlag.query.filter_by(segment_id=seg.id, flag_type=flag_type).first()
     created = False
     if not flag:
@@ -499,17 +526,34 @@ def create_segment_flag(segment_id):
 
 @bp.route("/api/segments/<int:segment_id>/flags/<string:flag_type>", methods=["DELETE"])
 def delete_segment_flag(segment_id, flag_type):
-    Segment.query.get_or_404(segment_id)
+    seg = Segment.query.get_or_404(segment_id)
     if flag_type not in FLAG_TYPES:
         return jsonify({"ok": False, "error": "invalid flag_type"}), 400
 
-    flag = SegmentFlag.query.filter_by(segment_id=segment_id, flag_type=flag_type).first()
+    interview_id = int(seg.interview_id)
+    try:
+        interview = begin_interview_input_write(interview_id)
+    except ResearchInputWriteBlocked as exc:
+        return _input_write_blocked_response(exc)
+    except ValueError:
+        return jsonify({"ok": False, "error": "interview not found"}), 404
+
+    seg = db.session.get(Segment, int(segment_id))
+    if seg is None:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "segment not found"}), 404
+    if int(seg.interview_id) != int(interview.id):
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "segment does not belong to interview"}), 400
+
+    flag = SegmentFlag.query.filter_by(segment_id=seg.id, flag_type=flag_type).first()
     if not flag:
-        return jsonify({"ok": True, "deleted": 0, "segment_id": segment_id, "flag_type": flag_type})
+        db.session.commit()
+        return jsonify({"ok": True, "deleted": 0, "segment_id": seg.id, "flag_type": flag_type})
 
     db.session.delete(flag)
     db.session.commit()
-    return jsonify({"ok": True, "deleted": 1, "segment_id": segment_id, "flag_type": flag_type})
+    return jsonify({"ok": True, "deleted": 1, "segment_id": seg.id, "flag_type": flag_type})
 
 
 @bp.route("/interviews/<int:interview_id>/segments/<int:segment_id>/role", methods=["POST"])
