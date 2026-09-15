@@ -21,7 +21,7 @@ from models.segment import Segment, UtteranceMapping
 from services.project_flow_scope import resolve_integrated_analysis_scope
 
 PROVENANCE_KEY = "source_provenance"
-PROVENANCE_VERSION = "analysis-input-v1"
+PROVENANCE_VERSION = "analysis-input-v2"
 SUPPORTED_ANALYSIS_TYPES = {
     "per_question",
     "per_participant",
@@ -53,7 +53,7 @@ def _require_supported_project_participant_model(project: Project) -> None:
     Persisted analyzer prompts currently identify respondent material through the
     interview-level participant. FGI permits multiple participant-attributed
     speakers inside one interview, which cannot be represented faithfully by the
-    current analysis-input-v1 manifest. Failing before provider work is safer than
+    current analysis-input-v2 manifest. Failing before provider work is safer than
     silently assigning every respondent utterance to one Interview.participant.
     """
     if str(project.method or "DI").strip().upper() == "FGI":
