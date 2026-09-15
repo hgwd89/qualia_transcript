@@ -337,14 +337,6 @@ def upsert_speaker_assignment(interview_id, speaker_label):
     if not label:
         return jsonify({"ok": False, "error": "speaker_label is required"}), 400
 
-    exists = (
-        Segment.query
-        .filter_by(interview_id=interview.id, speaker_label=label)
-        .first()
-    )
-    if not exists:
-        return jsonify({"ok": False, "error": "speaker_label not found in interview"}), 400
-
     data = request.get_json(force=True, silent=True) or {}
     speaker_role = (data.get("speaker_role") or "unknown").strip()
     participant_id = data.get("participant_id")
@@ -360,16 +352,36 @@ def upsert_speaker_assignment(interview_id, speaker_label):
             participant_id = int(participant_id)
         except (TypeError, ValueError):
             return jsonify({"ok": False, "error": "invalid participant_id"}), 400
-        participant = Participant.query.get(participant_id)
-        if not participant or participant.project_id != interview.project_id:
+
+    try:
+        interview = begin_interview_input_write(interview.id)
+    except ResearchInputWriteBlocked as exc:
+        return _input_write_blocked_response(exc)
+    except ValueError:
+        return jsonify({"ok": False, "error": "interview not found"}), 404
+
+    segments = (
+        Segment.query
+        .filter_by(interview_id=int(interview.id), speaker_label=label)
+        .order_by(Segment.id.asc())
+        .all()
+    )
+    if not segments:
+        db.session.rollback()
+        return jsonify({"ok": False, "error": "speaker_label not found in interview"}), 400
+
+    if participant_id is not None:
+        participant = db.session.get(Participant, int(participant_id))
+        if not participant or int(participant.project_id) != int(interview.project_id):
+            db.session.rollback()
             return jsonify({"ok": False, "error": "participant does not belong to project"}), 400
 
     assignment = SpeakerAssignment.query.filter_by(
-        interview_id=interview.id, speaker_label=label
+        interview_id=int(interview.id), speaker_label=label
     ).first()
     created = False
     if not assignment:
-        assignment = SpeakerAssignment(interview_id=interview.id, speaker_label=label)
+        assignment = SpeakerAssignment(interview_id=int(interview.id), speaker_label=label)
         db.session.add(assignment)
         created = True
 
@@ -377,11 +389,17 @@ def upsert_speaker_assignment(interview_id, speaker_label):
     assignment.participant_id = participant_id
     assignment.note = note
     assignment.updated_at = datetime.now(timezone.utc)
+
+    for segment in segments:
+        segment.speaker_role = speaker_role
+        segment.participant_id = participant_id
+
     db.session.commit()
 
     return jsonify({
         "ok": True,
         "created": created,
+        "updated_segment_count": len(segments),
         "assignment": assignment.to_dict(),
     })
 
