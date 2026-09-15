@@ -89,7 +89,12 @@ def _append_ordinary_artifact_currentness(
     *,
     project_id: int | None,
 ) -> None:
-    """Validate ordinary export source provenance inside the audited DB snapshot."""
+    """Classify ordinary export source provenance inside the audited DB snapshot.
+
+    Historical stale outputs are retained by design, so they are warnings rather
+    than blockers. The authoritative delivery boundary rejects an individual
+    provenance-backed stale artifact with HTTP 409 when download is attempted.
+    """
     placeholders = ",".join("?" for _ in ORDINARY_ARTIFACT_TYPES)
     params: list[object] = list(sorted(ORDINARY_ARTIFACT_TYPES))
     where = f"file_type IN ({placeholders})"
@@ -147,9 +152,9 @@ def _append_ordinary_artifact_currentness(
         "legacy_unproven": len(unproven),
     }
     if stale:
-        report.setdefault("blockers", []).append({
-            "code": "ordinary_artifact_currentness_invalid",
-            "message": "Provenance-backed ordinary generated artifacts no longer match current canonical source data",
+        report.setdefault("warnings", []).append({
+            "code": "ordinary_artifact_source_stale",
+            "message": "Historical provenance-backed ordinary generated artifacts no longer match current canonical source data and are not downloadable as current outputs",
             "context": {
                 "files": stale[:100],
                 "count": len(stale),
