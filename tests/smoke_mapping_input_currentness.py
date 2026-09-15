@@ -13,6 +13,15 @@ def check(name: str, ok: bool, detail: str = "") -> int:
     return 0 if ok else 1
 
 
+def sqlite_report(db_path: Path, inspector, project_id: int | None = None):
+    con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        return inspector(con, project_id=project_id)
+    finally:
+        con.close()
+
+
 def blocker_reason(report, interview_id: int) -> str:
     for item in report.blockers:
         context = item.get("context") or {}
@@ -42,16 +51,10 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="qualia_mapping_input_currentness_") as tmp:
         root = Path(tmp)
         db_path = root / "mapping-currentness.db"
-        upload_dir = root / "uploads"
-        output_dir = root / "outputs"
-        backup_dir = root / "backups"
-        upload_dir.mkdir()
-        output_dir.mkdir()
-        backup_dir.mkdir()
         config.DATABASE_URI = f"sqlite:///{db_path.as_posix()}"
-        config.UPLOAD_DIR = str(upload_dir)
-        config.OUTPUT_DIR = str(output_dir)
-        config.BACKUP_DIR = str(backup_dir)
+        config.UPLOAD_DIR = str(root / "uploads")
+        config.OUTPUT_DIR = str(root / "outputs")
+        config.BACKUP_DIR = str(root / "backups")
 
         try:
             from app import create_app
@@ -90,7 +93,6 @@ def main() -> int:
                 other_flow = InterviewFlow(project_id=project.id, title="Other Flow")
                 db.session.add_all([flow, other_flow])
                 db.session.flush()
-
                 section = InterviewFlowSection(flow_id=flow.id, title="Section", seq=0)
                 other_section = InterviewFlowSection(
                     flow_id=other_flow.id,
@@ -128,7 +130,6 @@ def main() -> int:
                 )
                 db.session.add(interview)
                 db.session.flush()
-
                 s1 = Segment(
                     interview_id=interview.id,
                     speaker_label="SPEAKER_01",
@@ -146,9 +147,10 @@ def main() -> int:
                 db.session.add_all([s1, s2])
                 db.session.flush()
 
-                manifest = build_mapping_source_manifest(interview.id)
                 proof = serialize_mapping_source_provenance(
-                    mapping_source_provenance_for_manifest(manifest)
+                    mapping_source_provenance_for_manifest(
+                        build_mapping_source_manifest(interview.id)
+                    )
                 )
                 m1 = UtteranceMapping(
                     segment_id=s1.id,
@@ -178,75 +180,69 @@ def main() -> int:
                 ])
                 db.session.commit()
 
-                current = current_mapping_input_status(interview.id)
+                project_id = int(project.id)
+                interview_id = int(interview.id)
+                q1_id = int(q1.id)
+                q2_id = int(q2.id)
+                foreign_q_id = int(foreign_q.id)
+                s1_id = int(s1.id)
+                s2_id = int(s2.id)
+                m1_id = int(m1.id)
+                m2_id = int(m2.id)
+
+                current = current_mapping_input_status(interview_id)
+                current_sqlite = sqlite_report(
+                    db_path,
+                    inspect_mapping_input_currentness,
+                    project_id,
+                )
                 failures += check(
-                    "complete current AI mapping is accepted as analysis input",
+                    "complete current AI mapping is accepted by ORM and readiness",
                     current.current
                     and current.ai_mapping_count == 2
-                    and current.human_mapping_count == 0,
-                    str(current),
-                )
-
-                con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-                con.row_factory = sqlite3.Row
-                try:
-                    sqlite_report = inspect_mapping_input_currentness(
-                        con,
-                        project_id=project.id,
-                    )
-                finally:
-                    con.close()
-                failures += check(
-                    "ORM and read-only SQLite currentness agree for current AI mapping",
-                    sqlite_report.invalid_count == 0
-                    and sqlite_report.current_count == 1,
-                    str(sqlite_report),
+                    and current_sqlite.invalid_count == 0
+                    and current_sqlite.current_count == 1,
+                    f"orm={current} sqlite={current_sqlite}",
                 )
 
                 analysis_provenance = capture_analysis_source_provenance(
                     "per_question",
-                    project.id,
-                    interview_id=interview.id,
-                    question_id=q1.id,
+                    project_id,
+                    interview_id=interview_id,
+                    question_id=q1_id,
                 )
 
-                # Human review may replace one AI classification. The remaining
-                # AI row is still tied to the same current source generation.
-                m2 = db.session.get(UtteranceMapping, int(m2.id))
+                # Human override is canonical and may coexist with still-current
+                # AI mappings for other segments.
+                m2 = db.session.get(UtteranceMapping, m2_id)
                 m2.mapped_by = "human"
                 m2.confidence = 1.0
                 db.session.commit()
-                mixed = current_mapping_input_status(interview.id)
+                mixed = current_mapping_input_status(interview_id)
+                mixed_sqlite = sqlite_report(db_path, inspect_mapping_input_currentness)
                 failures += check(
-                    "mixed human and current AI mapping is accepted",
+                    "mixed human and current AI mapping is accepted consistently",
                     mixed.current
                     and mixed.ai_mapping_count == 1
-                    and mixed.human_mapping_count == 1,
-                    str(mixed),
+                    and mixed.human_mapping_count == 1
+                    and mixed_sqlite.invalid_count == 0,
+                    f"orm={mixed} sqlite={mixed_sqlite}",
                 )
 
-                con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-                con.row_factory = sqlite3.Row
-                try:
-                    mixed_sqlite = inspect_mapping_input_currentness(con)
-                finally:
-                    con.close()
-                failures += check(
-                    "SQLite readiness accepts the same mixed human and current AI mapping",
-                    mixed_sqlite.invalid_count == 0
-                    and mixed_sqlite.current_count == 1,
-                    str(mixed_sqlite),
-                )
-
-                # A canonical source edit makes the still-AI classification stale.
-                s1 = db.session.get(Segment, int(s1.id))
+                # Source drift makes the remaining AI classification stale and
+                # must stop analysis before provider work begins.
+                s1 = db.session.get(Segment, s1_id)
                 s1.text = "質問1への修正後回答"
                 db.session.commit()
-                stale = current_mapping_input_status(interview.id)
+                stale = current_mapping_input_status(interview_id)
+                stale_sqlite = sqlite_report(db_path, inspect_mapping_input_currentness)
                 failures += check(
-                    "source drift makes remaining AI mapping stale",
-                    not stale.current and "canonical source changed" in stale.reason,
-                    str(stale),
+                    "source drift makes AI mapping stale in ORM and readiness",
+                    not stale.current
+                    and "canonical source changed" in stale.reason
+                    and stale_sqlite.invalid_count == 1
+                    and "canonical source changed" in blocker_reason(stale_sqlite, interview_id),
+                    f"orm={stale} sqlite={stale_sqlite}",
                 )
 
                 provider_calls = {"count": 0}
@@ -260,8 +256,8 @@ def main() -> int:
                 raised = False
                 try:
                     analyzer_service.analyze_per_question(
-                        interview.id,
-                        q1.id,
+                        interview_id,
+                        q1_id,
                         result_write_guard=lambda: None,
                     )
                 except AnalysisSourceProvenanceError as exc:
@@ -274,80 +270,62 @@ def main() -> int:
                     f"raised={raised} provider_calls={provider_calls['count']}",
                 )
 
-                con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-                con.row_factory = sqlite3.Row
-                try:
-                    stale_sqlite = inspect_mapping_input_currentness(con)
-                finally:
-                    con.close()
-                failures += check(
-                    "readiness blocks the same stale mapping generation",
-                    stale_sqlite.invalid_count == 1
-                    and "canonical source changed" in blocker_reason(
-                        stale_sqlite,
-                        interview.id,
-                    ),
-                    str(stale_sqlite),
-                )
-
-                # Restore source. The saved analysis provenance becomes current
-                # again because mapping proof and selected segments are unchanged.
+                # Restore source and prove the analysis fingerprint is current.
+                s1 = db.session.get(Segment, s1_id)
                 s1.text = "質問1への回答"
                 db.session.commit()
                 matches, reason = source_provenance_matches_scope(
                     analysis_provenance,
                     "per_question",
-                    project.id,
-                    interview_id=interview.id,
-                    question_id=q1.id,
+                    project_id,
+                    interview_id=interview_id,
+                    question_id=q1_id,
                 )
                 failures += check(
-                    "analysis provenance is current when its mapping proof is current",
+                    "analysis provenance is current while mapping proof is current",
                     matches,
                     reason,
                 )
 
-                # Removing the remaining AI proof must invalidate existing
-                # mapping-dependent analysis currentness even when mapping rows and
-                # source text themselves are unchanged.
-                proof_row = db.session.get(UtteranceMappingProvenance, int(m1.id))
+                # Removing the remaining AI sidecar invalidates existing analysis
+                # currentness even though rows/text are otherwise unchanged.
+                proof_row = db.session.get(UtteranceMappingProvenance, m1_id)
                 db.session.delete(proof_row)
                 db.session.commit()
                 matches, reason = source_provenance_matches_scope(
                     analysis_provenance,
                     "per_question",
-                    project.id,
-                    interview_id=interview.id,
-                    question_id=q1.id,
+                    project_id,
+                    interview_id=interview_id,
+                    question_id=q1_id,
                 )
                 failures += check(
                     "analysis currentness fails when its AI mapping proof disappears",
                     not matches and "mapping input is stale or unprovable" in reason,
                     reason,
                 )
-
-                # Restore proof before testing mapping-shape failures.
                 db.session.add(UtteranceMappingProvenance(
-                    mapping_id=m1.id,
+                    mapping_id=m1_id,
                     source_provenance_json=proof,
                 ))
                 db.session.commit()
 
-                # Partial mapping sets are unsafe downstream.
-                m2 = db.session.get(UtteranceMapping, int(m2.id))
+                # Partial coverage is unsafe downstream.
+                m2 = db.session.get(UtteranceMapping, m2_id)
                 db.session.delete(m2)
                 db.session.commit()
-                partial = current_mapping_input_status(interview.id)
+                partial = current_mapping_input_status(interview_id)
                 failures += check(
                     "partial mapping coverage is rejected",
                     not partial.current and "does not cover" in partial.reason,
                     str(partial),
                 )
 
-                # Restore a human row, then create a duplicate for the same segment.
+                # Restore the human row. Identical historical duplicates are safe
+                # because prompt/provenance logic already deduplicates by segment.
                 m2 = UtteranceMapping(
-                    segment_id=s2.id,
-                    question_id=q2.id,
+                    segment_id=s2_id,
+                    question_id=q2_id,
                     mapped_by="human",
                     confidence=1.0,
                     is_unclassified=False,
@@ -355,29 +333,47 @@ def main() -> int:
                 db.session.add(m2)
                 db.session.commit()
                 duplicate = UtteranceMapping(
-                    segment_id=s2.id,
-                    question_id=q2.id,
-                    mapped_by="human",
+                    segment_id=s2_id,
+                    question_id=q2_id,
+                    mapped_by="manual",
                     confidence=1.0,
                     is_unclassified=False,
                 )
                 db.session.add(duplicate)
                 db.session.commit()
-                duplicate_status = current_mapping_input_status(interview.id)
+                identical_duplicate = current_mapping_input_status(interview_id)
                 failures += check(
-                    "duplicate mapping rows are rejected",
-                    not duplicate_status.current and "duplicate rows" in duplicate_status.reason,
-                    str(duplicate_status),
+                    "semantically identical historical duplicate mappings remain accepted",
+                    identical_duplicate.current,
+                    str(identical_duplicate),
+                )
+
+                # The same duplicate becomes invalid when it claims a different
+                # canonical question for the same segment.
+                duplicate.question_id = q1_id
+                db.session.commit()
+                conflicting = current_mapping_input_status(interview_id)
+                conflicting_sqlite = sqlite_report(db_path, inspect_mapping_input_currentness)
+                failures += check(
+                    "conflicting duplicate mapping assignments are rejected",
+                    not conflicting.current
+                    and "conflicting duplicate rows" in conflicting.reason
+                    and conflicting_sqlite.invalid_count == 1
+                    and "conflicting duplicate rows" in blocker_reason(
+                        conflicting_sqlite,
+                        interview_id,
+                    ),
+                    f"orm={conflicting} sqlite={conflicting_sqlite}",
                 )
                 db.session.delete(duplicate)
                 db.session.commit()
 
-                # A human mapping is canonical, but it still cannot point outside
-                # the interview's selected flow.
+                # A human mapping is canonical, but cannot point outside the
+                # interview's selected flow.
                 m2 = db.session.get(UtteranceMapping, int(m2.id))
-                m2.question_id = foreign_q.id
+                m2.question_id = foreign_q_id
                 db.session.commit()
-                out_of_flow = current_mapping_input_status(interview.id)
+                out_of_flow = current_mapping_input_status(interview_id)
                 failures += check(
                     "human mapping outside the interview flow is rejected",
                     not out_of_flow.current and "outside the interview flow" in out_of_flow.reason,
