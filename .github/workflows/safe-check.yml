@@ -48,6 +48,9 @@ jobs:
       - name: Run final-readiness database change-detection regression
         run: python tests/smoke_final_readiness_database_change_detection.py
 
+      - name: Run mapping input readiness regression
+        run: python tests/smoke_mapping_input_readiness.py
+
       - name: Run approved-artifact currentness regression
         run: python tests/smoke_approved_artifact_currentness.py
 
@@ -134,6 +137,9 @@ jobs:
 
       - name: Run final-readiness database change-detection regression
         run: python tests/smoke_final_readiness_database_change_detection.py
+
+      - name: Run mapping input readiness regression
+        run: python tests/smoke_mapping_input_readiness.py
 
       - name: Run approved-artifact currentness regression
         run: python tests/smoke_approved_artifact_currentness.py
