@@ -146,7 +146,7 @@ def _display_payload(row: dict) -> dict:
             )
         elif pid_liveness is False:
             payload["operator_note"] = (
-                "Worker PID is no longer alive. Normal status polling/conflict checks should auto-recover this job."
+                "Worker PID is no longer alive. Normal status polling/conflict checks should automatically move the job to failed."
             )
         else:
             payload["operator_note"] = (
@@ -171,37 +171,44 @@ def _apply_recovery(job_id: int, expected_generation: dict) -> int:
         with runtime_lock("worker"):
             app = create_app()
             with app.app_context():
-                job = db.session.get(ProcessingJob, job_id)
-                if not job:
-                    print(f"job_id={job_id} not found")
-                    return 1
-                if job.status not in {"pending", "running"}:
-                    print(f"No change: job is already terminal ({job.status}).")
+                try:
+                    job = db.session.get(ProcessingJob, job_id)
+                    if not job:
+                        print(f"job_id={job_id} not found")
+                        return 1
+                    if job.status not in {"pending", "running"}:
+                        print(f"No change: job is already terminal ({job.status}).")
+                        return 0
+
+                    current_generation = _recovery_generation_token_from_job(job)
+                    if current_generation != expected_generation:
+                        print("Refusing recovery write: active job generation changed after inspection.")
+                        print(json.dumps({
+                            "inspected_generation": expected_generation,
+                            "current_generation": current_generation,
+                        }, ensure_ascii=False, indent=2))
+                        return 4
+
+                    current, changed = mark_job_failed_if_unchanged(
+                        job,
+                        "operator explicitly recovered active job",
+                    )
+                    if not changed:
+                        print("Refusing recovery write: active job generation changed during recovery commit.")
+                        print(json.dumps({
+                            "inspected_generation": expected_generation,
+                            "current_generation": _recovery_generation_token_from_job(current),
+                        }, ensure_ascii=False, indent=2))
+                        return 4
+
+                    print(f"job_id={current.id} marked failed; retry is now available")
                     return 0
-
-                current_generation = _recovery_generation_token_from_job(job)
-                if current_generation != expected_generation:
-                    print("Refusing recovery write: active job generation changed after inspection.")
-                    print(json.dumps({
-                        "inspected_generation": expected_generation,
-                        "current_generation": current_generation,
-                    }, ensure_ascii=False, indent=2))
-                    return 4
-
-                current, changed = mark_job_failed_if_unchanged(
-                    job,
-                    "operator explicitly recovered active job",
-                )
-                if not changed:
-                    print("Refusing recovery write: active job generation changed during recovery commit.")
-                    print(json.dumps({
-                        "inspected_generation": expected_generation,
-                        "current_generation": _recovery_generation_token_from_job(current),
-                    }, ensure_ascii=False, indent=2))
-                    return 4
-
-                print(f"job_id={current.id} marked failed; retry is now available")
-                return 0
+                finally:
+                    # This is a one-shot administrative CLI path. Release pooled
+                    # SQLite handles deterministically so Windows does not retain
+                    # the canonical database after the operation has completed.
+                    db.session.remove()
+                    db.engine.dispose()
     except RuntimeLockError as exc:
         print(f"Refusing recovery write while maintenance is active: {exc}")
         return 3
