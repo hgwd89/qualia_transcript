@@ -18,6 +18,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] durable processing job smoke checks passed."
 
+Write-Host "[INFO] Running flow input fencing smoke check..."
+python tests/smoke_flow_input_fencing.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] flow input fencing smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] flow input fencing smoke checks passed."
+
 Write-Host "[INFO] Running moderator/interviewer role normalization smoke check..."
 python tests/smoke_role_normalization.py
 if ($LASTEXITCODE -ne 0) {
