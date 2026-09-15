@@ -26,6 +26,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] flow input fencing smoke checks passed."
 
+Write-Host "[INFO] Running semantic source provenance smoke check..."
+python tests/smoke_semantic_source_provenance.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] semantic source provenance smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] semantic source provenance smoke checks passed."
+
 Write-Host "[INFO] Running moderator/interviewer role normalization smoke check..."
 python tests/smoke_role_normalization.py
 if ($LASTEXITCODE -ne 0) {

@@ -51,7 +51,7 @@ def collect_candidate_segments(interview_id: int) -> list[dict[str, Any]]:
     rows = (
         Segment.query
         .filter_by(interview_id=interview_id, speaker_role="respondent")
-        .order_by(Segment.seq.asc())
+        .order_by(Segment.seq.asc(), Segment.id.asc())
         .all()
     )
     out: list[dict[str, Any]] = []
