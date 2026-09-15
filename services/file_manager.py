@@ -15,6 +15,10 @@ from models.generated_file import GeneratedFile
 from models.interview import Interview
 from models.project import Project
 from services.generated_file_ownership import stored_path_project_id
+from services.generated_file_source_provenance import (
+    PROVENANCE_KEY as GENERATED_SOURCE_PROVENANCE_KEY,
+    require_current_generated_file_source_provenance,
+)
 from services.managed_write_commit_guard import open_managed_write_commit_guard
 from services.storage_paths import (
     ManagedWriteFile,
@@ -110,19 +114,36 @@ def _file_generation(info: os.stat_result) -> tuple[int, int, int, int, int, int
     )
 
 
+def _generation_params_object(generation_params_json: str | None) -> dict:
+    if not generation_params_json:
+        return {}
+    try:
+        params = json.loads(generation_params_json)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("generated-file generation_params_json is invalid") from exc
+    if not isinstance(params, dict):
+        raise ValueError("generated-file generation_params_json must be a JSON object")
+    return dict(params)
+
+
+def _generation_params_with_source_provenance(
+    generation_params_json: str | None,
+    source_provenance: dict,
+) -> str:
+    params = _generation_params_object(generation_params_json)
+    existing = params.get(GENERATED_SOURCE_PROVENANCE_KEY)
+    if existing is not None and existing != source_provenance:
+        raise ValueError("generated-file source provenance metadata disagrees with captured inputs")
+    params[GENERATED_SOURCE_PROVENANCE_KEY] = source_provenance
+    return json.dumps(params, ensure_ascii=False, sort_keys=True)
+
+
 def _generation_params_with_artifact_sha256(
     generation_params_json: str | None,
     artifact_sha256: str,
 ) -> str:
     """Merge the registrar-proven byte hash into existing generation metadata."""
-    params = {}
-    if generation_params_json:
-        try:
-            params = json.loads(generation_params_json)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise ValueError("generated-file generation_params_json is invalid") from exc
-        if not isinstance(params, dict):
-            raise ValueError("generated-file generation_params_json must be a JSON object")
+    params = _generation_params_object(generation_params_json)
 
     digest = str(artifact_sha256 or "").strip().lower()
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
@@ -140,12 +161,7 @@ def generated_file_expected_sha256(gf: GeneratedFile) -> str | None:
     raw = gf.generation_params_json
     if not raw:
         return None
-    try:
-        params = json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise ValueError("generated-file generation metadata is invalid") from exc
-    if not isinstance(params, dict):
-        raise ValueError("generated-file generation metadata is invalid")
+    params = _generation_params_object(raw)
 
     value = params.get("artifact_sha256")
     if value in {None, ""}:
@@ -156,8 +172,22 @@ def generated_file_expected_sha256(gf: GeneratedFile) -> str | None:
     return digest
 
 
+def generated_file_source_provenance(gf: GeneratedFile) -> dict | None:
+    """Return ordinary-artifact source provenance when present."""
+    raw = gf.generation_params_json
+    if not raw:
+        return None
+    params = _generation_params_object(raw)
+    value = params.get(GENERATED_SOURCE_PROVENANCE_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("generated-file source provenance metadata is invalid")
+    return value
+
+
 def _begin_generated_file_registration(*, existing_write_reservation: bool) -> None:
-    """Serialize ownership validation with the GeneratedFile commit."""
+    """Serialize ownership/source validation with the GeneratedFile commit."""
     if db.session.new or db.session.dirty or db.session.deleted:
         raise RuntimeError("generated-file registration requires a clean database session")
 
@@ -231,9 +261,6 @@ def _discard_output_target_if_same_generation(target: OutputTarget) -> None:
         )
         guard.discard()
     except (OSError, ValueError):
-        # If the public namespace no longer names the written generation, leave
-        # both the successor and any unreachable predecessor untouched rather than
-        # risk deleting the wrong file.
         pass
     finally:
         if guard is not None:
@@ -241,14 +268,6 @@ def _discard_output_target_if_same_generation(target: OutputTarget) -> None:
 
 
 def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
-    """Create a safe project-scoped, collision-resistant generated-file target.
-
-    ``filename`` remains the user-facing download name. The filesystem/DB
-    ``stored_path`` uses a UUID-only internal basename plus the original extension,
-    so concurrent generations cannot collide and long display names cannot push the
-    filesystem component beyond common 255-byte limits. The project ID directory
-    must be a normal directory, never a symlink or Windows junction/reparse point.
-    """
     project_id = int(project_id)
     if project_id <= 0:
         raise ValueError("project_id must be positive")
@@ -266,7 +285,6 @@ def prepare_output_target(project_id: int, filename: str) -> OutputTarget:
 
 
 def open_output_target_for_write(target: OutputTarget) -> OutputWriteFile:
-    """Exclusively create one prepared output through the pinned write boundary."""
     managed_path = _resolve_stored_path(target.stored_path)
     if managed_path != Path(target.full_path).resolve():
         raise ValueError("output target path mismatch")
@@ -275,7 +293,6 @@ def open_output_target_for_write(target: OutputTarget) -> OutputWriteFile:
 
 
 def _compensate_committed_generated_file(gf: GeneratedFile, cause: Exception) -> None:
-    """Remove a just-committed row when post-commit namespace verification fails."""
     try:
         db.session.delete(gf)
         db.session.commit()
@@ -294,26 +311,10 @@ def register_generated_file(
     file_format: str,
     interview_id: int | None = None,
     generation_params_json: str | None = None,
+    source_provenance: dict | None = None,
     existing_write_reservation: bool = False,
 ) -> GeneratedFile:
-    """Register only the exact file generation produced by the managed writer.
-
-    A second guard is acquired after the report library closes its writer. That
-    guard re-pins the current exact file generation and its ancestor chain, stays
-    live through DB commit, and verifies the public managed pathname again after
-    commit. Newly registered ordinary artifacts receive a SHA-256 of that exact
-    pinned generation so later downloads can reject in-place byte tampering.
-    Formal artifacts retain their stricter exporter-owned metadata contract; when
-    formal metadata is supplied, its hash is rechecked against the same pinned
-    bytes here. Project/interview ownership is serialized with the row commit and
-    validated against the target's project-scoped storage namespace. Registration
-    also requires a clean SQLAlchemy session so its internal commit cannot publish
-    unrelated caller mutations. Formal exporters that already hold their own
-    serialized source snapshot may pass ``existing_write_reservation=True`` so the
-    registrar preserves that transaction instead of replacing it. Rollback cleanup
-    is performed through the pinned guard rather than check-then-unlink on the
-    mutable pathname.
-    """
+    """Register only exact bytes derived from the captured canonical source state."""
     expected = target.written_stat
     if expected is None:
         raise ValueError("generated output writer did not record final file identity")
@@ -331,6 +332,18 @@ def register_generated_file(
             project_id=project_id,
             interview_id=interview_id,
         )
+
+        if source_provenance is not None:
+            require_current_generated_file_source_provenance(
+                source_provenance,
+                file_type,
+                normalized_project_id,
+                interview_id=normalized_interview_id,
+            )
+            generation_params_json = _generation_params_with_source_provenance(
+                generation_params_json,
+                source_provenance,
+            )
 
         guard = open_managed_write_commit_guard(
             config.OUTPUT_DIR,
