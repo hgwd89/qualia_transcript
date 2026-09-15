@@ -14,10 +14,8 @@ class InterviewFlow(db.Model):
 
     project    = db.relationship("Project",               back_populates="interview_flows")
     sections   = db.relationship("InterviewFlowSection",  back_populates="flow",
-                                 cascade="all, delete-orphan",
-                                 order_by="(InterviewFlowSection.seq, InterviewFlowSection.id)")
-    interviews = db.relationship("Interview",             back_populates="flow",
-                                 order_by="Interview.id")
+                                 cascade="all, delete-orphan", order_by="InterviewFlowSection.seq")
+    interviews = db.relationship("Interview",             back_populates="flow")
 
     def to_dict(self):
         return {
@@ -39,8 +37,7 @@ class InterviewFlowSection(db.Model):
 
     flow      = db.relationship("InterviewFlow",         back_populates="sections")
     questions = db.relationship("InterviewFlowQuestion", back_populates="section",
-                                cascade="all, delete-orphan",
-                                order_by="(InterviewFlowQuestion.seq, InterviewFlowQuestion.id)")
+                                cascade="all, delete-orphan", order_by="InterviewFlowQuestion.seq")
 
     def to_dict(self):
         return {
