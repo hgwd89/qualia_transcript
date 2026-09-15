@@ -26,6 +26,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "[PASS] flow input fencing smoke checks passed."
 
+Write-Host "[INFO] Running mapping result scope smoke check..."
+python tests/smoke_mapping_result_scope.py
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[FAIL] mapping result scope smoke checks failed (exit code: $LASTEXITCODE)."
+    exit $LASTEXITCODE
+}
+Write-Host "[PASS] mapping result scope smoke checks passed."
+
 Write-Host "[INFO] Running semantic source provenance smoke check..."
 python tests/smoke_semantic_source_provenance.py
 if ($LASTEXITCODE -ne 0) {
