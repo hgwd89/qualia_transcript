@@ -101,6 +101,9 @@ jobs:
       - name: Run integrated preview derived currentness regression
         run: python tests/smoke_integrated_preview_derived_currentness.py
 
+      - name: Run integrated preview FGI attribution regression
+        run: python tests/smoke_integrated_preview_fgi_attribution.py
+
       - name: Run durable interview job UI regression
         run: python tests/smoke_interview_job_ui.py
 
