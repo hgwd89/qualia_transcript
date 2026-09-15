@@ -42,7 +42,7 @@ def main() -> int:
                     f"exit={semantic_exit}",
                 )
 
-                recovery_exit = recover_processing_job._apply_recovery(1)
+                recovery_exit = recover_processing_job._apply_recovery(1, {})
                 failures += check(
                     "explicit job recovery refuses write while maintenance is active",
                     recovery_exit == 3,
@@ -73,7 +73,7 @@ def main() -> int:
     failures += check(
         "recovery inspection remains read-only before apply confirmation",
         'if not args.apply:' in recovery_text
-        and 'return _apply_recovery(args.job_id)' in recovery_text,
+        and 'return _apply_recovery(args.job_id, inspected_generation)' in recovery_text,
     )
     failures += check(
         "explicit recovery write holds shared runtime lock",
