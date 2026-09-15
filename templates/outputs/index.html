@@ -130,16 +130,26 @@
               {% else %}
               <span class="rounded-full bg-amber-100 text-amber-800 px-2 py-0.5" title="{{ item.formal_reason }}">履歴・配布不可</span>
               {% endif %}
+            {% elif item.ordinary_provenance_present %}
+              {% if item.ordinary_current %}
+              <span class="rounded-full bg-green-100 text-green-700 px-2 py-0.5">現在有効</span>
+              {% else %}
+              <span class="rounded-full bg-amber-100 text-amber-800 px-2 py-0.5" title="{{ item.ordinary_reason }}">履歴・配布不可</span>
+              {% endif %}
+            {% elif f.file_type in ['verbatim', 'formatted_sheet', 'analysis'] %}
+              <span class="rounded-full bg-gray-100 text-gray-600 px-2 py-0.5" title="{{ item.ordinary_reason }}">旧形式・現在性未検証</span>
             {% else %}
-            <span class="text-gray-400">—</span>
+              <span class="text-gray-400">—</span>
             {% endif %}
           </td>
           <td class="px-4 py-3 text-right">
-            {% if f.file_type != 'approved_analysis' or item.formal_current %}
-            <a href="{{ url_for('outputs.download', file_id=f.id) }}"
-               class="text-brand-500 hover:underline text-xs">ダウンロード</a>
+            {% if f.file_type == 'approved_analysis' and not item.formal_current %}
+              <span class="text-gray-400 text-xs" title="{{ item.formal_reason }}">配布不可</span>
+            {% elif item.ordinary_provenance_present and not item.ordinary_current %}
+              <span class="text-gray-400 text-xs" title="{{ item.ordinary_reason }}">配布不可</span>
             {% else %}
-            <span class="text-gray-400 text-xs" title="{{ item.formal_reason }}">配布不可</span>
+              <a href="{{ url_for('outputs.download', file_id=f.id) }}"
+                 class="text-brand-500 hover:underline text-xs">ダウンロード</a>
             {% endif %}
           </td>
         </tr>
@@ -147,7 +157,7 @@
       </tbody>
     </table>
   </div>
-  <p class="text-xs text-gray-500 mt-2">正式出力は生成時点の履歴として保持されます。現在のcanonical dataと一致しない履歴ファイルは通常の配布導線からダウンロードできません。</p>
+  <p class="text-xs text-gray-500 mt-2">生成済みファイルは履歴として保持されます。source provenance付きファイルは現在のcanonical dataと一致しない場合、通常の配布導線からダウンロードできません。旧形式ファイルは現在性を証明できない履歴として表示します。</p>
   {% else %}
   <div class="text-center py-10 text-gray-400 bg-white rounded-lg border border-dashed border-gray-300">
     <p class="text-sm">生成済みファイルはありません。</p>
