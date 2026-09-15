@@ -239,7 +239,7 @@ def analyze_interview_summary(
     segments = (
         Segment.query
         .filter_by(interview_id=interview_id, speaker_role="respondent")
-        .order_by(Segment.seq)
+        .order_by(Segment.seq.asc(), Segment.id.asc())
         .all()
     )
     full_text = "\n".join(f'- 「{s.text}」' for s in segments)
@@ -318,7 +318,7 @@ def analyze_cross_participants(
     )
 
     utterances_by_participant = []
-    for interview in project.interviews:
+    for interview in sorted(project.interviews, key=lambda row: int(row.id)):
         if interview.flow_id is None or int(interview.flow_id) != question_flow_id:
             continue
         participant = interview.participant
@@ -412,13 +412,13 @@ def analyze_project_integrated(
     sections_data = []
     source_question_ids: list[int] = []
     allowed_question_codes: set[str] = set()
-    for section in flow.sections:
+    for section in sorted(flow.sections, key=lambda row: (int(row.seq), int(row.id))):
         questions_data = []
-        for q in section.questions:
+        for q in sorted(section.questions, key=lambda row: (int(row.seq), int(row.id))):
             source_question_ids.append(int(q.id))
             allowed_question_codes.add(_canonical_question_code(q))
             utterances_by_p = []
-            for interview in project.interviews:
+            for interview in sorted(project.interviews, key=lambda row: int(row.id)):
                 if int(interview.id) not in source_interview_ids:
                     continue
                 participant = interview.participant
