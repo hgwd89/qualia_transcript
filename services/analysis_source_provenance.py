@@ -70,6 +70,19 @@ def _question_manifest(question: InterviewFlowQuestion) -> dict:
 
 
 def _mapped_respondent_segments(interview_id: int, question_id: int) -> list[Segment]:
+    # Mapping-dependent analyses must never consume an AI classification whose
+    # generation proof is stale or missing. Import locally to avoid a module
+    # cycle: mapping_input_guard itself reuses mapping source-provenance helpers.
+    from services.mapping_input_guard import require_current_mapping_input
+    from services.mapping_source_provenance import MappingSourceProvenanceError
+
+    try:
+        require_current_mapping_input(int(interview_id))
+    except MappingSourceProvenanceError as exc:
+        raise AnalysisSourceProvenanceError(
+            f"mapping input is stale or unprovable: {exc}"
+        ) from exc
+
     rows = (
         Segment.query
         .join(UtteranceMapping, UtteranceMapping.segment_id == Segment.id)
