@@ -353,12 +353,17 @@ def ordinary_artifact_currentness(
         params = _generation_params(generated_file)
     except ValueError as exc:
         return OrdinaryArtifactCurrentness(False, False, str(exc))
+    provenance_declared = ORDINARY_PROVENANCE_KEY in params
     expected = params.get(ORDINARY_PROVENANCE_KEY)
     if not isinstance(expected, dict):
         return OrdinaryArtifactCurrentness(
             False,
-            False,
-            "ordinary artifact source provenance is missing",
+            provenance_declared,
+            (
+                "ordinary artifact source provenance is invalid"
+                if provenance_declared
+                else "ordinary artifact source provenance is missing"
+            ),
         )
     if expected.get("version") != ORDINARY_PROVENANCE_VERSION:
         return OrdinaryArtifactCurrentness(
@@ -376,7 +381,11 @@ def ordinary_artifact_currentness(
         )
     if str(expected.get("file_type") or "") != str(generated_file.file_type):
         return OrdinaryArtifactCurrentness(False, True, "ordinary artifact file_type provenance mismatch")
-    if int(expected.get("project_id") or -1) != int(generated_file.project_id):
+    try:
+        expected_project_id = int(expected.get("project_id"))
+    except (TypeError, ValueError):
+        return OrdinaryArtifactCurrentness(False, True, "ordinary artifact project provenance is invalid")
+    if expected_project_id != int(generated_file.project_id):
         return OrdinaryArtifactCurrentness(False, True, "ordinary artifact project provenance mismatch")
 
     expected_interview = expected.get("interview_id")
