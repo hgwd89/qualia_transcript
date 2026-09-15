@@ -47,6 +47,59 @@ def _fingerprint(manifest: dict) -> str:
     return hashlib.sha256(_canonical_json(manifest).encode("utf-8")).hexdigest()
 
 
+def _require_supported_project_participant_model(project: Project) -> None:
+    """Refuse persisted AI analysis while FGI attribution is not provenance-safe.
+
+    Persisted analyzer prompts currently identify respondent material through the
+    interview-level participant. FGI permits multiple participant-attributed
+    speakers inside one interview, which cannot be represented faithfully by the
+    current analysis-input-v1 manifest. Failing before provider work is safer than
+    silently assigning every respondent utterance to one Interview.participant.
+    """
+    if str(project.method or "DI").strip().upper() == "FGI":
+        raise AnalysisSourceProvenanceError(
+            "FGI persisted AI analysis is not supported by the current participant provenance model"
+        )
+
+
+def _require_supported_interview_participant_model(interview: Interview) -> None:
+    """Require respondent segment attribution to agree with Interview.participant."""
+    project = interview.project
+    if project is None:
+        project = db.session.get(Project, int(interview.project_id))
+    if project is None:
+        raise AnalysisSourceProvenanceError("analysis project is missing")
+    _require_supported_project_participant_model(project)
+
+    expected_participant_id = (
+        int(interview.participant_id)
+        if interview.participant_id is not None
+        else None
+    )
+    respondent_segments = (
+        Segment.query
+        .filter_by(interview_id=int(interview.id), speaker_role="respondent")
+        .order_by(Segment.id.asc())
+        .all()
+    )
+    mismatched_segment_ids = [
+        int(segment.id)
+        for segment in respondent_segments
+        if segment.participant_id is not None
+        and (
+            expected_participant_id is None
+            or int(segment.participant_id) != expected_participant_id
+        )
+    ]
+    if mismatched_segment_ids:
+        rendered = ", ".join(str(value) for value in mismatched_segment_ids[:20])
+        suffix = " ..." if len(mismatched_segment_ids) > 20 else ""
+        raise AnalysisSourceProvenanceError(
+            "respondent segment participant attribution differs from Interview.participant "
+            f"for interview_id={int(interview.id)} segment_id(s): {rendered}{suffix}"
+        )
+
+
 def _segment_manifest(segment: Segment) -> dict:
     return {
         "id": int(segment.id),
@@ -109,6 +162,7 @@ def _per_question_manifest(project_id: int, interview_id: int | None, question_i
         raise AnalysisSourceProvenanceError("per_question source row is missing")
     if int(interview.project_id) != int(project_id):
         raise AnalysisSourceProvenanceError("interview belongs to another project")
+    _require_supported_interview_participant_model(interview)
     q_manifest = _question_manifest(question)
     if interview.flow_id is None or int(interview.flow_id) != int(q_manifest["flow_id"]):
         raise AnalysisSourceProvenanceError("question is outside the interview flow")
@@ -139,6 +193,7 @@ def _per_participant_manifest(project_id: int, interview_id: int | None) -> dict
     interview = db.session.get(Interview, int(interview_id))
     if interview is None or int(interview.project_id) != int(project_id):
         raise AnalysisSourceProvenanceError("participant analysis interview is missing or cross-project")
+    _require_supported_interview_participant_model(interview)
 
     participant = interview.participant
     code = participant.participant_code if participant else "P??"
@@ -171,6 +226,7 @@ def _cross_participant_manifest(project_id: int, question_id: int | None) -> dic
     question = db.session.get(InterviewFlowQuestion, int(question_id))
     if project is None or question is None:
         raise AnalysisSourceProvenanceError("cross-participant source row is missing")
+    _require_supported_project_participant_model(project)
     q_manifest = _question_manifest(question)
     if question.section.flow.project_id != int(project_id):
         raise AnalysisSourceProvenanceError("cross-participant question belongs to another project")
@@ -179,6 +235,7 @@ def _cross_participant_manifest(project_id: int, question_id: int | None) -> dic
     for interview in sorted(project.interviews, key=lambda row: int(row.id)):
         if interview.flow_id is None or int(interview.flow_id) != int(q_manifest["flow_id"]):
             continue
+        _require_supported_interview_participant_model(interview)
         participant = interview.participant
         if participant is None:
             continue
@@ -207,6 +264,7 @@ def _integrated_manifest(project_id: int) -> dict:
     project = db.session.get(Project, int(project_id))
     if project is None:
         raise AnalysisSourceProvenanceError("integrated project is missing")
+    _require_supported_project_participant_model(project)
 
     try:
         scope = resolve_integrated_analysis_scope(project)
@@ -218,6 +276,7 @@ def _integrated_manifest(project_id: int) -> dict:
     for interview in sorted(project.interviews, key=lambda row: int(row.id)):
         if int(interview.id) not in source_interview_ids:
             continue
+        _require_supported_interview_participant_model(interview)
         participant = interview.participant
         interview_rows.append({
             "id": int(interview.id),
