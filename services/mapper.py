@@ -2,15 +2,18 @@
 発言セグメント → 質問項目への AI 自動マッピング。
 """
 from collections.abc import Callable
-import json
 from models import db
 from models.interview import Interview
-from models.interview_flow import InterviewFlowQuestion, InterviewFlowSection, InterviewFlow
 from models.segment import Segment, UtteranceMapping
 from services.ai_client import call_structured
 
 MIN_CONFIDENCE_CLASSIFIED = 0.65
 ResultWriteGuard = Callable[[], object]
+
+
+class MappingResultScopeError(ValueError):
+    """Provider mapping output escaped or incompletely covered the requested scope."""
+
 
 SCHEMA = {
     "type": "object",
@@ -35,6 +38,70 @@ SCHEMA = {
 }
 
 
+def _normalize_provider_mappings(
+    mappings: list[dict],
+    *,
+    allowed_segment_ids: set[int],
+    allowed_question_ids: set[int],
+) -> list[dict]:
+    """Validate provider IDs/completeness before any canonical replacement.
+
+    Foreign but otherwise valid primary keys must never be accepted merely because
+    database foreign-key constraints can resolve them. A mapping result is valid
+    only when it contains exactly one row for every respondent segment in the
+    requested interview and every non-null question belongs to that interview's
+    selected flow.
+    """
+    normalized_mappings: list[dict] = []
+    seen_segment_ids: set[int] = set()
+
+    for mapping in mappings:
+        segment_id = int(mapping["segment_id"])
+        if segment_id not in allowed_segment_ids:
+            raise MappingResultScopeError(
+                f"provider returned segment_id outside mapping scope: {segment_id}"
+            )
+        if segment_id in seen_segment_ids:
+            raise MappingResultScopeError(
+                f"provider returned duplicate segment_id: {segment_id}"
+            )
+        seen_segment_ids.add(segment_id)
+
+        raw_question_id = mapping.get("question_id")
+        question_id = int(raw_question_id) if raw_question_id is not None else None
+        if question_id is not None and question_id not in allowed_question_ids:
+            raise MappingResultScopeError(
+                f"provider returned question_id outside interview flow: {question_id}"
+            )
+
+        confidence = float(mapping.get("confidence", 0.0) or 0.0)
+        is_unclassified = bool(mapping.get("is_unclassified", False))
+
+        # 弱い分類は unclassified 側へ寄せる
+        if question_id is None:
+            is_unclassified = True
+            confidence = min(confidence, 0.49)
+        elif confidence < MIN_CONFIDENCE_CLASSIFIED:
+            question_id = None
+            is_unclassified = True
+
+        normalized_mappings.append({
+            "segment_id": segment_id,
+            "question_id": question_id,
+            "confidence": confidence,
+            "is_unclassified": is_unclassified,
+        })
+
+    missing_segment_ids = allowed_segment_ids - seen_segment_ids
+    if missing_segment_ids:
+        rendered = ", ".join(str(value) for value in sorted(missing_segment_ids))
+        raise MappingResultScopeError(
+            f"provider mapping result omitted respondent segment_id(s): {rendered}"
+        )
+
+    return normalized_mappings
+
+
 def run_mapping(
     interview_id: int,
     *,
@@ -52,22 +119,24 @@ def run_mapping(
     if not interview or not interview.flow_id:
         return 0
 
-    # 発言（respondent のみ対象）
+    # 発言（respondent のみ対象）。Historical duplicate seq values are possible,
+    # so ID is the deterministic tie-breaker for the provider input order.
     segments = (
         Segment.query
         .filter_by(interview_id=interview_id, speaker_role="respondent")
-        .order_by(Segment.seq)
+        .order_by(Segment.seq.asc(), Segment.id.asc())
         .all()
     )
     if not segments:
         return 0
 
-    # フロー全質問を取得
+    # フロー全質問を取得。Relationship order_by only contains seq, so add stable
+    # ID tie-breakers here to prevent historical duplicate seq values from changing
+    # the provider prompt order between runs.
     flow = interview.flow
     questions = []
-    for section in flow.sections:
-        for q in section.questions:
-            questions.append(q)
+    for section in sorted(flow.sections, key=lambda value: (value.seq, value.id)):
+        questions.extend(sorted(section.questions, key=lambda value: (value.seq, value.id)))
 
     if not questions:
         return 0
@@ -101,28 +170,11 @@ def run_mapping(
 
     result = call_structured(system, user, SCHEMA, schema_name="utterance_mapping_result")
     mappings = result.get("mappings", [])
-
-    normalized_mappings = []
-    for m in mappings:
-        segment_id = m["segment_id"]
-        question_id = m.get("question_id")
-        confidence = float(m.get("confidence", 0.0) or 0.0)
-        is_unclassified = bool(m.get("is_unclassified", False))
-
-        # 弱い分類は unclassified 側へ寄せる
-        if question_id is None:
-            is_unclassified = True
-            confidence = min(confidence, 0.49)
-        elif confidence < MIN_CONFIDENCE_CLASSIFIED:
-            question_id = None
-            is_unclassified = True
-
-        normalized_mappings.append({
-            "segment_id": segment_id,
-            "question_id": question_id,
-            "confidence": confidence,
-            "is_unclassified": is_unclassified,
-        })
+    normalized_mappings = _normalize_provider_mappings(
+        mappings,
+        allowed_segment_ids={int(segment.id) for segment in segments},
+        allowed_question_ids={int(question.id) for question in questions},
+    )
 
     # External work is complete. Verify the durable attempt lease before any
     # existing canonical mapping is deleted or replaced.
@@ -141,13 +193,13 @@ def run_mapping(
         db.session.delete(existing_mapping)
     db.session.flush()
 
-    for m in normalized_mappings:
+    for mapping in normalized_mappings:
         db.session.add(UtteranceMapping(
-            segment_id=m["segment_id"],
-            question_id=m.get("question_id"),
+            segment_id=mapping["segment_id"],
+            question_id=mapping.get("question_id"),
             mapped_by="ai",
-            confidence=m.get("confidence", 0.0),
-            is_unclassified=m.get("is_unclassified", False),
+            confidence=mapping.get("confidence", 0.0),
+            is_unclassified=mapping.get("is_unclassified", False),
         ))
 
     interview.status = "mapped"
