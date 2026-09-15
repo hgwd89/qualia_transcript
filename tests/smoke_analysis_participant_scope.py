@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -30,7 +31,8 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="qualia_analysis_participant_scope_") as tmp:
         root = Path(tmp)
-        config.DATABASE_URI = f"sqlite:///{(root / 'participant-scope.db').as_posix()}"
+        db_path = root / "participant-scope.db"
+        config.DATABASE_URI = f"sqlite:///{db_path.as_posix()}"
         config.UPLOAD_DIR = str(root / "uploads")
         config.OUTPUT_DIR = str(root / "outputs")
 
@@ -49,9 +51,14 @@ def main() -> int:
             from models.segment import Segment
             import services.analyzer as analyzer
             from services.analysis_source_provenance import (
+                PROVENANCE_VERSION,
                 AnalysisSourceProvenanceError,
                 analysis_source_provenance_status,
                 capture_analysis_source_provenance,
+            )
+            from services.analysis_source_provenance_sqlite import (
+                PROVENANCE_VERSION as SQLITE_PROVENANCE_VERSION,
+                validate_analysis_source_provenance,
             )
 
             app = create_app()
@@ -165,6 +172,13 @@ def main() -> int:
                 mixed_segment_id = int(mixed_segment.id)
                 di_clean_interview_id = int(di_clean_interview.id)
 
+                failures += check(
+                    "ORM and SQLite readiness use participant-safe provenance v2",
+                    PROVENANCE_VERSION == "analysis-input-v2"
+                    and SQLITE_PROVENANCE_VERSION == PROVENANCE_VERSION,
+                    f"orm={PROVENANCE_VERSION} sqlite={SQLITE_PROVENANCE_VERSION}",
+                )
+
                 for analysis_type, kwargs in (
                     ("per_question", {"interview_id": fgi_interview_id, "question_id": fgi_question_id}),
                     ("per_participant", {"interview_id": fgi_interview_id}),
@@ -240,32 +254,91 @@ def main() -> int:
                 )
                 failures += check(
                     "ordinary DI analysis remains provenance-supported",
-                    clean_provenance.get("version") == "analysis-input-v1"
+                    clean_provenance.get("version") == PROVENANCE_VERSION
                     and len(str(clean_provenance.get("sha256") or "")) == 64,
                     str(clean_provenance),
                 )
 
-                historical_fgi = AIAnalysis(
-                    project_id=fgi_project_id,
-                    interview_id=fgi_interview_id,
+                con = sqlite3.connect(str(db_path))
+                con.row_factory = sqlite3.Row
+                try:
+                    clean_ok, clean_reason = validate_analysis_source_provenance(
+                        con,
+                        analysis_type="per_participant",
+                        project_id=di_project_id,
+                        interview_id=di_clean_interview_id,
+                        question_id=None,
+                        content={"source_provenance": clean_provenance},
+                    )
+                    failures += check(
+                        "SQLite readiness accepts the same clean DI v2 provenance",
+                        clean_ok,
+                        clean_reason,
+                    )
+
+                    fgi_ok, fgi_reason = validate_analysis_source_provenance(
+                        con,
+                        analysis_type="per_participant",
+                        project_id=fgi_project_id,
+                        interview_id=fgi_interview_id,
+                        question_id=None,
+                        content={
+                            "source_provenance": {
+                                "version": PROVENANCE_VERSION,
+                                "sha256": "0" * 64,
+                            }
+                        },
+                    )
+                    failures += check(
+                        "SQLite readiness rejects FGI under the same participant contract",
+                        not fgi_ok and "FGI" in fgi_reason,
+                        fgi_reason,
+                    )
+
+                    mixed_ok, sqlite_mixed_reason = validate_analysis_source_provenance(
+                        con,
+                        analysis_type="per_participant",
+                        project_id=di_project_id,
+                        interview_id=di_mixed_interview_id,
+                        question_id=None,
+                        content={
+                            "source_provenance": {
+                                "version": PROVENANCE_VERSION,
+                                "sha256": "0" * 64,
+                            }
+                        },
+                    )
+                    failures += check(
+                        "SQLite readiness rejects mixed DI participant attribution",
+                        not mixed_ok
+                        and str(mixed_segment_id) in sqlite_mixed_reason
+                        and "differs from Interview.participant" in sqlite_mixed_reason,
+                        sqlite_mixed_reason,
+                    )
+                finally:
+                    con.close()
+
+                legacy_v1 = AIAnalysis(
+                    project_id=di_project_id,
+                    interview_id=di_clean_interview_id,
                     analysis_type="per_participant",
-                    title="Historical FGI analysis",
+                    title="Legacy v1 analysis",
                     summary_text="historical",
                     content_json=json.dumps({
                         "findings": [],
                         "source_provenance": {
                             "version": "analysis-input-v1",
-                            "sha256": "0" * 64,
+                            "sha256": clean_provenance["sha256"],
                         },
                     }),
                     model_used="test",
                 )
-                db.session.add(historical_fgi)
+                db.session.add(legacy_v1)
                 db.session.commit()
-                current, reason = analysis_source_provenance_status(historical_fgi)
+                current, reason = analysis_source_provenance_status(legacy_v1)
                 failures += check(
-                    "historical FGI analysis cannot be treated as current formal input",
-                    not current and "FGI" in reason,
+                    "legacy v1 analysis cannot regain formal currentness after v2 migration",
+                    not current and "version" in reason,
                     reason,
                 )
 

@@ -2,7 +2,7 @@
 
 This module intentionally depends only on sqlite3-compatible connections and
 plain dictionaries. Production-readiness audits can therefore validate the same
-`analysis-input-v1` contract without initializing Flask/SQLAlchemy or writing to
+`analysis-input-v2` contract without initializing Flask/SQLAlchemy or writing to
 the application database.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 
 PROVENANCE_KEY = "source_provenance"
-PROVENANCE_VERSION = "analysis-input-v1"
+PROVENANCE_VERSION = "analysis-input-v2"
 SUPPORTED_ANALYSIS_TYPES = {
     "per_question",
     "per_participant",
@@ -34,6 +34,22 @@ def _canonical_json(value: dict[str, Any]) -> str:
 
 def _fingerprint(manifest: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(manifest).encode("utf-8")).hexdigest()
+
+
+def _require_supported_project_participant_model(
+    con: sqlite3.Connection,
+    project_id: int,
+) -> None:
+    row = con.execute(
+        "SELECT method FROM projects WHERE id=?",
+        (int(project_id),),
+    ).fetchone()
+    if row is None:
+        raise SQLiteAnalysisSourceProvenanceError("project not found")
+    if str(row["method"] or "DI").strip().upper() == "FGI":
+        raise SQLiteAnalysisSourceProvenanceError(
+            "FGI persisted AI analysis is not supported by the current participant provenance model"
+        )
 
 
 def _segment_manifest(row: sqlite3.Row) -> dict[str, Any]:
@@ -123,6 +139,46 @@ def _interview_with_participant(con: sqlite3.Connection, interview_id: int) -> s
     return row
 
 
+def _require_supported_interview_participant_model(
+    con: sqlite3.Connection,
+    interview_id: int,
+) -> sqlite3.Row:
+    interview = _interview_with_participant(con, int(interview_id))
+    project_id = int(interview["project_id"])
+    _require_supported_project_participant_model(con, project_id)
+    expected_participant_id = (
+        int(interview["participant_id"])
+        if interview["participant_id"] is not None
+        else None
+    )
+    rows = con.execute(
+        """
+        SELECT id, participant_id
+        FROM segments
+        WHERE interview_id=? AND speaker_role='respondent'
+        ORDER BY id
+        """,
+        (int(interview_id),),
+    ).fetchall()
+    mismatched_segment_ids = [
+        int(row["id"])
+        for row in rows
+        if row["participant_id"] is not None
+        and (
+            expected_participant_id is None
+            or int(row["participant_id"]) != expected_participant_id
+        )
+    ]
+    if mismatched_segment_ids:
+        rendered = ", ".join(str(value) for value in mismatched_segment_ids[:20])
+        suffix = " ..." if len(mismatched_segment_ids) > 20 else ""
+        raise SQLiteAnalysisSourceProvenanceError(
+            "respondent segment participant attribution differs from Interview.participant "
+            f"for interview_id={int(interview_id)} segment_id(s): {rendered}{suffix}"
+        )
+    return interview
+
+
 def _per_question_manifest(
     con: sqlite3.Connection,
     project_id: int,
@@ -131,7 +187,7 @@ def _per_question_manifest(
 ) -> dict[str, Any]:
     if interview_id is None or question_id is None:
         raise SQLiteAnalysisSourceProvenanceError("per_question scope is incomplete")
-    interview = _interview_with_participant(con, interview_id)
+    interview = _require_supported_interview_participant_model(con, interview_id)
     question = _question_manifest(con, question_id)
     if int(interview["project_id"]) != int(project_id):
         raise SQLiteAnalysisSourceProvenanceError("interview project changed")
@@ -167,7 +223,7 @@ def _per_participant_manifest(
 ) -> dict[str, Any]:
     if interview_id is None:
         raise SQLiteAnalysisSourceProvenanceError("per_participant scope is incomplete")
-    interview = _interview_with_participant(con, interview_id)
+    interview = _require_supported_interview_participant_model(con, interview_id)
     if int(interview["project_id"]) != int(project_id):
         raise SQLiteAnalysisSourceProvenanceError("interview project changed")
 
@@ -203,6 +259,7 @@ def _cross_participant_manifest(
 ) -> dict[str, Any]:
     if question_id is None:
         raise SQLiteAnalysisSourceProvenanceError("cross_participant scope is incomplete")
+    _require_supported_project_participant_model(con, project_id)
     question = _question_manifest(con, question_id)
     if int(question["project_id"]) != int(project_id):
         raise SQLiteAnalysisSourceProvenanceError("question project changed")
@@ -222,6 +279,7 @@ def _cross_participant_manifest(
     ).fetchall()
     participants: list[dict[str, Any]] = []
     for interview in interviews:
+        _require_supported_interview_participant_model(con, int(interview["id"]))
         if interview["resolved_participant_id"] is None:
             continue
         segments = _mapped_respondent_segments(con, int(interview["id"]), int(question_id))
@@ -249,6 +307,7 @@ def _resolve_integrated_scope(
     con: sqlite3.Connection,
     project_id: int,
 ) -> tuple[int, list[sqlite3.Row]]:
+    _require_supported_project_participant_model(con, project_id)
     flow_rows = con.execute(
         "SELECT id FROM interview_flows WHERE project_id=? ORDER BY id",
         (int(project_id),),
@@ -274,6 +333,7 @@ def _resolve_integrated_scope(
         raise SQLiteAnalysisSourceProvenanceError("integrated participant interviews are missing")
 
     for interview in interviews:
+        _require_supported_interview_participant_model(con, int(interview["id"]))
         if interview["flow_id"] is None:
             raise SQLiteAnalysisSourceProvenanceError("integrated interview flow is missing")
         if int(interview["flow_id"]) != flow_id:
@@ -311,6 +371,7 @@ def _integrated_manifest(con: sqlite3.Connection, project_id: int) -> dict[str, 
     ).fetchone()
     if project is None:
         raise SQLiteAnalysisSourceProvenanceError("project not found")
+    _require_supported_project_participant_model(con, project_id)
 
     flow_id, interviews = _resolve_integrated_scope(con, project_id)
     source_interviews = [
