@@ -1,9 +1,9 @@
-"""Final professional-readiness entry point including GeneratedFile ownership.
+"""Final professional-readiness entry point including ownership/currentness gates.
 
 The existing v2/project readiness audits own the SQLite read transaction and the
-final PRAGMA data_version change-detection window. This wrapper injects the
-cross-project GeneratedFile ownership check into that same transaction instead of
-opening a second connection after the hardened audit has completed.
+final PRAGMA data_version change-detection window. This wrapper injects extra
+cross-table acceptance checks into that same transaction instead of opening a
+second connection after the hardened audit has completed.
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ import audit_production_readiness as base_readiness
 import audit_production_readiness_project as project_readiness
 import audit_production_readiness_v2 as readiness_v2
 from services.generated_file_ownership import inspect_generated_file_ownership
+from services.mapping_input_readiness_sqlite import inspect_mapping_input_currentness
 from services.runtime_lock import RuntimeLockError, runtime_lock
 
 
@@ -51,6 +52,33 @@ def _append_generated_file_ownership(
     info["generated_file_ownership_warning_count"] = len(ownership.warnings)
 
 
+def _append_mapping_input_currentness(
+    report: dict,
+    con,
+    *,
+    project_id: int | None,
+) -> None:
+    """Append mapping-input findings from the same caller-owned DB snapshot."""
+    try:
+        mapping = inspect_mapping_input_currentness(con, project_id=project_id)
+    except Exception as exc:
+        report.setdefault("blockers", []).append({
+            "code": "mapping_input_currentness_audit_error",
+            "message": "Could not validate mapping input currentness",
+            "context": {"error": f"{type(exc).__name__}: {exc}"},
+        })
+        return
+
+    report.setdefault("blockers", []).extend(mapping.blockers)
+    report.setdefault("warnings", []).extend(mapping.warnings)
+    info = report.setdefault("info", {})
+    info["mapping_input_currentness"] = {
+        "checked": mapping.checked_count,
+        "current": mapping.current_count,
+        "invalid": mapping.invalid_count,
+    }
+
+
 def _dedupe(items: list[dict]) -> list[dict]:
     seen = set()
     result = []
@@ -71,10 +99,10 @@ def audit_final(
     *,
     project_id: int | None = None,
 ) -> dict:
-    """Run hardened readiness plus ownership in one SQLite read snapshot."""
+    """Run hardened readiness plus cross-table gates in one SQLite snapshot."""
     original_runner = readiness_v2._run_base_audit_on_snapshot
 
-    def run_base_with_ownership(con, inner_db_path, inner_output_dir, inner_backup_dir):
+    def run_base_with_extra_gates(con, inner_db_path, inner_output_dir, inner_backup_dir):
         report = original_runner(
             con,
             inner_db_path,
@@ -86,9 +114,14 @@ def audit_final(
             con,
             project_id=project_id,
         )
+        _append_mapping_input_currentness(
+            report,
+            con,
+            project_id=project_id,
+        )
         return report
 
-    readiness_v2._run_base_audit_on_snapshot = run_base_with_ownership
+    readiness_v2._run_base_audit_on_snapshot = run_base_with_extra_gates
     try:
         if project_id is None:
             report = readiness_v2.audit(
