@@ -347,12 +347,16 @@ def inspect_mapping_provenance_readiness(
                 count=len(outside),
             ))
 
+    # Project-scoped readiness shadows utterance_mappings with a TEMP VIEW. Use
+    # main explicitly here so valid provenance rows from other projects are not
+    # falsely reported as orphans. Orphan referential integrity remains global,
+    # consistent with the other database-level FK checks in project readiness.
     if "utterance_mapping_provenance" in tables:
         orphan_rows = con.execute(
             """
             SELECT ump.mapping_id
-            FROM utterance_mapping_provenance ump
-            LEFT JOIN utterance_mappings um ON um.id=ump.mapping_id
+            FROM main.utterance_mapping_provenance ump
+            LEFT JOIN main.utterance_mappings um ON um.id=ump.mapping_id
             WHERE um.id IS NULL
             ORDER BY ump.mapping_id
             """
