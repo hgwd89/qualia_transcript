@@ -47,6 +47,9 @@ jobs:
       - name: Run semantic durable job regression
         run: python tests/smoke_semantic_analysis_job_fencing.py
 
+      - name: Run semantic source provenance regression
+        run: python tests/smoke_semantic_source_provenance.py
+
       - name: Run canonical AI service guard regression
         run: python tests/smoke_ai_result_service_guards.py
 
