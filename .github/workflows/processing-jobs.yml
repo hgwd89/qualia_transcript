@@ -95,6 +95,9 @@ jobs:
       - name: Run role normalization regression
         run: python tests/smoke_role_normalization.py
 
+      - name: Run integrated preview canonical speaker regression
+        run: python tests/smoke_integrated_preview_canonical_speakers.py
+
       - name: Run durable interview job UI regression
         run: python tests/smoke_interview_job_ui.py
 
