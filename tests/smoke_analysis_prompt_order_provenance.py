@@ -73,14 +73,14 @@ def main() -> int:
                 q_b = InterviewFlowQuestion(
                     id=20,
                     section_id=20,
-                    question_code="QB",
+                    question_code=None,
                     question_text="Question B",
                     seq=1,
                 )
                 q_a2 = InterviewFlowQuestion(
                     id=11,
                     section_id=10,
-                    question_code="QA2",
+                    question_code="",
                     question_text="Question A2",
                     seq=1,
                 )
@@ -96,7 +96,7 @@ def main() -> int:
                 participant_high = Participant(
                     id=20,
                     project_id=project_id,
-                    participant_code="P_HIGH",
+                    participant_code="",
                     display_name="High",
                 )
                 participant_low = Participant(
@@ -235,6 +235,15 @@ def main() -> int:
                         result_write_guard=lambda: None,
                     )
 
+                    # Empty participant code must normalize to the same value used
+                    # by per-question provenance rather than leaking a raw empty or
+                    # Python-specific representation into the provider prompt.
+                    analyzer.analyze_per_question(
+                        20,
+                        20,
+                        result_write_guard=lambda: None,
+                    )
+
                     # Deliberately scramble already-loaded relationship collections.
                     # The provider path must canonicalize them locally instead of
                     # trusting incidental ORM collection order.
@@ -242,7 +251,7 @@ def main() -> int:
                     project.interviews[:] = list(reversed(project.interviews))
                     analyzer.analyze_cross_participants(
                         project_id,
-                        10,
+                        20,
                         result_write_guard=lambda: None,
                     )
 
@@ -260,6 +269,7 @@ def main() -> int:
                     analyzer.call_structured = original_call
 
                 summary_user = next(user for name, user in captured if name == "summary_result")
+                per_question_user = next(user for name, user in captured if name == "analysis_result")
                 cross_user = next(user for name, user in captured if name == "cross_analysis_result")
                 integrated_user = next(user for name, user in captured if name == "integrated_result")
 
@@ -269,21 +279,41 @@ def main() -> int:
                     summary_user,
                 )
                 failures += check(
+                    "per-question prompt canonicalizes empty participant code",
+                    "P??:「HIGH-B response with enough content」" in per_question_user
+                    and "None:" not in per_question_user,
+                    per_question_user,
+                )
+                failures += check(
                     "cross-participant provider prompt follows canonical interview ID order",
-                    cross_user.find("P_LOW:") < cross_user.find("P_HIGH:"),
+                    cross_user.find("LOW-B response") < cross_user.find("HIGH-B response"),
+                    cross_user,
+                )
+                failures += check(
+                    "cross-participant prompt canonicalizes empty participant/question codes",
+                    "【質問】[Q20] Question B" in cross_user
+                    and "None" not in cross_user,
                     cross_user,
                 )
                 failures += check(
                     "integrated provider prompt follows canonical section/question order",
                     integrated_user.find("【Section A】")
                     < integrated_user.find("[QA1]")
-                    < integrated_user.find("[QA2]")
-                    < integrated_user.find("【Section B】"),
+                    < integrated_user.find("[Q11]")
+                    < integrated_user.find("【Section B】")
+                    < integrated_user.find("[Q20]"),
                     integrated_user,
                 )
                 failures += check(
                     "integrated provider prompt follows canonical interview ID order inside questions",
-                    integrated_user.find("P_LOW:") < integrated_user.find("P_HIGH:"),
+                    integrated_user.find("LOW-B response") < integrated_user.find("HIGH-B response"),
+                    integrated_user,
+                )
+                failures += check(
+                    "integrated prompt canonicalizes empty participant/question codes",
+                    "[Q11] Question A2" in integrated_user
+                    and "[Q20] Question B" in integrated_user
+                    and "None" not in integrated_user,
                     integrated_user,
                 )
 
