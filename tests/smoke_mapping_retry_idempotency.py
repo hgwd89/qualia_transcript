@@ -34,9 +34,18 @@ def main() -> int:
             from app import create_app
             from models import db
             from models.interview import Interview
+            from models.interview_flow import (
+                InterviewFlow,
+                InterviewFlowQuestion,
+                InterviewFlowSection,
+            )
             from models.processing_job import ProcessingJob
             from models.project import Project
-            from models.segment import Segment, UtteranceMapping
+            from models.segment import Segment, UtteranceMapping, UtteranceMappingProvenance
+            from services.mapping_source_provenance import (
+                capture_mapping_source_provenance,
+                serialize_mapping_source_provenance,
+            )
             from services.processing_jobs import execute_job, retry_failed_job
             import services.mapper as mapper_service
 
@@ -47,7 +56,21 @@ def main() -> int:
                 project = Project(name="Mapping retry idempotency")
                 db.session.add(project)
                 db.session.flush()
-                interview = Interview(project_id=project.id, status="mapped")
+                flow = InterviewFlow(project_id=project.id, title="Retry flow")
+                db.session.add(flow)
+                db.session.flush()
+                section = InterviewFlowSection(flow_id=flow.id, title="Retry section", seq=0)
+                db.session.add(section)
+                db.session.flush()
+                question = InterviewFlowQuestion(
+                    section_id=section.id,
+                    question_code="Q1",
+                    question_text="Retry question",
+                    seq=0,
+                )
+                db.session.add(question)
+                db.session.flush()
+                interview = Interview(project_id=project.id, flow_id=flow.id, status="mapped")
                 db.session.add(interview)
                 db.session.flush()
                 segment = Segment(
@@ -81,6 +104,13 @@ def main() -> int:
                     created_at=datetime.now(timezone.utc),
                 )
                 db.session.add(mapping)
+                db.session.flush()
+                db.session.add(UtteranceMappingProvenance(
+                    mapping_id=mapping.id,
+                    source_provenance_json=serialize_mapping_source_provenance(
+                        capture_mapping_source_provenance(interview.id)
+                    ),
+                ))
                 db.session.commit()
                 crashed_job_id = crashed_job.id
 
@@ -100,7 +130,7 @@ def main() -> int:
 
                 result = completed.to_dict().get("result") or {}
                 failures += check(
-                    "retry reuses mapping committed before worker crash",
+                    "retry reuses provenance-valid mapping committed before worker crash",
                     completed.status == "succeeded"
                     and result.get("mapped_count") == 1
                     and result.get("already_done") is True
