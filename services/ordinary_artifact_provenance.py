@@ -67,6 +67,22 @@ def _participant_manifest(participant, *, include_attributes: bool) -> dict | No
     return payload
 
 
+def _verbatim_referenced_participants(interview) -> list[dict]:
+    """Fingerprint every participant identity that can become a rendered speaker name."""
+    by_id = {}
+    candidates = [interview.participant]
+    candidates.extend(segment.participant for segment in interview.segments)
+    candidates.extend(assignment.participant for assignment in interview.speaker_assignments)
+    for participant in candidates:
+        if participant is None:
+            continue
+        by_id[int(participant.id)] = participant
+    return [
+        _participant_manifest(by_id[participant_id], include_attributes=False)
+        for participant_id in sorted(by_id)
+    ]
+
+
 def _speaker_assignment_manifest(interview) -> list[dict]:
     return [
         {
@@ -221,6 +237,7 @@ def build_ordinary_artifact_source_manifest(
             include_flags=True,
             include_assignments=True,
         )
+        base["rendered_speaker_participants"] = _verbatim_referenced_participants(interview)
         return base
 
     interviews = sorted(project.interviews, key=lambda row: int(row.id or 0))
