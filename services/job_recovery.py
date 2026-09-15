@@ -94,7 +94,7 @@ def stale_reason(
 
     No-PID jobs get a startup grace period for the *current active attempt*.
     `started_at` is that attempt anchor when present (retry admission records it,
-    and worker claim refreshes it); first-time pending jobs fall back to their
+    and worker claim refreshes it); first-time pending rows fall back to their
     creation time. PID-backed jobs are recovered only when the OS confirms that
     the worker process is no longer alive. A live or inconclusive PID is never
     released automatically.
@@ -121,12 +121,11 @@ def stale_reason(
 
 
 def _unchanged_active_query(job: ProcessingJob):
-    """Return a CAS query for the exact active state recovery inspected.
+    """Return a CAS query for the exact active row generation recovery inspected.
 
-    `started_at` is part of the token because retry admission can reuse the same
-    durable row while leaving status, attempt_count, and worker_pid unchanged.
-    Without the current-attempt anchor, a stale recovery observation could match
-    a later `failed -> pending` retry cycle before the worker increments attempt.
+    `created_at` pins durable-row identity. `started_at` pins the current active
+    attempt because retry admission can reuse the same row while leaving status,
+    attempt_count, and worker_pid unchanged until the next worker claim.
     """
     query = (
         ProcessingJob.query
@@ -134,6 +133,10 @@ def _unchanged_active_query(job: ProcessingJob):
         .filter(ProcessingJob.status == str(job.status))
         .filter(ProcessingJob.attempt_count == int(job.attempt_count or 0))
     )
+    if job.created_at is None:
+        query = query.filter(ProcessingJob.created_at.is_(None))
+    else:
+        query = query.filter(ProcessingJob.created_at == job.created_at)
     if job.worker_pid is None:
         query = query.filter(ProcessingJob.worker_pid.is_(None))
     else:
@@ -151,11 +154,11 @@ def _mark_job_failed_if_unchanged(
 ) -> tuple[ProcessingJob, bool]:
     """Fail only the exact active job state that recovery inspected.
 
-    Recovery performs an OS liveness check outside the database transaction.
+    Recovery performs observations outside the database write transaction.
     During that gap the worker may finish, a launcher may attach a PID, or the
-    job may be retried and claimed by a newer attempt. Treat the observed
-    status/attempt/PID/current-attempt anchor as a compare-and-swap token so an
-    old recovery decision cannot overwrite newer durable state.
+    job may be retried and claimed by a newer attempt. Treat the observed durable
+    row identity/status/attempt/PID/current-attempt anchor as a compare-and-swap
+    token so an old recovery decision cannot overwrite newer durable state.
     """
     if str(job.status) not in ACTIVE_STATUSES:
         db.session.expire_all()
@@ -176,6 +179,14 @@ def _mark_job_failed_if_unchanged(
     db.session.expire_all()
     current = db.session.get(ProcessingJob, int(job.id))
     return (current or job), updated == 1
+
+
+def mark_job_failed_if_unchanged(
+    job: ProcessingJob,
+    reason: str,
+) -> tuple[ProcessingJob, bool]:
+    """Public compare-and-swap recovery primitive for operator/admin callers."""
+    return _mark_job_failed_if_unchanged(job, reason)
 
 
 def _mark_job_succeeded_if_unchanged(
