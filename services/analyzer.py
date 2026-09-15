@@ -147,7 +147,7 @@ def analyze_per_question(
 
     segments = _mapped_respondent_segments(interview_id, question_id)
     participant = interview.participant
-    code = participant.participant_code if participant else "P??"
+    code = (participant.participant_code or "P??") if participant else "P??"
     utterances = "\n".join(f'- {code}:「{segment.text}」' for segment in segments)
 
     system = (
@@ -239,7 +239,7 @@ def analyze_interview_summary(
     segments = (
         Segment.query
         .filter_by(interview_id=interview_id, speaker_role="respondent")
-        .order_by(Segment.seq)
+        .order_by(Segment.seq.asc(), Segment.id.asc())
         .all()
     )
     full_text = "\n".join(f'- 「{s.text}」' for s in segments)
@@ -318,13 +318,13 @@ def analyze_cross_participants(
     )
 
     utterances_by_participant = []
-    for interview in project.interviews:
+    for interview in sorted(project.interviews, key=lambda row: int(row.id)):
         if interview.flow_id is None or int(interview.flow_id) != question_flow_id:
             continue
         participant = interview.participant
         if not participant:
             continue
-        code = participant.participant_code
+        code = str(participant.participant_code or "")
 
         segments = _mapped_respondent_segments(interview.id, question_id)
         if segments:
@@ -343,7 +343,7 @@ def analyze_cross_participants(
         "発言にない内容を断定せず、推測は推測として明記してください。"
     )
     user = (
-        f"【質問】[{question.question_code}] {question.question_text}\n\n"
+        f"【質問】[{_canonical_question_code(question)}] {question.question_text}\n\n"
         f"【参加者別発言】\n{utterance_text}\n\n"
         "共通点・相違点・注目発言・マーケティング示唆を分析してください。"
     )
@@ -412,26 +412,26 @@ def analyze_project_integrated(
     sections_data = []
     source_question_ids: list[int] = []
     allowed_question_codes: set[str] = set()
-    for section in flow.sections:
+    for section in sorted(flow.sections, key=lambda row: (int(row.seq), int(row.id))):
         questions_data = []
-        for q in section.questions:
+        for q in sorted(section.questions, key=lambda row: (int(row.seq), int(row.id))):
             source_question_ids.append(int(q.id))
             allowed_question_codes.add(_canonical_question_code(q))
             utterances_by_p = []
-            for interview in project.interviews:
+            for interview in sorted(project.interviews, key=lambda row: int(row.id)):
                 if int(interview.id) not in source_interview_ids:
                     continue
                 participant = interview.participant
                 if not participant:
                     continue
-                code = participant.participant_code
+                code = str(participant.participant_code or "")
                 segments = _mapped_respondent_segments(interview.id, q.id)
                 if segments:
                     texts = "／".join(f'「{segment.text}」' for segment in segments)
                     utterances_by_p.append(f"{code}: {texts}")
             if utterances_by_p:
                 questions_data.append(
-                    f"[{q.question_code}] {q.question_text}\n" + "\n".join(utterances_by_p)
+                    f"[{_canonical_question_code(q)}] {q.question_text}\n" + "\n".join(utterances_by_p)
                 )
         if questions_data:
             sections_data.append(f"【{section.title}】\n" + "\n\n".join(questions_data))
