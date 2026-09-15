@@ -19,10 +19,7 @@ from services.product_hint import lookup_product_hints, render_inline_hint
 from services.upload_manager import save_and_register_media
 from services.research_input_guard import (
     ResearchInputWriteBlocked,
-    begin_interview_input_write,
-)
-from services.research_input_guard import (
-    ResearchInputWriteBlocked,
+    begin_interview_collection_write,
     begin_interview_input_write,
 )
 
@@ -31,14 +28,6 @@ bp = Blueprint("interviews", __name__)
 ALLOWED = config.ALLOWED_AUDIO_EXTENSIONS
 FLAG_TYPES = ("favorite", "quote", "exclude", "needs_review")
 SPEAKER_ROLES = ("moderator", "respondent", "observer", "unknown")
-
-
-def _input_write_blocked_response(exc: ResearchInputWriteBlocked):
-    return jsonify({
-        "ok": False,
-        "error": "処理中のジョブが分析入力を使用しているため、完了または失敗後に変更してください。",
-        "active_job_ids": list(exc.active_job_ids),
-    }), 409
 
 
 def _input_write_blocked_response(exc: ResearchInputWriteBlocked):
@@ -82,14 +71,59 @@ def new(project_id):
                 .filter_by(id=participant_id, project_id=project_id)
                 .first_or_404()
             )
-            participant_id = participant.id
+            participant_id = int(participant.id)
         if flow_id is not None:
             flow = (
                 InterviewFlow.query
                 .filter_by(id=flow_id, project_id=project_id)
                 .first_or_404()
             )
-            flow_id = flow.id
+            flow_id = int(flow.id)
+
+        try:
+            project = begin_interview_collection_write(
+                project_id,
+                affects_integrated_scope=participant_id is not None,
+            )
+        except ResearchInputWriteBlocked as exc:
+            flash(
+                "処理中のジョブがインタビュー集合を使用しているため、完了または失敗後に登録してください。"
+                f" (job: {', '.join(str(value) for value in exc.active_job_ids)})",
+                "error",
+            )
+            return render_template(
+                "interviews/new.html",
+                project=project,
+                participants=participants,
+                flows=flows,
+            ), 409
+        except ValueError:
+            db.session.rollback()
+            return "project not found", 404
+
+        # The earlier lookups were only preflight validation. Re-resolve every
+        # cross-table reference under the same BEGIN IMMEDIATE reservation that
+        # serializes this collection write with durable job admission.
+        if participant_id is not None:
+            participant = (
+                Participant.query
+                .filter_by(id=int(participant_id), project_id=int(project.id))
+                .first()
+            )
+            if participant is None:
+                db.session.rollback()
+                return "participant not found", 404
+            participant_id = int(participant.id)
+        if flow_id is not None:
+            flow = (
+                InterviewFlow.query
+                .filter_by(id=int(flow_id), project_id=int(project.id))
+                .first()
+            )
+            if flow is None:
+                db.session.rollback()
+                return "flow not found", 404
+            flow_id = int(flow.id)
 
         interview = Interview(
             project_id=project_id,
