@@ -19,6 +19,9 @@ from services.file_manager import (
     prepare_output_target,
     register_generated_file,
 )
+from services.generated_file_source_provenance import (
+    capture_generated_file_source_provenance,
+)
 
 
 def _build_rows(project_id: int) -> list[list]:
@@ -26,7 +29,6 @@ def _build_rows(project_id: int) -> list[list]:
     project      = Project.query.get(project_id)
     interviews   = Interview.query.filter_by(project_id=project_id).all()
 
-    # 属性キー一覧（全参加者の union）
     attr_keys = []
     for iv in interviews:
         if iv.participant:
@@ -83,6 +85,10 @@ def _build_rows(project_id: int) -> list[list]:
 
 
 def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
+    source_provenance = capture_generated_file_source_provenance(
+        "analysis",
+        int(project_id),
+    )
     rows    = _build_rows(project_id)
     project = Project.query.get(project_id)
 
@@ -94,7 +100,6 @@ def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
         for c_idx, val in enumerate(row, 1):
             ws.cell(r_idx, c_idx, val)
 
-    # ヘッダー書式
     for cell in ws[1]:
         cell.font = Font(bold=True, color="FFFFFF")
         cell.fill = PatternFill("solid", fgColor="2E4057")
@@ -114,10 +119,15 @@ def generate_analysis_xlsx(project_id: int) -> GeneratedFile:
         project_id=project_id,
         file_type="analysis",
         file_format="xlsx",
+        source_provenance=source_provenance,
     )
 
 
 def generate_analysis_csv(project_id: int) -> GeneratedFile:
+    source_provenance = capture_generated_file_source_provenance(
+        "analysis",
+        int(project_id),
+    )
     rows    = _build_rows(project_id)
     project = Project.query.get(project_id)
 
@@ -143,4 +153,5 @@ def generate_analysis_csv(project_id: int) -> GeneratedFile:
         project_id=project_id,
         file_type="analysis",
         file_format="csv",
+        source_provenance=source_provenance,
     )
