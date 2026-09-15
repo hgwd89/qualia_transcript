@@ -26,6 +26,13 @@ from services.fragmentation import (
     collect_candidate_segments,
 )
 from services.secret_store import get_secret_setting
+from services.semantic_source_provenance import (
+    SEMANTIC_PROVENANCE_KEY,
+    SEMANTIC_REQUEST_KEY,
+    SemanticSourceProvenanceError,
+    capture_semantic_source_provenance,
+    semantic_source_provenance_matches_scope,
+)
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 _QUESTION_END_RE = re.compile(r"[？?]\s*$")
@@ -279,6 +286,19 @@ def run_semantic_cluster_analysis(
     if save and result_write_guard is None:
         raise RuntimeError("semantic analysis save requires a durable result-write guard")
 
+    semantic_request = {
+        "max_segments": int(max_segments) if max_segments is not None else None,
+        "no_ai": bool(no_ai),
+    }
+    source_provenance = None
+    if save:
+        source_provenance = capture_semantic_source_provenance(
+            int(interview.project_id),
+            int(interview.id),
+            max_segments=semantic_request["max_segments"],
+            no_ai=semantic_request["no_ai"],
+        )
+
     candidates = collect_candidate_segments(interview_id)
     if max_segments:
         candidates = candidates[:max_segments]
@@ -439,6 +459,7 @@ def run_semantic_cluster_analysis(
             if q
         ])),
         "evidence_quotes": evidence_quotes,
+        SEMANTIC_REQUEST_KEY: semantic_request,
         "models": {
             "embedding_model": EMBEDDING_MODEL,
             "summary_model": None if no_ai else CHAT_MODEL,
@@ -450,6 +471,17 @@ def run_semantic_cluster_analysis(
     saved_analysis_id = None
     if save:
         result_write_guard()
+        ok, reason = semantic_source_provenance_matches_scope(
+            source_provenance,
+            int(interview.project_id),
+            int(interview.id),
+            max_segments=semantic_request["max_segments"],
+            no_ai=semantic_request["no_ai"],
+        )
+        if not ok:
+            raise SemanticSourceProvenanceError(reason)
+        result_payload[SEMANTIC_PROVENANCE_KEY] = source_provenance
+
         analysis = AIAnalysis(
             project_id=interview.project_id,
             interview_id=interview.id,
