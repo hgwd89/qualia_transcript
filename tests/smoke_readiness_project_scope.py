@@ -333,8 +333,10 @@ def main() -> int:
 
     wrapper = (repo_root / "scripts" / "check_production_readiness.ps1").read_text(encoding="utf-8")
     failures += check(
-        "PowerShell readiness entrypoint routes --project-id to scoped audit",
-        "--project-id" in wrapper and "audit_production_readiness_project.py" in wrapper,
+        "PowerShell readiness entrypoint preserves --project-id through final ownership gate",
+        "audit_production_readiness_final.py" in wrapper
+        and "@args" in wrapper
+        and "audit_production_readiness_project.py" not in wrapper,
     )
 
     if failures:
