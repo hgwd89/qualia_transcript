@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, request, redirect, url_for, flash
+from flask import Blueprint, render_template, request, redirect, url_for, flash, abort
 from sqlalchemy.exc import IntegrityError
 
 from models import db
@@ -8,6 +8,8 @@ from models.analysis import AIAnalysis
 from models.processing_job import ProcessingJob
 from models.segment import UtteranceMapping
 from models.interview_flow import InterviewFlow, InterviewFlowSection, InterviewFlowQuestion
+from services.flow_input_guard import begin_flow_input_write
+from services.research_input_guard import ResearchInputWriteBlocked
 
 bp = Blueprint("flows", __name__)
 
@@ -47,6 +49,22 @@ def _question_code_conflict(flow_id: int, question_code: str) -> bool:
 def _duplicate_question_code_response(project: Project, flow: InterviewFlow):
     flash("同じインタビューフロー内で質問コードは重複できません", "error")
     return render_template("flows/detail.html", project=project, flow=flow), 409
+
+
+def _flow_input_write_blocked_response(
+    project_id: int,
+    exc: ResearchInputWriteBlocked,
+    *,
+    flow_id: int | None = None,
+):
+    ids = ", ".join(f"#{value}" for value in exc.active_job_ids)
+    flash(
+        f"処理中のジョブ（{ids}）がインタビューフローを使用しているため、完了または失敗後に変更してください",
+        "error",
+    )
+    if flow_id is None:
+        return redirect(url_for("flows.index", project_id=project_id))
+    return redirect(url_for("flows.detail", project_id=project_id, flow_id=flow_id))
 
 
 def _flow_usage_counts(flow_id: int) -> dict[str, int]:
@@ -89,6 +107,14 @@ def index(project_id):
 def new(project_id):
     project = Project.query.get_or_404(project_id)
     if request.method == "POST":
+        try:
+            project = begin_flow_input_write(project_id)
+        except ResearchInputWriteBlocked as exc:
+            return _flow_input_write_blocked_response(project_id, exc)
+        except ValueError:
+            db.session.rollback()
+            abort(404)
+
         flow = InterviewFlow(
             project_id=project_id,
             title=request.form.get("title", "").strip(),
@@ -112,7 +138,15 @@ def detail(project_id, flow_id):
 @bp.route("/projects/<int:project_id>/flows/<int:flow_id>/sections/new", methods=["POST"])
 def add_section(project_id, flow_id):
     Project.query.get_or_404(project_id)
-    flow = _get_project_flow_or_404(project_id, flow_id)
+    _get_project_flow_or_404(project_id, flow_id)
+    try:
+        flow = begin_flow_input_write(project_id, flow_id)
+    except ResearchInputWriteBlocked as exc:
+        return _flow_input_write_blocked_response(project_id, exc, flow_id=flow_id)
+    except ValueError:
+        db.session.rollback()
+        abort(404)
+
     seq = len(flow.sections) + 1
     section = InterviewFlowSection(
         flow_id=flow.id,
@@ -129,12 +163,38 @@ def add_section(project_id, flow_id):
 @bp.route("/projects/<int:project_id>/flows/<int:flow_id>/sections/<int:section_id>/questions/new",
           methods=["POST"])
 def add_question(project_id, flow_id, section_id):
-    project = Project.query.get_or_404(project_id)
-    flow = _get_project_flow_or_404(project_id, flow_id)
-    section = _get_flow_section_or_404(flow.id, section_id)
+    Project.query.get_or_404(project_id)
+    _get_project_flow_or_404(project_id, flow_id)
+    _get_flow_section_or_404(flow_id, section_id)
+
+    try:
+        flow = begin_flow_input_write(
+            project_id,
+            flow_id,
+            affects_question_set=True,
+        )
+    except ResearchInputWriteBlocked as exc:
+        return _flow_input_write_blocked_response(project_id, exc, flow_id=flow_id)
+    except ValueError:
+        db.session.rollback()
+        abort(404)
+
+    project = db.session.get(Project, int(project_id))
+    section = (
+        InterviewFlowSection.query
+        .filter_by(id=section_id, flow_id=flow.id)
+        .first()
+    )
+    if project is None or section is None:
+        db.session.rollback()
+        abort(404)
+
     seq = len(section.questions) + 1
     question_code = request.form.get("question_code", "").strip() or f"Q{section.seq}-{seq}"
     if _question_code_conflict(flow.id, question_code):
+        db.session.rollback()
+        project = Project.query.get_or_404(project_id)
+        flow = _get_project_flow_or_404(project_id, flow_id)
         return _duplicate_question_code_response(project, flow)
 
     q = InterviewFlowQuestion(
@@ -150,6 +210,7 @@ def add_question(project_id, flow_id, section_id):
         db.session.commit()
     except IntegrityError:
         db.session.rollback()
+        project = Project.query.get_or_404(project_id)
         flow = _get_project_flow_or_404(project_id, flow_id)
         return _duplicate_question_code_response(project, flow)
 
@@ -160,9 +221,23 @@ def add_question(project_id, flow_id, section_id):
 @bp.route("/projects/<int:project_id>/flows/<int:flow_id>/delete", methods=["POST"])
 def delete(project_id, flow_id):
     Project.query.get_or_404(project_id)
-    flow = _get_project_flow_or_404(project_id, flow_id)
+    _get_project_flow_or_404(project_id, flow_id)
+
+    try:
+        flow = begin_flow_input_write(
+            project_id,
+            flow_id,
+            affects_question_set=True,
+        )
+    except ResearchInputWriteBlocked as exc:
+        return _flow_input_write_blocked_response(project_id, exc, flow_id=flow_id)
+    except ValueError:
+        db.session.rollback()
+        abort(404)
+
     usage = _flow_usage_counts(flow.id)
     if any(usage.values()):
+        db.session.rollback()
         flash(
             "このインタビューフローはインタビュー／マッピング／分析／処理ジョブで使用されているため削除できません",
             "error",
