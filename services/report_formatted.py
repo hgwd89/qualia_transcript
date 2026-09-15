@@ -101,7 +101,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
                 if assignment.speaker_label:
                     assignment_maps[int(assignment.interview_id)][assignment.speaker_label] = assignment
 
-        flows = sorted(project.interview_flows, key=lambda f: f.id or 0)
+        flows = sorted(project.interview_flows, key=lambda f: int(f.id or 0))
         if not flows:
             raise ValueError("インタビューフローが設定されていません")
         multiple_flows = len(flows) > 1
@@ -144,13 +144,13 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
         max_col = 3 + (len(interviews) * 2)
         row = 2
         for flow in flows:
-            for section in flow.sections:
+            for section in sorted(flow.sections, key=lambda item: (int(item.seq), int(item.id))):
                 section_label = (
                     f"{flow.title} / {section.title}"
                     if multiple_flows
                     else section.title
                 )
-                for q in section.questions:
+                for q in sorted(section.questions, key=lambda item: (int(item.seq), int(item.id))):
                     ws.cell(row, 1, section_label)
                     ws.cell(row, 2, q.question_code)
                     ws.cell(row, 3, q.question_text).alignment = Alignment(wrap_text=True)
@@ -165,7 +165,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
                             .filter_by(question_id=q.id)
                             .join(Segment, UtteranceMapping.segment_id == Segment.id)
                             .filter(Segment.interview_id == iv.id)
-                            .order_by(Segment.seq.asc(), UtteranceMapping.id.asc())
+                            .order_by(Segment.seq.asc(), Segment.id.asc(), UtteranceMapping.id.asc())
                             .all()
                         )
                         assignment_map = assignment_maps.get(int(iv.id), {})
@@ -228,7 +228,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
             code = p.participant_code if p and p.participant_code else "?"
             date = iv.interview_date.isoformat() if iv.interview_date else ""
             assignment_map = assignment_maps.get(int(iv.id), {})
-            for seg in sorted(iv.segments, key=lambda s: (s.seq, s.id or 0)):
+            for seg in sorted(iv.segments, key=lambda s: (int(s.seq), int(s.id or 0))):
                 if _effective_role(seg, assignment_map) != "respondent" or not _is_unclassified(seg):
                     continue
                 flag_map = _segment_flag_map(seg)
