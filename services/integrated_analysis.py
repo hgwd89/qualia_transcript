@@ -145,10 +145,12 @@ def _collect_speaker_assignment_map(interview_id: int) -> dict[str, SpeakerAssig
 
 
 def _effective_role(seg: Segment, assignment_map: dict[str, SpeakerAssignment]) -> str:
-    assignment = assignment_map.get(seg.speaker_label or "")
-    if assignment and assignment.speaker_role:
-        return assignment.speaker_role
-    return seg.speaker_role or "unknown"
+    """Return the canonical Segment role; assignments are review metadata only."""
+    _ = assignment_map
+    role = str(seg.speaker_role or "unknown").strip().lower()
+    if role == "interviewer":
+        return "moderator"
+    return role or "unknown"
 
 
 def _resolve_participant_info(
@@ -157,14 +159,9 @@ def _resolve_participant_info(
     assignment_map: dict[str, SpeakerAssignment],
     participant_map: dict[int, Participant],
 ) -> tuple[int | None, str | None, str | None]:
-    assignment = assignment_map.get(seg.speaker_label or "")
-    participant_id = None
-    if assignment and assignment.participant_id:
-        participant_id = assignment.participant_id
-    elif seg.participant_id:
-        participant_id = seg.participant_id
-    elif interview.participant_id:
-        participant_id = interview.participant_id
+    """Resolve participant from canonical Segment state, then DI interview fallback."""
+    _ = assignment_map
+    participant_id = seg.participant_id or interview.participant_id
 
     participant = participant_map.get(participant_id) if participant_id else None
     if not participant:
@@ -248,7 +245,7 @@ def _build_no_ai_result(
         flags = flag_map.get(seg.id, set())
         role = _effective_role(seg, assignment_map)
 
-        if role in ("moderator", "observer"):
+        if role != "respondent":
             excluded_segment_count += 1
             excluded_by_reason["non_respondent_role"] += 1
             continue
