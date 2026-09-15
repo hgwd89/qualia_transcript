@@ -46,10 +46,11 @@ class UtteranceMapping(db.Model):
     id               = db.Column(db.Integer, primary_key=True)
     segment_id       = db.Column(db.Integer, db.ForeignKey("segments.id"), nullable=False)
     question_id      = db.Column(db.Integer, db.ForeignKey("interview_flow_questions.id"))  # NULL = 未分類
-    mapped_by        = db.Column(db.Text, default="ai")    # ai / manual
+    mapped_by        = db.Column(db.Text, default="ai")    # ai / human
     confidence       = db.Column(db.Float)                 # 0.0〜1.0
     is_unclassified  = db.Column(db.Boolean, default=False)
     notes            = db.Column(db.Text)
+    source_provenance_json = db.Column(db.Text)
     created_at       = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
     segment  = db.relationship("Segment",               back_populates="utterance_mappings")
@@ -63,4 +64,5 @@ class UtteranceMapping(db.Model):
             "mapped_by": self.mapped_by,
             "confidence": self.confidence,
             "is_unclassified": self.is_unclassified,
+            "source_provenance_json": self.source_provenance_json,
         }
