@@ -6,6 +6,7 @@ from models.processing_job import ProcessingJob
 from models.project import Project
 from services.job_admission import admit_processing_job, admit_retry_job
 from services.job_recovery import recover_stale_jobs
+from services.media_source import canonical_media_for_interview
 from services.worker_launch_guard import launch_job_or_preserve_active
 
 bp = Blueprint("transcribe", __name__)
@@ -52,10 +53,10 @@ def _resolve_admission(admission):
 def start_transcription(interview_id):
     interview = Interview.query.get_or_404(interview_id)
     project_id = int(interview.project_id)
-    if not interview.media_files:
+    media = canonical_media_for_interview(interview.id)
+    if media is None:
         return jsonify({"error": "音声ファイルが登録されていません"}), 400
 
-    media = interview.media_files[-1]
     existing = (
         Transcription.query
         .filter_by(media_file_id=media.id, status="done")
@@ -142,10 +143,11 @@ def get_status(interview_id):
     recover_stale_jobs(project_id=interview.project_id)
 
     tr = None
-    if interview.media_files:
+    media = canonical_media_for_interview(interview.id)
+    if media is not None:
         tr = (
             Transcription.query
-            .filter_by(media_file_id=interview.media_files[-1].id)
+            .filter_by(media_file_id=media.id)
             .order_by(Transcription.id.desc())
             .first()
         )
