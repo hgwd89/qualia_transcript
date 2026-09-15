@@ -175,9 +175,12 @@ def _resolve_participant_info(
     assignment_map: dict[str, SpeakerAssignment],
     participant_map: dict[int, Participant],
 ) -> tuple[int | None, str | None, str | None]:
-    """Resolve participant from canonical Segment state, then DI interview fallback."""
+    """Resolve canonical participant; only DI may fall back to Interview.participant."""
     _ = assignment_map
-    participant_id = seg.participant_id or interview.participant_id
+    participant_id = seg.participant_id
+    method = str(interview.project.method or "DI").strip().upper() if interview.project else "DI"
+    if participant_id is None and method != "FGI":
+        participant_id = interview.participant_id
 
     participant = participant_map.get(participant_id) if participant_id else None
     if not participant:
@@ -233,6 +236,7 @@ def _build_no_ai_result(
 
     participant_rows = Participant.query.filter_by(project_id=interview.project_id).all()
     participant_map = {p.id: p for p in participant_rows}
+    project_method = str(interview.project.method or "DI").strip().upper() if interview.project else "DI"
 
     assignment_map = _collect_speaker_assignment_map(interview_id)
     flag_map = _collect_flag_map(interview_id)
@@ -275,6 +279,8 @@ def _build_no_ai_result(
             excluded_by_reason["needs_review_flag"] += 1
             cautions.append(f"segment-{seg.id} is marked needs_review and excluded from evidence")
             continue
+        if project_method == "FGI" and seg.participant_id is None:
+            cautions.append(f"FGI respondent segment-{seg.id} has no participant attribution")
 
         candidate_segments.append(seg)
         candidate_flags[seg.id] = set(flags)
