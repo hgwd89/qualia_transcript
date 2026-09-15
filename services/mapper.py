@@ -2,10 +2,17 @@
 発言セグメント → 質問項目への AI 自動マッピング。
 """
 from collections.abc import Callable
+
 from models import db
-from models.interview import Interview
-from models.segment import Segment, UtteranceMapping
+from models.segment import UtteranceMapping, UtteranceMappingProvenance
 from services.ai_client import call_structured
+from services.mapping_source_provenance import (
+    MappingSourceProvenanceError,
+    build_mapping_source_manifest,
+    capture_mapping_source_provenance,
+    mapping_source_provenance_status,
+    serialize_mapping_source_provenance,
+)
 
 MIN_CONFIDENCE_CLASSIFIED = 0.65
 ResultWriteGuard = Callable[[], object]
@@ -44,14 +51,7 @@ def _normalize_provider_mappings(
     allowed_segment_ids: set[int],
     allowed_question_ids: set[int],
 ) -> list[dict]:
-    """Validate provider IDs/completeness before any canonical replacement.
-
-    Foreign but otherwise valid primary keys must never be accepted merely because
-    database foreign-key constraints can resolve them. A mapping result is valid
-    only when it contains exactly one row for every respondent segment in the
-    requested interview and every non-null question belongs to that interview's
-    selected flow.
-    """
+    """Validate provider IDs/completeness before any canonical replacement."""
     normalized_mappings: list[dict] = []
     seen_segment_ids: set[int] = set()
 
@@ -107,49 +107,38 @@ def run_mapping(
     *,
     result_write_guard: ResultWriteGuard | None = None,
 ) -> int:
-    """
-    interview に紐づく全発言を質問項目にマッピングして DB 保存。
-    戻り値: マッピング件数
-
-    Canonical AI mappings may only be saved by a durable worker. The guard is
-    required before provider work starts, then invoked again immediately before
-    the canonical replacement commit to verify the current attempt lease.
-    """
-    interview = Interview.query.get(interview_id)
-    if not interview or not interview.flow_id:
-        return 0
-
-    # 発言（respondent のみ対象）。Historical duplicate seq values are possible,
-    # so ID is the deterministic tie-breaker for the provider input order.
-    segments = (
-        Segment.query
-        .filter_by(interview_id=interview_id, speaker_role="respondent")
-        .order_by(Segment.seq.asc(), Segment.id.asc())
-        .all()
-    )
-    if not segments:
-        return 0
-
-    # フロー全質問を取得。Relationship order_by only contains seq, so add stable
-    # ID tie-breakers here to prevent historical duplicate seq values from changing
-    # the provider prompt order between runs.
-    flow = interview.flow
-    questions = []
-    for section in sorted(flow.sections, key=lambda value: (value.seq, value.id)):
-        questions.extend(sorted(section.questions, key=lambda value: (value.seq, value.id)))
-
-    if not questions:
-        return 0
-
+    """Map all respondent segments and persist one source-fenced AI generation."""
     if result_write_guard is None:
         raise RuntimeError("mapping save requires a durable result-write guard")
 
-    # プロンプト構築
+    # Build one immutable source view. Both the provider prompt and the persisted
+    # fingerprint derive from this same manifest so the claimed source cannot
+    # diverge from the bytes logically supplied to the provider.
+    source_manifest = build_mapping_source_manifest(int(interview_id))
+    segment_rows = list(source_manifest["segments"])
+    question_rows = list(source_manifest["questions"])
+    if not segment_rows or not question_rows:
+        return 0
+
+    source_provenance = capture_mapping_source_provenance(int(interview_id))
+    # capture_mapping_source_provenance re-queries by design for public callers.
+    # The provider generation must bind specifically to the manifest above, so
+    # reject any drift that occurred between those two source reads before the
+    # external call begins.
+    current, reason = mapping_source_provenance_status(
+        source_provenance,
+        interview_id=int(interview_id),
+    )
+    if not current:
+        raise MappingSourceProvenanceError(reason)
+
     q_list = "\n".join(
-        f'- id:{q.id} [{q.question_code}] {q.question_text}' for q in questions
+        f'- id:{row["id"]} [{row["question_code"]}] {row["question_text"]}'
+        for row in question_rows
     )
     seg_list = "\n".join(
-        f'- segment_id:{s.id} 「{s.text}」' for s in segments
+        f'- segment_id:{row["id"]} 「{row["text"]}」'
+        for row in segment_rows
     )
 
     system = (
@@ -172,18 +161,22 @@ def run_mapping(
     mappings = result.get("mappings", [])
     normalized_mappings = _normalize_provider_mappings(
         mappings,
-        allowed_segment_ids={int(segment.id) for segment in segments},
-        allowed_question_ids={int(question.id) for question in questions},
+        allowed_segment_ids={int(row["id"]) for row in segment_rows},
+        allowed_question_ids={int(row["id"]) for row in question_rows},
     )
 
-    # External work is complete. Verify the durable attempt lease before any
-    # existing canonical mapping is deleted or replaced.
+    # External work is complete. Verify durable lease first, then re-read the
+    # canonical source. A stale worker or changed source cannot delete/replace the
+    # prior mapping generation.
     result_write_guard()
+    current, reason = mapping_source_provenance_status(
+        source_provenance,
+        interview_id=int(interview_id),
+    )
+    if not current:
+        raise MappingSourceProvenanceError(reason)
 
-    # 既存マッピングを ORM 経由で削除し、DELETE を先に flush する。
-    # SQLite は削除直後の ROWID を再利用し得るため、bulk delete のまま新規
-    # mapping を追加すると同一 PK の stale object が identity map に残る。
-    seg_ids = [s.id for s in segments]
+    seg_ids = [int(row["id"]) for row in segment_rows]
     existing_mappings = (
         UtteranceMapping.query
         .filter(UtteranceMapping.segment_id.in_(seg_ids))
@@ -193,15 +186,27 @@ def run_mapping(
         db.session.delete(existing_mapping)
     db.session.flush()
 
+    serialized_provenance = serialize_mapping_source_provenance(source_provenance)
     for mapping in normalized_mappings:
-        db.session.add(UtteranceMapping(
+        row = UtteranceMapping(
             segment_id=mapping["segment_id"],
             question_id=mapping.get("question_id"),
             mapped_by="ai",
             confidence=mapping.get("confidence", 0.0),
             is_unclassified=mapping.get("is_unclassified", False),
+        )
+        db.session.add(row)
+        db.session.flush()
+        db.session.add(UtteranceMappingProvenance(
+            mapping_id=int(row.id),
+            source_provenance_json=serialized_provenance,
         ))
 
+    from models.interview import Interview
+    interview = db.session.get(Interview, int(interview_id))
+    if interview is None:
+        db.session.rollback()
+        raise MappingSourceProvenanceError("interview disappeared before mapping commit")
     interview.status = "mapped"
     db.session.commit()
     return len(normalized_mappings)
