@@ -23,6 +23,9 @@ from services.file_manager import (
     prepare_output_target,
     register_generated_file,
 )
+from services.generated_file_source_provenance import (
+    capture_generated_file_source_provenance,
+)
 
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F3864")
@@ -71,6 +74,10 @@ def _effective_role(seg: Segment, assignment_map: dict[str, SpeakerAssignment]) 
 
 
 def generate_formatted_sheet(project_id: int) -> GeneratedFile:
+    source_provenance = capture_generated_file_source_provenance(
+        "formatted_sheet",
+        int(project_id),
+    )
     project = Project.query.get(project_id)
     if not project:
         raise ValueError("project が見つかりません")
@@ -262,6 +269,7 @@ def generate_formatted_sheet(project_id: int) -> GeneratedFile:
         project_id=project_id,
         file_type="formatted_sheet",
         file_format="xlsx",
+        source_provenance=source_provenance,
     )
 
 
