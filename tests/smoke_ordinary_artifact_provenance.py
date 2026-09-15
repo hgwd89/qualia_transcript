@@ -19,6 +19,9 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
+    scripts_dir = repo_root / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
 
     import config
 
@@ -37,8 +40,10 @@ def main() -> int:
         config.OUTPUT_DIR = str(root / "outputs")
 
         try:
+            import audit_production_readiness_final as final_readiness
             from app import create_app
             from models import db
+            from models.generated_file import GeneratedFile
             from models.interview import Interview
             from models.interview_flow import (
                 InterviewFlow,
@@ -54,6 +59,9 @@ def main() -> int:
                 ORDINARY_PROVENANCE_KEY,
                 begin_ordinary_artifact_source_snapshot,
                 ordinary_artifact_currentness,
+            )
+            from services.ordinary_artifact_provenance_sqlite import (
+                ordinary_artifact_currentness_sqlite,
             )
             from services.report_analysis import generate_analysis_csv
             from services.report_formatted import generate_formatted_sheet
@@ -144,24 +152,60 @@ def main() -> int:
                 verbatim = generate_verbatim(interview_id)
                 formatted = generate_formatted_sheet(project_id)
                 analysis = generate_analysis_csv(project_id)
-                generated = [verbatim, formatted, analysis]
+                generated_ids = [int(verbatim.id), int(formatted.id), int(analysis.id)]
 
-                for item in generated:
-                    params = json.loads(item.generation_params_json or "{}")
-                    provenance = params.get(ORDINARY_PROVENANCE_KEY)
-                    failures += check(
-                        f"{item.file_type} stores source provenance and artifact hash",
-                        isinstance(provenance, dict)
-                        and bool(provenance.get("sha256"))
-                        and len(str(params.get("artifact_sha256") or "")) == 64,
-                        f"params={params}",
+                con = sqlite3.connect(str(db_path))
+                con.row_factory = sqlite3.Row
+                try:
+                    for file_id in generated_ids:
+                        item = db.session.get(GeneratedFile, file_id)
+                        params = json.loads(item.generation_params_json or "{}")
+                        provenance = params.get(ORDINARY_PROVENANCE_KEY)
+                        failures += check(
+                            f"{item.file_type} stores source provenance and artifact hash",
+                            isinstance(provenance, dict)
+                            and bool(provenance.get("sha256"))
+                            and len(str(params.get("artifact_sha256") or "")) == 64,
+                            f"params={params}",
+                        )
+                        status = ordinary_artifact_currentness(item)
+                        failures += check(
+                            f"{item.file_type} is current immediately after generation",
+                            status.provenance_present and status.current,
+                            status.reason,
+                        )
+                        sqlite_status = ordinary_artifact_currentness_sqlite(
+                            con,
+                            file_type=item.file_type,
+                            project_id=int(item.project_id),
+                            interview_id=(int(item.interview_id) if item.interview_id is not None else None),
+                            generation_params_json=item.generation_params_json,
+                        )
+                        failures += check(
+                            f"{item.file_type} ORM and readiness SQLite provenance agree",
+                            sqlite_status.provenance_present and sqlite_status.current,
+                            sqlite_status.reason,
+                        )
+
+                    report = {"blockers": [], "warnings": [], "info": {}}
+                    final_readiness._append_ordinary_artifact_currentness(
+                        report,
+                        con,
+                        project_id=project_id,
                     )
-                    status = ordinary_artifact_currentness(item)
                     failures += check(
-                        f"{item.file_type} is current immediately after generation",
-                        status.provenance_present and status.current,
-                        status.reason,
+                        "final readiness accepts current provenance-backed ordinary artifacts",
+                        not any(
+                            item.get("code") == "ordinary_artifact_currentness_invalid"
+                            for item in report.get("blockers", [])
+                        )
+                        and report.get("info", {})
+                        .get("ordinary_artifact_source_currentness", {})
+                        .get("current") == 3,
+                        f"report={report}",
                     )
+                finally:
+                    con.close()
 
                 begin_ordinary_artifact_source_snapshot(project_id)
                 second_write_blocked = False
@@ -188,9 +232,9 @@ def main() -> int:
                 segment.text = "canonical statement changed after generation"
                 db.session.commit()
 
-                for item in generated:
+                for file_id in generated_ids:
                     db.session.expire_all()
-                    item = db.session.get(type(item), int(item.id))
+                    item = db.session.get(GeneratedFile, file_id)
                     status = ordinary_artifact_currentness(item)
                     failures += check(
                         f"{item.file_type} becomes stale after canonical source mutation",
@@ -203,6 +247,29 @@ def main() -> int:
                         response.status_code == 409,
                         f"status={response.status_code}",
                     )
+
+                con = sqlite3.connect(str(db_path))
+                con.row_factory = sqlite3.Row
+                try:
+                    report = {"blockers": [], "warnings": [], "info": {}}
+                    final_readiness._append_ordinary_artifact_currentness(
+                        report,
+                        con,
+                        project_id=project_id,
+                    )
+                    failures += check(
+                        "final readiness blocks stale provenance-backed ordinary artifacts",
+                        any(
+                            item.get("code") == "ordinary_artifact_currentness_invalid"
+                            for item in report.get("blockers", [])
+                        )
+                        and report.get("info", {})
+                        .get("ordinary_artifact_source_currentness", {})
+                        .get("stale") == 3,
+                        f"report={report}",
+                    )
+                finally:
+                    con.close()
 
                 db.session.remove()
                 db.engine.dispose()
