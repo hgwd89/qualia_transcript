@@ -39,6 +39,15 @@ jobs:
       - name: Run generated-file registration boundary regression
         run: python tests/smoke_generated_file_registration_boundary.py
 
+      - name: Run generated-file project ownership regression
+        run: python tests/smoke_generated_file_project_ownership.py
+
+      - name: Run generated-file ownership serialization regression
+        run: python tests/smoke_generated_file_ownership_serialization.py
+
+      - name: Run final-readiness database change-detection regression
+        run: python tests/smoke_final_readiness_database_change_detection.py
+
       - name: Run approved-artifact currentness regression
         run: python tests/smoke_approved_artifact_currentness.py
 
@@ -116,6 +125,15 @@ jobs:
 
       - name: Run generated-file registration boundary regression
         run: python tests/smoke_generated_file_registration_boundary.py
+
+      - name: Run generated-file project ownership regression
+        run: python tests/smoke_generated_file_project_ownership.py
+
+      - name: Run generated-file ownership serialization regression
+        run: python tests/smoke_generated_file_ownership_serialization.py
+
+      - name: Run final-readiness database change-detection regression
+        run: python tests/smoke_final_readiness_database_change_detection.py
 
       - name: Run approved-artifact currentness regression
         run: python tests/smoke_approved_artifact_currentness.py

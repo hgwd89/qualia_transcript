@@ -7,9 +7,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from sqlalchemy import text
+
 import config
 from models import db
 from models.generated_file import GeneratedFile
+from models.interview import Interview
+from models.project import Project
+from services.generated_file_ownership import stored_path_project_id
 from services.managed_write_commit_guard import open_managed_write_commit_guard
 from services.storage_paths import (
     ManagedWriteFile,
@@ -100,12 +105,8 @@ def _unique_storage_name(filename: str) -> str:
 
 def _file_generation(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return (
-        int(info.st_dev),
-        int(info.st_ino),
-        int(info.st_mode),
-        int(info.st_size),
-        int(info.st_mtime_ns),
-        int(info.st_ctime_ns),
+        int(info.st_dev), int(info.st_ino), int(info.st_mode),
+        int(info.st_size), int(info.st_mtime_ns), int(info.st_ctime_ns),
     )
 
 
@@ -153,6 +154,67 @@ def generated_file_expected_sha256(gf: GeneratedFile) -> str | None:
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
         raise ValueError("generated-file artifact SHA-256 metadata is invalid")
     return digest
+
+
+def _begin_generated_file_registration(*, existing_write_reservation: bool) -> None:
+    """Serialize ownership validation with the GeneratedFile commit."""
+    if db.session.new or db.session.dirty or db.session.deleted:
+        raise RuntimeError("generated-file registration requires a clean database session")
+
+    if existing_write_reservation:
+        if not db.session().in_transaction():
+            raise RuntimeError("generated-file existing write reservation is not active")
+        return
+
+    db.session.rollback()
+    if db.engine.dialect.name == "sqlite":
+        db.session.execute(text("BEGIN IMMEDIATE"))
+
+
+def _validate_generated_file_ownership(
+    target: OutputTarget,
+    *,
+    project_id: int,
+    interview_id: int | None,
+) -> tuple[int, int | None]:
+    """Bind DB ownership metadata to the exact project-scoped output namespace."""
+    project_id = int(project_id)
+    if project_id <= 0:
+        raise ValueError("generated-file project_id must be positive")
+
+    if db.engine.dialect.name == "sqlite":
+        project = db.session.get(Project, project_id)
+    else:
+        project = Project.query.filter_by(id=project_id).with_for_update().first()
+    if project is None:
+        raise ValueError("generated-file project does not exist")
+
+    path_project_id = stored_path_project_id(target.stored_path)
+    if path_project_id != project_id:
+        raise ValueError(
+            "generated output stored_path project namespace does not match project_id"
+        )
+
+    normalized_interview_id = None
+    if interview_id is not None:
+        normalized_interview_id = int(interview_id)
+        if normalized_interview_id <= 0:
+            raise ValueError("generated-file interview_id must be positive")
+        if db.engine.dialect.name == "sqlite":
+            interview = db.session.get(Interview, normalized_interview_id)
+        else:
+            interview = (
+                Interview.query
+                .filter_by(id=normalized_interview_id)
+                .with_for_update()
+                .first()
+            )
+        if interview is None:
+            raise ValueError("generated-file interview does not exist")
+        if int(interview.project_id) != project_id:
+            raise ValueError("generated-file interview belongs to another project")
+
+    return project_id, normalized_interview_id
 
 
 def _discard_output_target_if_same_generation(target: OutputTarget) -> None:
@@ -232,6 +294,7 @@ def register_generated_file(
     file_format: str,
     interview_id: int | None = None,
     generation_params_json: str | None = None,
+    existing_write_reservation: bool = False,
 ) -> GeneratedFile:
     """Register only the exact file generation produced by the managed writer.
 
@@ -242,8 +305,14 @@ def register_generated_file(
     pinned generation so later downloads can reject in-place byte tampering.
     Formal artifacts retain their stricter exporter-owned metadata contract; when
     formal metadata is supplied, its hash is rechecked against the same pinned
-    bytes here. Rollback cleanup is performed through the pinned guard rather than
-    check-then-unlink on the mutable pathname.
+    bytes here. Project/interview ownership is serialized with the row commit and
+    validated against the target's project-scoped storage namespace. Registration
+    also requires a clean SQLAlchemy session so its internal commit cannot publish
+    unrelated caller mutations. Formal exporters that already hold their own
+    serialized source snapshot may pass ``existing_write_reservation=True`` so the
+    registrar preserves that transaction instead of replacing it. Rollback cleanup
+    is performed through the pinned guard rather than check-then-unlink on the
+    mutable pathname.
     """
     expected = target.written_stat
     if expected is None:
@@ -253,6 +322,16 @@ def register_generated_file(
     gf = None
     committed = False
     try:
+        _begin_generated_file_registration(
+            existing_write_reservation=bool(existing_write_reservation),
+        )
+
+        normalized_project_id, normalized_interview_id = _validate_generated_file_ownership(
+            target,
+            project_id=project_id,
+            interview_id=interview_id,
+        )
+
         guard = open_managed_write_commit_guard(
             config.OUTPUT_DIR,
             target.stored_path,
@@ -269,8 +348,8 @@ def register_generated_file(
         guard.verify_namespace()
 
         gf = GeneratedFile(
-            project_id=int(project_id),
-            interview_id=interview_id,
+            project_id=normalized_project_id,
+            interview_id=normalized_interview_id,
             file_type=file_type,
             file_format=file_format,
             original_filename=target.filename,

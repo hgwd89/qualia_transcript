@@ -26,6 +26,8 @@ def main() -> int:
     original_output = config.OUTPUT_DIR
     original_upload = config.UPLOAD_DIR
     original_db = file_manager.db
+    original_begin_registration = file_manager._begin_generated_file_registration
+    original_validate_ownership = file_manager._validate_generated_file_ownership
 
     with tempfile.TemporaryDirectory(prefix="qualia_write_identity_") as tmp:
         root = Path(tmp)
@@ -52,6 +54,19 @@ def main() -> int:
                     rollback=lambda: rollbacks.append(True),
                     add=lambda _value: None,
                     commit=lambda: None,
+                )
+            )
+            # This regression isolates managed-file generation identity. The
+            # production ownership/session boundary is exercised separately by
+            # smoke_generated_file_project_ownership.py and
+            # smoke_generated_file_ownership_serialization.py.
+            file_manager._begin_generated_file_registration = (
+                lambda *, existing_write_reservation: None
+            )
+            file_manager._validate_generated_file_ownership = (
+                lambda _target, *, project_id, interview_id: (
+                    int(project_id),
+                    int(interview_id) if interview_id is not None else None,
                 )
             )
             rejected = False
@@ -123,6 +138,8 @@ def main() -> int:
                 not media_path.exists(),
             )
         finally:
+            file_manager._begin_generated_file_registration = original_begin_registration
+            file_manager._validate_generated_file_ownership = original_validate_ownership
             file_manager.db = original_db
             config.OUTPUT_DIR = original_output
             config.UPLOAD_DIR = original_upload

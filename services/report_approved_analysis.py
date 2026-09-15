@@ -263,6 +263,7 @@ def generate_approved_analysis_xlsx(project_id: int) -> GeneratedFile:
             file_type="approved_analysis",
             file_format="xlsx",
             generation_params_json=json.dumps(params, ensure_ascii=False),
+            existing_write_reservation=True,
         )
     except Exception:
         db.session.rollback()
