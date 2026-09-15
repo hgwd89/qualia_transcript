@@ -77,6 +77,9 @@ jobs:
       - name: Run analysis source provenance regression
         run: python tests/smoke_analysis_source_provenance.py
 
+      - name: Run canonical analysis prompt ordering regression
+        run: python tests/smoke_analysis_prompt_order_provenance.py
+
       - name: Run analysis provenance readiness edge cases
         run: python tests/smoke_analysis_provenance_edge_cases.py
 
