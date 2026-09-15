@@ -26,6 +26,12 @@ _PROJECT_METADATA_READERS = {
     "project_pipeline",
     "analyze_integrated",
 }
+_INTERVIEW_COLLECTION_READERS = {
+    "project_pipeline",
+}
+_INTERVIEW_COLLECTION_PARTICIPANT_READERS = {
+    "analyze_integrated",
+}
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,62 @@ def _raise_if_conflicts(conflicts: list[ProcessingJob]) -> None:
     job_ids = tuple(int(job.id) for job in conflicts)
     db.session.rollback()
     raise ResearchInputWriteBlocked(job_ids)
+
+
+def begin_interview_collection_write(
+    project_id: int,
+    *,
+    affects_integrated_scope: bool,
+) -> Project:
+    """Serialize insertion of a new Interview against project-wide readers.
+
+    ``project_pipeline`` snapshots the project's interview collection once at the
+    beginning of a durable run. Allowing a new Interview to commit after that
+    snapshot would let a "process all" job report success for a set that is no
+    longer canonical. A participant-owned Interview also changes the validity of
+    integrated-analysis scope, so those inserts are fenced against an active
+    ``analyze_integrated`` job as well. Empty interviews do not enter cross-
+    participant prompts and therefore do not unnecessarily conflict with
+    ``analyze_cross``.
+
+    Job admission and this guard both acquire SQLite ``BEGIN IMMEDIATE`` before
+    deciding against the active-job set. The caller owns the returned write
+    transaction and must commit or roll it back after revalidating referenced
+    participant/flow rows and creating the Interview.
+    """
+    project_id = int(project_id)
+    project = db.session.get(Project, project_id)
+    if project is None:
+        raise ValueError("project not found")
+
+    recover_stale_jobs(project_id=project_id)
+
+    try:
+        _begin_immediate()
+        project = db.session.get(Project, project_id)
+        if project is None:
+            db.session.rollback()
+            raise ValueError("project not found")
+
+        reader_types = set(_INTERVIEW_COLLECTION_READERS)
+        if affects_integrated_scope:
+            reader_types.update(_INTERVIEW_COLLECTION_PARTICIPANT_READERS)
+
+        conflicts = (
+            ProcessingJob.query
+            .filter_by(project_id=project_id)
+            .filter(ProcessingJob.status.in_(ACTIVE_STATUSES))
+            .filter(ProcessingJob.job_type.in_(reader_types))
+            .order_by(ProcessingJob.id.asc())
+            .all()
+        )
+        _raise_if_conflicts(conflicts)
+        return project
+    except ResearchInputWriteBlocked:
+        raise
+    except Exception:
+        db.session.rollback()
+        raise
 
 
 def begin_interview_input_write(interview_id: int) -> Interview:

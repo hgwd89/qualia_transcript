@@ -38,6 +38,9 @@ jobs:
       - name: Run processing input fencing regression
         run: python tests/smoke_processing_input_fencing.py
 
+      - name: Run interview collection input fencing regression
+        run: python tests/smoke_interview_collection_input_fencing.py
+
       - name: Run flow input fencing regression
         run: python tests/smoke_flow_input_fencing.py
 
