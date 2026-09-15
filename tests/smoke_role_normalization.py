@@ -1,5 +1,6 @@
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -35,8 +36,11 @@ def main() -> int:
             from models import db
             from models.interview import Interview
             from models.participant import Participant
+            from models.processing_job import ProcessingJob
             from models.project import Project
             from models.segment import Segment
+            from models.speaker_assignment import SpeakerAssignment
+            from services.fragmentation import collect_candidate_segments
             from services.transcription import auto_assign_speaker_roles
 
             app = create_app()
@@ -90,11 +94,52 @@ def main() -> int:
                         text="これは 長い 回答 です",
                     ),
                 ])
+
+                assignment_interview = Interview(
+                    project_id=project.id,
+                    participant_id=participant.id,
+                    status="transcribed",
+                )
+                db.session.add(assignment_interview)
+                db.session.flush()
+                assignment_segment_1 = Segment(
+                    interview_id=assignment_interview.id,
+                    seq=1,
+                    speaker_label="SPEAKER_ASSIGN",
+                    speaker_role="moderator",
+                    text="label-wide first statement with enough content",
+                )
+                assignment_segment_2 = Segment(
+                    interview_id=assignment_interview.id,
+                    seq=2,
+                    speaker_label="SPEAKER_ASSIGN",
+                    speaker_role="moderator",
+                    text="label-wide second statement with enough content",
+                )
+                assignment_other = Segment(
+                    interview_id=assignment_interview.id,
+                    seq=3,
+                    speaker_label="SPEAKER_OTHER",
+                    speaker_role="moderator",
+                    text="unrelated speaker statement with enough content",
+                )
+                db.session.add_all([
+                    assignment_segment_1,
+                    assignment_segment_2,
+                    assignment_other,
+                ])
                 db.session.commit()
                 interview_id = interview.id
                 segment_id = segment.id
                 participant_id = participant.id
+                project_id = project.id
                 auto_interview_id = auto_interview.id
+                assignment_interview_id = assignment_interview.id
+                assignment_segment_ids = {
+                    int(assignment_segment_1.id),
+                    int(assignment_segment_2.id),
+                }
+                assignment_other_id = int(assignment_other.id)
 
                 auto_assign_speaker_roles(auto_interview_id)
                 auto_segments = (
@@ -112,6 +157,96 @@ def main() -> int:
                     }
                     and all(seg.speaker_role != "interviewer" for seg in auto_segments),
                     str(auto_roles),
+                )
+
+                active_job = ProcessingJob(
+                    project_id=project_id,
+                    interview_id=assignment_interview_id,
+                    job_type="analyze",
+                    status="pending",
+                )
+                db.session.add(active_job)
+                db.session.commit()
+                active_job_id = int(active_job.id)
+
+            blocked_assignment = client.post(
+                f"/api/interviews/{assignment_interview_id}/speakers/SPEAKER_ASSIGN",
+                json={
+                    "speaker_role": "respondent",
+                    "participant_id": participant_id,
+                    "note": "human reviewed",
+                },
+            )
+            blocked_data = blocked_assignment.get_json() or {}
+            with app.app_context():
+                current_segments = (
+                    Segment.query
+                    .filter(Segment.id.in_(sorted(assignment_segment_ids)))
+                    .order_by(Segment.id.asc())
+                    .all()
+                )
+                assignment = SpeakerAssignment.query.filter_by(
+                    interview_id=assignment_interview_id,
+                    speaker_label="SPEAKER_ASSIGN",
+                ).first()
+                failures += check(
+                    "speaker assignment is fenced while an interview job is active",
+                    blocked_assignment.status_code == 409
+                    and active_job_id in (blocked_data.get("active_job_ids") or [])
+                    and assignment is None
+                    and all(seg.speaker_role == "moderator" for seg in current_segments),
+                    f"status={blocked_assignment.status_code} data={blocked_data}",
+                )
+
+                active_job = db.session.get(ProcessingJob, active_job_id)
+                active_job.status = "failed"
+                active_job.finished_at = datetime.now(timezone.utc)
+                db.session.commit()
+
+            assignment_response = client.post(
+                f"/api/interviews/{assignment_interview_id}/speakers/SPEAKER_ASSIGN",
+                json={
+                    "speaker_role": "respondent",
+                    "participant_id": participant_id,
+                    "note": "human reviewed",
+                },
+            )
+            assignment_data = assignment_response.get_json() or {}
+            with app.app_context():
+                db.session.expire_all()
+                assignment = SpeakerAssignment.query.filter_by(
+                    interview_id=assignment_interview_id,
+                    speaker_label="SPEAKER_ASSIGN",
+                ).first()
+                updated_segments = (
+                    Segment.query
+                    .filter(Segment.id.in_(sorted(assignment_segment_ids)))
+                    .order_by(Segment.id.asc())
+                    .all()
+                )
+                other_segment = db.session.get(Segment, assignment_other_id)
+                candidate_ids = {
+                    int(item["source_segment_ids"][0])
+                    for item in collect_candidate_segments(assignment_interview_id)
+                    if item.get("source_segment_ids")
+                }
+                failures += check(
+                    "speaker assignment updates canonical segments atomically",
+                    assignment_response.status_code == 200
+                    and assignment_data.get("updated_segment_count") == 2
+                    and assignment is not None
+                    and assignment.speaker_role == "respondent"
+                    and assignment.participant_id == participant_id
+                    and all(seg.speaker_role == "respondent" for seg in updated_segments)
+                    and all(seg.participant_id == participant_id for seg in updated_segments)
+                    and other_segment.speaker_role == "moderator",
+                    f"status={assignment_response.status_code} data={assignment_data}",
+                )
+                failures += check(
+                    "AI respondent collector sees the reviewed speaker assignment",
+                    assignment_segment_ids.issubset(candidate_ids)
+                    and assignment_other_id not in candidate_ids,
+                    f"candidate_ids={sorted(candidate_ids)}",
                 )
 
             status_response = client.get(f"/api/interviews/{interview_id}/status")
