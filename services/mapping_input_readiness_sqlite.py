@@ -176,8 +176,6 @@ def _interview_status(
     try:
         manifest = _mapping_manifest(con, interview_row)
     except ValueError as exc:
-        # An interview with no flow is harmless until mapping rows claim that it
-        # has mapping input. Check those rows before deciding whether to fail.
         row_count = int(con.execute(
             """
             SELECT COUNT(*)
@@ -215,9 +213,6 @@ def _interview_status(
         "human_mapping_count": 0,
     }
 
-    # An untouched interview has no mapping state to prove. Once any mapping is
-    # present, or the interview claims mapped status, the mapping set must be a
-    # complete canonical input rather than a partial classification.
     requires_mapping = bool(rows) or str(interview_row["status"] or "") == "mapped"
     if not requires_mapping:
         return True, "", counts
@@ -236,27 +231,39 @@ def _interview_status(
         rendered = ", ".join(str(value) for value in sorted(missing))
         return False, f"mapping input does not cover respondent segment_id(s): {rendered}", counts
 
-    duplicates = sorted(segment_id for segment_id, items in by_segment.items() if len(items) != 1)
-    if duplicates:
-        rendered = ", ".join(str(value) for value in duplicates)
-        return False, f"mapping input has duplicate rows for respondent segment_id(s): {rendered}", counts
-
     ai_proofs: set[str | None] = set()
     for segment_id in sorted(expected_segment_ids):
-        row = by_segment[segment_id][0]
-        question_id = row["question_id"]
-        if question_id is not None and int(question_id) not in allowed_question_ids:
+        items = by_segment[segment_id]
+        effective_question_ids = {
+            int(row["question_id"]) if row["question_id"] is not None else None
+            for row in items
+        }
+        if len(effective_question_ids) != 1:
+            rendered = ", ".join(
+                "null" if value is None else str(value)
+                for value in sorted(
+                    effective_question_ids,
+                    key=lambda value: (-1 if value is None else int(value)),
+                )
+            )
+            return False, (
+                f"mapping input has conflicting duplicate rows for respondent segment_id={segment_id}: {rendered}"
+            ), counts
+
+        question_id = next(iter(effective_question_ids))
+        if question_id is not None and question_id not in allowed_question_ids:
             return False, f"mapping question_id={question_id} is outside the interview flow", counts
 
-        mapped_by = str(row["mapped_by"] or "ai").strip().lower()
-        if mapped_by in HUMAN_MAPPING_SOURCES:
-            counts["human_mapping_count"] += 1
-            continue
-        if mapped_by != "ai":
-            return False, f"mapping has unsupported mapped_by value: {mapped_by or '<empty>'}", counts
+        for row in items:
+            mapped_by = str(row["mapped_by"] or "ai").strip().lower()
+            if mapped_by in HUMAN_MAPPING_SOURCES:
+                counts["human_mapping_count"] += 1
+                continue
+            if mapped_by != "ai":
+                return False, f"mapping has unsupported mapped_by value: {mapped_by or '<empty>'}", counts
 
-        counts["ai_mapping_count"] += 1
-        ai_proofs.add(row["source_provenance_json"])
+            counts["ai_mapping_count"] += 1
+            ai_proofs.add(row["source_provenance_json"])
 
     if counts["ai_mapping_count"]:
         if None in ai_proofs or "" in ai_proofs:
@@ -349,8 +356,6 @@ def inspect_mapping_input_currentness(
             interview,
             provenance_table_exists=provenance_table_exists,
         )
-        # Untouched interviews with no mapping rows are not counted as mapping
-        # inputs; they remain governed by the existing unmapped readiness signals.
         if counts["mapping_count"] == 0 and str(interview["status"] or "") != "mapped":
             continue
         checked_count += 1
