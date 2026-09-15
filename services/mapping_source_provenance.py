@@ -7,7 +7,7 @@ from typing import Any
 from models import db
 from models.interview import Interview
 from models.interview_flow import InterviewFlowQuestion, InterviewFlowSection
-from models.segment import Segment, UtteranceMapping
+from models.segment import Segment, UtteranceMapping, UtteranceMappingProvenance
 
 MAPPING_PROVENANCE_VERSION = "mapping-input-v1"
 
@@ -30,12 +30,7 @@ def _sha256(value: Any) -> str:
 
 
 def build_mapping_source_manifest(interview_id: int) -> dict[str, Any]:
-    """Return the exact canonical input consumed by AI utterance mapping.
-
-    Only fields that affect candidate membership, provider prompt content, or
-    deterministic prompt ordering belong here. This keeps currentness tied to
-    the actual research input rather than unrelated interview metadata.
-    """
+    """Return the exact canonical input consumed by AI utterance mapping."""
     interview = db.session.get(Interview, int(interview_id))
     if interview is None:
         raise ValueError("interview not found")
@@ -92,15 +87,20 @@ def build_mapping_source_manifest(interview_id: int) -> dict[str, Any]:
     }
 
 
-def capture_mapping_source_provenance(interview_id: int) -> dict[str, Any]:
-    manifest = build_mapping_source_manifest(interview_id)
+def mapping_source_provenance_for_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "version": MAPPING_PROVENANCE_VERSION,
-        "project_id": manifest["project_id"],
-        "interview_id": manifest["interview_id"],
-        "flow_id": manifest["flow_id"],
+        "project_id": int(manifest["project_id"]),
+        "interview_id": int(manifest["interview_id"]),
+        "flow_id": int(manifest["flow_id"]),
         "sha256": _sha256(manifest),
     }
+
+
+def capture_mapping_source_provenance(interview_id: int) -> dict[str, Any]:
+    return mapping_source_provenance_for_manifest(
+        build_mapping_source_manifest(interview_id)
+    )
 
 
 def serialize_mapping_source_provenance(provenance: dict[str, Any]) -> str:
@@ -160,8 +160,12 @@ def mapping_source_provenance_status(
 def validate_current_ai_mapping_batch(interview_id: int) -> tuple[bool, str, int]:
     """Validate all current AI mappings as one coherent, current generation."""
     rows = (
-        UtteranceMapping.query
+        db.session.query(UtteranceMapping, UtteranceMappingProvenance)
         .join(Segment, UtteranceMapping.segment_id == Segment.id)
+        .outerjoin(
+            UtteranceMappingProvenance,
+            UtteranceMappingProvenance.mapping_id == UtteranceMapping.id,
+        )
         .filter(
             Segment.interview_id == int(interview_id),
             Segment.speaker_role == "respondent",
@@ -173,7 +177,10 @@ def validate_current_ai_mapping_batch(interview_id: int) -> tuple[bool, str, int
     if not rows:
         return False, "current interview has no AI mapping generation", 0
 
-    proofs = {row.source_provenance_json for row in rows}
+    proofs = {
+        provenance.source_provenance_json if provenance is not None else None
+        for _mapping, provenance in rows
+    }
     if len(proofs) != 1:
         return False, "AI mapping generation has mixed source provenance", len(rows)
 
@@ -187,7 +194,7 @@ def validate_current_ai_mapping_batch(interview_id: int) -> tuple[bool, str, int
 
     manifest = build_mapping_source_manifest(int(interview_id))
     expected_segment_ids = {int(row["id"]) for row in manifest["segments"]}
-    mapped_segment_ids = {int(row.segment_id) for row in rows}
+    mapped_segment_ids = {int(mapping.segment_id) for mapping, _provenance in rows}
     if mapped_segment_ids != expected_segment_ids:
         return False, "AI mapping generation does not cover the current respondent set", len(rows)
 
