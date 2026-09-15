@@ -96,7 +96,12 @@ def main() -> int:
                     participant_code="P01",
                     display_name="Participant 1",
                 )
-                db.session.add(participant)
+                speaker_participant = Participant(
+                    project_id=project.id,
+                    participant_code="P02",
+                    display_name="Assigned speaker",
+                )
+                db.session.add_all([participant, speaker_participant])
                 db.session.flush()
                 db.session.add(ParticipantAttribute(
                     participant_id=participant.id,
@@ -141,18 +146,20 @@ def main() -> int:
                     interview_id=interview.id,
                     speaker_label="SPEAKER_01",
                     speaker_role="respondent",
-                    participant_id=participant.id,
+                    participant_id=speaker_participant.id,
                 ))
                 db.session.commit()
 
                 project_id = int(project.id)
                 interview_id = int(interview.id)
                 segment_id = int(segment.id)
+                speaker_participant_id = int(speaker_participant.id)
 
                 verbatim = generate_verbatim(interview_id)
                 formatted = generate_formatted_sheet(project_id)
                 analysis = generate_analysis_csv(project_id)
                 generated_ids = [int(verbatim.id), int(formatted.id), int(analysis.id)]
+                verbatim_id, formatted_id, analysis_id = generated_ids
 
                 con = sqlite3.connect(str(db_path))
                 con.row_factory = sqlite3.Row
@@ -226,6 +233,36 @@ def main() -> int:
                 failures += check(
                     "ordinary artifact source snapshot blocks concurrent SQLite writes",
                     second_write_blocked,
+                )
+
+                speaker_participant = db.session.get(Participant, speaker_participant_id)
+                speaker_participant.display_name = "Renamed assigned speaker"
+                db.session.commit()
+                db.session.expire_all()
+                verbatim_status = ordinary_artifact_currentness(
+                    db.session.get(GeneratedFile, verbatim_id)
+                )
+                formatted_status = ordinary_artifact_currentness(
+                    db.session.get(GeneratedFile, formatted_id)
+                )
+                analysis_status = ordinary_artifact_currentness(
+                    db.session.get(GeneratedFile, analysis_id)
+                )
+                failures += check(
+                    "verbatim tracks the rendered assigned-speaker participant identity",
+                    verbatim_status.provenance_present and not verbatim_status.current,
+                    verbatim_status.reason,
+                )
+                failures += check(
+                    "speaker-only display-name change does not stale unrelated formatted/analysis exports",
+                    formatted_status.current and analysis_status.current,
+                    f"formatted={formatted_status.reason} analysis={analysis_status.reason}",
+                )
+                response = client.get(f"/api/outputs/{verbatim_id}/download")
+                failures += check(
+                    "stale verbatim speaker identity fails closed at download",
+                    response.status_code == 409,
+                    f"status={response.status_code}",
                 )
 
                 segment = db.session.get(Segment, segment_id)
