@@ -101,6 +101,9 @@ jobs:
       - name: Run analysis flow provenance regression
         run: python tests/smoke_analysis_flow_provenance.py
 
+      - name: Run mapping provenance readiness regression
+        run: python tests/smoke_mapping_provenance_readiness.py
+
   posix-backup-snapshot:
     name: posix-backup-snapshot
     runs-on: ubuntu-latest
@@ -197,3 +200,6 @@ jobs:
 
       - name: Run analysis flow provenance regression
         run: python tests/smoke_analysis_flow_provenance.py
+
+      - name: Run mapping provenance readiness regression
+        run: python tests/smoke_mapping_provenance_readiness.py
