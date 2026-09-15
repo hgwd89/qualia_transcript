@@ -49,8 +49,9 @@ def current_mapping_input_status(interview_id: int) -> MappingInputStatus:
     Human/manual mappings are canonical human decisions and need no provider
     provenance. Every remaining AI mapping must belong to one coherent source
     generation that is still current. Every current respondent segment must have
-    exactly one mapping row, including an explicit unclassified row when it does
-    not map to a question.
+    mapping coverage. Historical duplicate rows are tolerated only when every row
+    for that segment has the same effective question assignment; conflicting
+    duplicates fail closed.
     """
     interview_id = int(interview_id)
     try:
@@ -108,51 +109,62 @@ def current_mapping_input_status(interview_id: int) -> MappingInputStatus:
             human_mapping_count=0,
         )
 
-    duplicates = sorted(segment_id for segment_id, items in by_segment.items() if len(items) != 1)
-    if duplicates:
-        rendered = ", ".join(str(value) for value in duplicates)
-        return _status(
-            False,
-            f"mapping input has duplicate rows for respondent segment_id(s): {rendered}",
-            respondent_segment_count=len(expected_segment_ids),
-            mapping_count=len(rows),
-            ai_mapping_count=0,
-            human_mapping_count=0,
-        )
-
     ai_proofs: set[str | None] = set()
     ai_count = 0
     human_count = 0
     for segment_id in sorted(expected_segment_ids):
-        mapping, provenance = by_segment[segment_id][0]
-        if mapping.question_id is not None and int(mapping.question_id) not in allowed_question_ids:
+        items = by_segment[segment_id]
+        effective_question_ids = {
+            int(mapping.question_id) if mapping.question_id is not None else None
+            for mapping, _provenance in items
+        }
+        if len(effective_question_ids) != 1:
+            rendered = ", ".join(
+                "null" if value is None else str(value)
+                for value in sorted(
+                    effective_question_ids,
+                    key=lambda value: (-1 if value is None else int(value)),
+                )
+            )
             return _status(
                 False,
-                f"mapping question_id={mapping.question_id} is outside the interview flow",
+                f"mapping input has conflicting duplicate rows for respondent segment_id={segment_id}: {rendered}",
                 respondent_segment_count=len(expected_segment_ids),
                 mapping_count=len(rows),
                 ai_mapping_count=ai_count,
                 human_mapping_count=human_count,
             )
 
-        mapped_by = str(mapping.mapped_by or "ai").strip().lower()
-        if mapped_by in HUMAN_MAPPING_SOURCES:
-            human_count += 1
-            continue
-        if mapped_by != "ai":
+        question_id = next(iter(effective_question_ids))
+        if question_id is not None and question_id not in allowed_question_ids:
             return _status(
                 False,
-                f"mapping has unsupported mapped_by value: {mapped_by or '<empty>'}",
+                f"mapping question_id={question_id} is outside the interview flow",
                 respondent_segment_count=len(expected_segment_ids),
                 mapping_count=len(rows),
                 ai_mapping_count=ai_count,
                 human_mapping_count=human_count,
             )
 
-        ai_count += 1
-        ai_proofs.add(
-            provenance.source_provenance_json if provenance is not None else None
-        )
+        for mapping, provenance in items:
+            mapped_by = str(mapping.mapped_by or "ai").strip().lower()
+            if mapped_by in HUMAN_MAPPING_SOURCES:
+                human_count += 1
+                continue
+            if mapped_by != "ai":
+                return _status(
+                    False,
+                    f"mapping has unsupported mapped_by value: {mapped_by or '<empty>'}",
+                    respondent_segment_count=len(expected_segment_ids),
+                    mapping_count=len(rows),
+                    ai_mapping_count=ai_count,
+                    human_mapping_count=human_count,
+                )
+
+            ai_count += 1
+            ai_proofs.add(
+                provenance.source_provenance_json if provenance is not None else None
+            )
 
     if ai_count:
         if None in ai_proofs:
