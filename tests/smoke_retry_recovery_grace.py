@@ -155,6 +155,7 @@ def main() -> int:
                     status=first_pending.status,
                     attempt_count=int(first_pending.attempt_count or 0),
                     worker_pid=first_pending.worker_pid,
+                    created_at=first_pending.created_at,
                     started_at=first_anchor,
                 )
 
