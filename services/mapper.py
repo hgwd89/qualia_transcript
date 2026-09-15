@@ -9,7 +9,7 @@ from services.ai_client import call_structured
 from services.mapping_source_provenance import (
     MappingSourceProvenanceError,
     build_mapping_source_manifest,
-    capture_mapping_source_provenance,
+    mapping_source_provenance_for_manifest,
     mapping_source_provenance_status,
     serialize_mapping_source_provenance,
 )
@@ -77,7 +77,6 @@ def _normalize_provider_mappings(
         confidence = float(mapping.get("confidence", 0.0) or 0.0)
         is_unclassified = bool(mapping.get("is_unclassified", False))
 
-        # 弱い分類は unclassified 側へ寄せる
         if question_id is None:
             is_unclassified = True
             confidence = min(confidence, 0.49)
@@ -111,26 +110,15 @@ def run_mapping(
     if result_write_guard is None:
         raise RuntimeError("mapping save requires a durable result-write guard")
 
-    # Build one immutable source view. Both the provider prompt and the persisted
-    # fingerprint derive from this same manifest so the claimed source cannot
-    # diverge from the bytes logically supplied to the provider.
+    # Provider prompt and persisted proof derive from exactly this same immutable
+    # source view. There is no second pre-provider query that could describe a
+    # different generation than the one actually supplied to the model.
     source_manifest = build_mapping_source_manifest(int(interview_id))
     segment_rows = list(source_manifest["segments"])
     question_rows = list(source_manifest["questions"])
     if not segment_rows or not question_rows:
         return 0
-
-    source_provenance = capture_mapping_source_provenance(int(interview_id))
-    # capture_mapping_source_provenance re-queries by design for public callers.
-    # The provider generation must bind specifically to the manifest above, so
-    # reject any drift that occurred between those two source reads before the
-    # external call begins.
-    current, reason = mapping_source_provenance_status(
-        source_provenance,
-        interview_id=int(interview_id),
-    )
-    if not current:
-        raise MappingSourceProvenanceError(reason)
+    source_provenance = mapping_source_provenance_for_manifest(source_manifest)
 
     q_list = "\n".join(
         f'- id:{row["id"]} [{row["question_code"]}] {row["question_text"]}'
@@ -165,9 +153,9 @@ def run_mapping(
         allowed_question_ids={int(row["id"]) for row in question_rows},
     )
 
-    # External work is complete. Verify durable lease first, then re-read the
-    # canonical source. A stale worker or changed source cannot delete/replace the
-    # prior mapping generation.
+    # The durable worker must still own the attempt, and canonical research input
+    # must still equal the generation supplied to the provider, before any prior
+    # mappings are deleted.
     result_write_guard()
     current, reason = mapping_source_provenance_status(
         source_provenance,
