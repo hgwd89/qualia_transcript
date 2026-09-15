@@ -26,15 +26,23 @@ from services.ordinary_artifact_provenance import (
 
 
 def _build_rows(project_id: int) -> list[list]:
-    """全発言のフラットレコードを返す"""
-    project      = Project.query.get(project_id)
-    interviews   = Interview.query.filter_by(project_id=project_id).all()
+    """全発言のフラットレコードを決定論的な canonical 順序で返す。"""
+    project = Project.query.get(project_id)
+    interviews = (
+        Interview.query
+        .filter_by(project_id=project_id)
+        .order_by(Interview.id.asc())
+        .all()
+    )
 
-    # 属性キー一覧（全参加者の union）
+    # 属性キー一覧（全参加者の union）。interview/id と display_order/id で順序を固定する。
     attr_keys = []
     for iv in interviews:
         if iv.participant:
-            for a in iv.participant.attributes:
+            for a in sorted(
+                iv.participant.attributes,
+                key=lambda row: (int(row.display_order or 0), int(row.id or 0)),
+            ):
                 if a.attribute_key not in attr_keys:
                     attr_keys.append(a.attribute_key)
 
@@ -48,23 +56,26 @@ def _build_rows(project_id: int) -> list[list]:
 
     rows = [header]
     for iv in interviews:
-        p         = iv.participant
-        p_code    = p.participant_code if p else ""
-        p_name    = p.display_name if p else ""
+        p = iv.participant
+        p_code = p.participant_code if p else ""
+        p_name = p.display_name if p else ""
         attr_vals = {}
         if p:
-            for a in p.attributes:
+            for a in sorted(
+                p.attributes,
+                key=lambda row: (int(row.display_order or 0), int(row.id or 0)),
+            ):
                 attr_vals[a.attribute_key] = a.attribute_value
 
-        for seg in iv.segments:
+        for seg in sorted(iv.segments, key=lambda row: (int(row.seq), int(row.id or 0))):
             if not seg.utterance_mappings:
                 um_list = [None]
             else:
-                um_list = seg.utterance_mappings
+                um_list = sorted(seg.utterance_mappings, key=lambda row: int(row.id or 0))
 
             for um in um_list:
-                q    = um.question   if um else None
-                sect = q.section     if q  else None
+                q = um.question if um else None
+                sect = q.section if q else None
 
                 rows.append([
                     p_code, p_name,
