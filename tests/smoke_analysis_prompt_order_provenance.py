@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import sys
 import tempfile
 from pathlib import Path
@@ -61,8 +62,9 @@ def main() -> int:
                 db.session.flush()
                 flow_id = int(flow.id)
 
-                # Insert higher IDs first and give tied seq values. Canonical ORM
-                # ordering must not depend on insertion/load order.
+                # Higher IDs are deliberately inserted first and seq ties are
+                # deliberate. Provider input must still use the same canonical
+                # tie-breakers as the source-provenance manifests.
                 section_b = InterviewFlowSection(id=20, flow_id=flow_id, title="Section B", seq=1)
                 section_a = InterviewFlowSection(id=10, flow_id=flow_id, title="Section A", seq=1)
                 db.session.add_all([section_b, section_a])
@@ -145,25 +147,53 @@ def main() -> int:
                             confidence=1.0,
                             is_unclassified=False,
                         ))
+
+                # Per-participant analysis has a direct Segment query rather than
+                # a relationship traversal. Tie seq explicitly and reverse the PK
+                # insertion order; the query itself must specify the ID tie-breaker.
+                tied_high = Segment(
+                    id=300,
+                    interview_id=10,
+                    participant_id=10,
+                    speaker_label="SPEAKER_01",
+                    speaker_role="respondent",
+                    text="TIE_HIGH response with enough content",
+                    seq=1,
+                )
+                tied_low = Segment(
+                    id=200,
+                    interview_id=10,
+                    participant_id=10,
+                    speaker_label="SPEAKER_01",
+                    speaker_role="respondent",
+                    text="TIE_LOW response with enough content",
+                    seq=1,
+                )
+                db.session.add_all([tied_high, tied_low])
+                db.session.flush()
+                db.session.add_all([
+                    UtteranceMapping(
+                        segment_id=300,
+                        question_id=10,
+                        mapped_by="manual",
+                        confidence=1.0,
+                        is_unclassified=False,
+                    ),
+                    UtteranceMapping(
+                        segment_id=200,
+                        question_id=10,
+                        mapped_by="manual",
+                        confidence=1.0,
+                        is_unclassified=False,
+                    ),
+                ])
                 db.session.commit()
                 db.session.expire_all()
 
-                project = db.session.get(Project, project_id)
-                flow = db.session.get(InterviewFlow, flow_id)
+                summary_source = inspect.getsource(analyzer.analyze_interview_summary)
                 failures += check(
-                    "project interview relationship is canonical ID order",
-                    [int(row.id) for row in project.interviews] == [10, 20],
-                    f"ids={[int(row.id) for row in project.interviews]}",
-                )
-                failures += check(
-                    "flow section relationship uses seq then ID",
-                    [int(row.id) for row in flow.sections] == [10, 20],
-                    f"ids={[int(row.id) for row in flow.sections]}",
-                )
-                failures += check(
-                    "section question relationship uses seq then ID",
-                    [int(row.id) for row in flow.sections[0].questions] == [10, 11],
-                    f"ids={[int(row.id) for row in flow.sections[0].questions]}",
+                    "per-participant query declares seq/ID canonical tie-breaker",
+                    ".order_by(Segment.seq.asc(), Segment.id.asc())" in summary_source,
                 )
 
                 captured: list[tuple[str, str]] = []
@@ -171,6 +201,12 @@ def main() -> int:
 
                 def fake_call(_system, user, _schema, schema_name="result"):
                     captured.append((schema_name, user))
+                    if schema_name in {"summary_result", "analysis_result"}:
+                        return {
+                            "findings": [],
+                            "implications": "",
+                            "unresolved": "",
+                        }
                     if schema_name == "cross_analysis_result":
                         return {
                             "findings": [],
@@ -194,12 +230,28 @@ def main() -> int:
 
                 analyzer.call_structured = fake_call
                 try:
+                    analyzer.analyze_interview_summary(
+                        10,
+                        result_write_guard=lambda: None,
+                    )
+
+                    # Deliberately scramble already-loaded relationship collections.
+                    # The provider path must canonicalize them locally instead of
+                    # trusting incidental ORM collection order.
+                    project = db.session.get(Project, project_id)
+                    project.interviews[:] = list(reversed(project.interviews))
                     analyzer.analyze_cross_participants(
                         project_id,
                         10,
                         result_write_guard=lambda: None,
                     )
-                    db.session.expire_all()
+
+                    project = db.session.get(Project, project_id)
+                    flow = db.session.get(InterviewFlow, flow_id)
+                    project.interviews[:] = list(reversed(project.interviews))
+                    flow.sections[:] = list(reversed(flow.sections))
+                    for section in flow.sections:
+                        section.questions[:] = list(reversed(section.questions))
                     analyzer.analyze_project_integrated(
                         project_id,
                         result_write_guard=lambda: None,
@@ -207,9 +259,15 @@ def main() -> int:
                 finally:
                     analyzer.call_structured = original_call
 
+                summary_user = next(user for name, user in captured if name == "summary_result")
                 cross_user = next(user for name, user in captured if name == "cross_analysis_result")
                 integrated_user = next(user for name, user in captured if name == "integrated_result")
 
+                failures += check(
+                    "per-participant provider prompt follows canonical segment seq/ID order",
+                    summary_user.find("TIE_LOW") < summary_user.find("TIE_HIGH"),
+                    summary_user,
+                )
                 failures += check(
                     "cross-participant provider prompt follows canonical interview ID order",
                     cross_user.find("P_LOW:") < cross_user.find("P_HIGH:"),
@@ -221,6 +279,11 @@ def main() -> int:
                     < integrated_user.find("[QA1]")
                     < integrated_user.find("[QA2]")
                     < integrated_user.find("【Section B】"),
+                    integrated_user,
+                )
+                failures += check(
+                    "integrated provider prompt follows canonical interview ID order inside questions",
+                    integrated_user.find("P_LOW:") < integrated_user.find("P_HIGH:"),
                     integrated_user,
                 )
 
