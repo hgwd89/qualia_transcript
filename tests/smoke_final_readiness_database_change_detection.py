@@ -32,7 +32,7 @@ def main() -> int:
     }
     failures = 0
 
-    with tempfile.TemporaryDirectory(prefix="qualia_final_readiness_watch_") as tmp:
+    with tempfile.TemporaryDirectory(prefix="qualia_final_readiness_snapshot_") as tmp:
         root = Path(tmp)
         db_path = root / "readiness.db"
         output_dir = root / "outputs"
@@ -61,21 +61,39 @@ def main() -> int:
                 db.session.remove()
                 db.engine.dispose()
 
-            original_v2 = final_audit.readiness_v2.audit
+            setup = sqlite3.connect(db_path)
+            try:
+                setup.execute("PRAGMA journal_mode=WAL")
+                setup.commit()
+            finally:
+                setup.close()
 
-            def fake_v2(*args, **kwargs):
-                con = sqlite3.connect(db_path)
+            original_inspect = final_audit.inspect_generated_file_ownership
+            observed = {
+                "in_transaction": False,
+                "writer_committed": False,
+                "writer_error": None,
+            }
+
+            def inspect_with_competing_commit(con, *, project_id=None):
+                observed["in_transaction"] = bool(con.in_transaction)
+                writer = sqlite3.connect(db_path, timeout=1.0)
                 try:
-                    con.execute(
+                    writer.execute(
                         "UPDATE projects SET name=? WHERE id=?",
-                        ("Changed during final audit", project_id),
+                        ("Changed during ownership scan", project_id_for_write),
                     )
-                    con.commit()
+                    writer.commit()
+                    observed["writer_committed"] = True
+                except Exception as exc:
+                    observed["writer_error"] = f"{type(exc).__name__}: {exc}"
+                    writer.rollback()
                 finally:
-                    con.close()
-                return {"blockers": [], "warnings": [], "info": {}}
+                    writer.close()
+                return original_inspect(con, project_id=project_id)
 
-            final_audit.readiness_v2.audit = fake_v2
+            project_id_for_write = project_id
+            final_audit.inspect_generated_file_ownership = inspect_with_competing_commit
             try:
                 changed = final_audit.audit_final(
                     db_path,
@@ -84,40 +102,42 @@ def main() -> int:
                     upload_dir,
                 )
             finally:
-                final_audit.readiness_v2.audit = original_v2
+                final_audit.inspect_generated_file_ownership = original_inspect
 
             failures += check(
-                "composite readiness blocks a commit between v2 and ownership checks",
+                "generated-file ownership runs inside the v2 SQLite read transaction",
+                observed["in_transaction"],
+                str(observed),
+            )
+            failures += check(
+                "WAL writer can commit while the readiness snapshot remains pinned",
+                observed["writer_committed"],
+                str(observed),
+            )
+            failures += check(
+                "existing v2 data-version gate blocks a commit during ownership inspection",
                 has_code(
                     changed.get("blockers", []),
-                    "database_changed_during_final_ownership_audit",
+                    "database_changed_during_audit",
                 ),
                 str(changed),
             )
 
-            original_v2 = final_audit.readiness_v2.audit
-            final_audit.readiness_v2.audit = lambda *args, **kwargs: {
-                "blockers": [], "warnings": [], "info": {}
-            }
-            try:
-                stable = final_audit.audit_final(
-                    db_path,
-                    output_dir,
-                    backup_dir,
-                    upload_dir,
-                )
-            finally:
-                final_audit.readiness_v2.audit = original_v2
-
+            stable = final_audit.audit_final(
+                db_path,
+                output_dir,
+                backup_dir,
+                upload_dir,
+            )
             failures += check(
-                "composite readiness does not invent database-change blockers on a stable DB",
+                "stable final readiness does not invent a database-change blocker",
                 not has_code(
                     stable.get("blockers", []),
-                    "database_changed_during_final_ownership_audit",
+                    "database_changed_during_audit",
                 )
                 and not has_code(
                     stable.get("blockers", []),
-                    "final_database_change_detection_failed",
+                    "database_change_detection_failed",
                 ),
                 str(stable),
             )
