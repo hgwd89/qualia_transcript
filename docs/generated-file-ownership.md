@@ -34,9 +34,11 @@ Project-scoped readiness filters ownership checks by the selected `GeneratedFile
 
 ## Final readiness composition
 
-`scripts/audit_production_readiness_final.py` composes the existing hardened v2/project readiness audit with the GeneratedFile ownership scan. Because those two checks use separate read-only SQLite connections, a dedicated outer `PRAGMA data_version` watcher spans the complete composite audit. Any commit between the v2 snapshot and ownership scan adds a `database_changed_during_final_ownership_audit` blocker; inability to prove the watcher state fails closed.
+`scripts/audit_production_readiness_final.py` is the release-readiness entry point used by `scripts/check_production_readiness.ps1` for both database-wide and `--project-id` audits. The underlying v2/project audit remains the hardened core, but ownership is injected into its `_run_base_audit_on_snapshot(...)` boundary and therefore runs on the exact same read-only SQLite transaction as the rest of readiness.
 
-`scripts/check_production_readiness.ps1` uses this final entry point for both database-wide and `--project-id` audits.
+No second ownership connection is opened after the v2 audit. The existing v2 `PRAGMA data_version` start/end check therefore covers ownership inspection as part of the same acceptance window. If another connection commits while ownership is being inspected, final readiness returns the existing `database_changed_during_audit` blocker and must be rerun on a quiescent dataset.
+
+Direct invocation of the lower-level v2/project modules is an internal diagnostic path. The canonical professional-delivery gate is `scripts/check_production_readiness.ps1`, which routes through `audit_production_readiness_final.py`.
 
 ## Regression gates
 
@@ -44,6 +46,6 @@ The required Windows and Ubuntu Safe Smoke matrix runs:
 
 - `tests/smoke_generated_file_project_ownership.py` — valid ownership, cross-project interview rejection, project-directory mismatch rejection, exact-generation cleanup, existing-row blockers, project-scoped visibility, and legacy unscoped warnings;
 - `tests/smoke_generated_file_ownership_serialization.py` — a competing SQLite writer cannot change interview ownership while registration holds its write reservation;
-- `tests/smoke_final_readiness_database_change_detection.py` — a commit between the hardened readiness phase and ownership phase is detected, while a stable database does not create a false blocker.
+- `tests/smoke_final_readiness_database_change_detection.py` — ownership inspection is proven to run inside the v2 SQLite read transaction, a concurrent WAL commit is detected by the existing v2 `database_changed_during_audit` gate, and a stable rerun does not invent a change blocker.
 
 These tests are providerless and use temporary databases and managed directories only.
