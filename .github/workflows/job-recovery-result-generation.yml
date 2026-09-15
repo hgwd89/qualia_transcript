@@ -41,3 +41,6 @@ jobs:
 
       - name: Run current-attempt result recovery regression
         run: python tests/smoke_job_recovery_result_generation.py
+
+      - name: Run operator recovery generation fencing regression
+        run: python tests/smoke_operator_recovery_generation_fencing.py
