@@ -24,6 +24,10 @@ import audit_production_readiness_project as project_readiness
 import audit_production_readiness_v2 as readiness_v2
 from services.generated_file_ownership import inspect_generated_file_ownership
 from services.mapping_input_readiness_sqlite import inspect_mapping_input_currentness
+from services.ordinary_artifact_provenance_sqlite import (
+    ORDINARY_ARTIFACT_TYPES,
+    ordinary_artifact_currentness_sqlite,
+)
 from services.runtime_lock import RuntimeLockError, runtime_lock
 
 
@@ -79,6 +83,94 @@ def _append_mapping_input_currentness(
     }
 
 
+def _append_ordinary_artifact_currentness(
+    report: dict,
+    con,
+    *,
+    project_id: int | None,
+) -> None:
+    """Classify ordinary export source provenance inside the audited DB snapshot.
+
+    Historical stale outputs are retained by design, so they are warnings rather
+    than blockers. The authoritative delivery boundary rejects an individual
+    provenance-backed stale artifact with HTTP 409 when download is attempted.
+    """
+    placeholders = ",".join("?" for _ in ORDINARY_ARTIFACT_TYPES)
+    params: list[object] = list(sorted(ORDINARY_ARTIFACT_TYPES))
+    where = f"file_type IN ({placeholders})"
+    if project_id is not None:
+        where += " AND project_id=?"
+        params.append(int(project_id))
+
+    try:
+        rows = con.execute(
+            f"""
+            SELECT id, project_id, interview_id, file_type, generation_params_json
+            FROM generated_files
+            WHERE {where}
+            ORDER BY id
+            """,
+            tuple(params),
+        ).fetchall()
+    except Exception as exc:
+        report.setdefault("blockers", []).append({
+            "code": "ordinary_artifact_currentness_audit_error",
+            "message": "Could not enumerate ordinary generated artifacts for source-currentness validation",
+            "context": {"error": f"{type(exc).__name__}: {exc}"},
+        })
+        return
+
+    current = 0
+    unproven: list[dict] = []
+    stale: list[dict] = []
+    for row in rows:
+        status = ordinary_artifact_currentness_sqlite(
+            con,
+            file_type=str(row["file_type"] or ""),
+            project_id=int(row["project_id"]),
+            interview_id=(int(row["interview_id"]) if row["interview_id"] is not None else None),
+            generation_params_json=row["generation_params_json"],
+        )
+        item = {
+            "generated_file_id": int(row["id"]),
+            "project_id": int(row["project_id"]),
+            "file_type": str(row["file_type"] or ""),
+            "reason": status.reason,
+        }
+        if status.current:
+            current += 1
+        elif status.provenance_present:
+            stale.append(item)
+        else:
+            unproven.append(item)
+
+    info = report.setdefault("info", {})
+    info["ordinary_artifact_source_currentness"] = {
+        "checked": len(rows),
+        "current": current,
+        "stale": len(stale),
+        "legacy_unproven": len(unproven),
+    }
+    if stale:
+        report.setdefault("warnings", []).append({
+            "code": "ordinary_artifact_source_stale",
+            "message": "Historical provenance-backed ordinary generated artifacts no longer match current canonical source data and are not downloadable as current outputs",
+            "context": {
+                "files": stale[:100],
+                "count": len(stale),
+            },
+        })
+    if unproven:
+        report.setdefault("warnings", []).append({
+            "code": "ordinary_artifact_source_provenance_unproven",
+            "message": "Legacy ordinary generated artifacts have no source provenance and cannot be proven current",
+            "context": {
+                "files": unproven[:100],
+                "count": len(unproven),
+            },
+        })
+
+
 def _dedupe(items: list[dict]) -> list[dict]:
     seen = set()
     result = []
@@ -115,6 +207,11 @@ def audit_final(
             project_id=project_id,
         )
         _append_mapping_input_currentness(
+            report,
+            con,
+            project_id=project_id,
+        )
+        _append_ordinary_artifact_currentness(
             report,
             con,
             project_id=project_id,

@@ -20,6 +20,10 @@ from services.file_manager import (
     prepare_output_target,
     register_generated_file,
 )
+from services.ordinary_artifact_provenance import (
+    begin_ordinary_artifact_source_snapshot,
+    ordinary_artifact_generation_params,
+)
 
 
 ROLE_LABELS = {
@@ -72,71 +76,91 @@ def _speaker_name(interview: Interview, seg, assignment_map: dict) -> str:
 
 
 def generate_verbatim(interview_id: int) -> GeneratedFile:
-    interview = Interview.query.get(interview_id)
-    if not interview:
+    initial = db.session.get(Interview, int(interview_id))
+    if not initial:
         raise ValueError("interview が見つかりません")
+    project_id = int(initial.project_id)
 
-    participant = interview.participant
-    project = interview.project
-    segments = sorted(
-        interview.segments,
-        key=lambda s: (
-            s.seq if s.seq is not None else 10**9,
-            s.start_sec if s.start_sec is not None else 10**12,
-            s.id or 0,
-        ),
+    begin_ordinary_artifact_source_snapshot(
+        project_id,
+        interview_id=int(interview_id),
     )
-
-    assignments = SpeakerAssignment.query.filter_by(interview_id=interview.id).all()
-    assignment_map = {a.speaker_label: a for a in assignments if a.speaker_label}
-
-    doc = Document()
-
-    title = doc.add_heading(level=1)
-    run = title.add_run(
-        f"発言録｜{participant.display_name if participant else '参加者未設定'}"
-        f"｜{interview.interview_date or '日付未設定'}"
-    )
-    run.font.size = Pt(14)
-
-    doc.add_paragraph(f"プロジェクト：{project.name}")
-    if project.client:
-        doc.add_paragraph(f"クライアント：{project.client}")
-    if participant and participant.participant_code:
-        doc.add_paragraph(f"参加者ID：{participant.participant_code}")
-    if interview.interviewer_name:
-        doc.add_paragraph(f"モデレーター：{interview.interviewer_name}")
-    doc.add_paragraph(f"収録Segment数：{len(segments)}")
-    doc.add_paragraph()
-
-    doc.add_heading("逐語発言録（時系列）", level=2)
-
-    for seg in segments:
-        row = doc.add_paragraph()
-        time_str = f"[{_fmt_time(seg.start_sec)}–{_fmt_time(seg.end_sec)}]"
-        speaker = _speaker_name(interview, seg, assignment_map)
-        lead = row.add_run(f"{time_str} {speaker}：")
-        lead.bold = True
-        if _has_quote_flag(seg):
-            quote_mark = row.add_run("★引用候補 ")
-            quote_mark.bold = True
-        row.add_run(seg.text)
-
-    if not segments:
-        doc.add_paragraph("（発言Segmentがありません）")
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"発言録_{participant.participant_code if participant else 'unknown'}_{ts}.docx"
-    target = prepare_output_target(interview.project_id, filename)
-    opened = open_output_target_for_write(target)
     try:
-        doc.save(opened.stream)
-    finally:
-        opened.close()
-    return register_generated_file(
-        target,
-        project_id=project.id,
-        interview_id=interview_id,
-        file_type="verbatim",
-        file_format="docx",
-    )
+        interview = db.session.get(Interview, int(interview_id))
+        if not interview:
+            raise ValueError("interview が見つかりません")
+
+        participant = interview.participant
+        project = interview.project
+        segments = sorted(
+            interview.segments,
+            key=lambda s: (
+                s.seq if s.seq is not None else 10**9,
+                s.start_sec if s.start_sec is not None else 10**12,
+                s.id or 0,
+            ),
+        )
+
+        assignments = SpeakerAssignment.query.filter_by(interview_id=interview.id).all()
+        assignment_map = {a.speaker_label: a for a in assignments if a.speaker_label}
+        generation_params_json = ordinary_artifact_generation_params(
+            "verbatim",
+            project_id,
+            interview_id=int(interview.id),
+        )
+
+        doc = Document()
+
+        title = doc.add_heading(level=1)
+        run = title.add_run(
+            f"発言録｜{participant.display_name if participant else '参加者未設定'}"
+            f"｜{interview.interview_date or '日付未設定'}"
+        )
+        run.font.size = Pt(14)
+
+        doc.add_paragraph(f"プロジェクト：{project.name}")
+        if project.client:
+            doc.add_paragraph(f"クライアント：{project.client}")
+        if participant and participant.participant_code:
+            doc.add_paragraph(f"参加者ID：{participant.participant_code}")
+        if interview.interviewer_name:
+            doc.add_paragraph(f"モデレーター：{interview.interviewer_name}")
+        doc.add_paragraph(f"収録Segment数：{len(segments)}")
+        doc.add_paragraph()
+
+        doc.add_heading("逐語発言録（時系列）", level=2)
+
+        for seg in segments:
+            row = doc.add_paragraph()
+            time_str = f"[{_fmt_time(seg.start_sec)}–{_fmt_time(seg.end_sec)}]"
+            speaker = _speaker_name(interview, seg, assignment_map)
+            lead = row.add_run(f"{time_str} {speaker}：")
+            lead.bold = True
+            if _has_quote_flag(seg):
+                quote_mark = row.add_run("★引用候補 ")
+                quote_mark.bold = True
+            row.add_run(seg.text)
+
+        if not segments:
+            doc.add_paragraph("（発言Segmentがありません）")
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"発言録_{participant.participant_code if participant else 'unknown'}_{ts}.docx"
+        target = prepare_output_target(interview.project_id, filename)
+        opened = open_output_target_for_write(target)
+        try:
+            doc.save(opened.stream)
+        finally:
+            opened.close()
+        return register_generated_file(
+            target,
+            project_id=project.id,
+            interview_id=interview_id,
+            file_type="verbatim",
+            file_format="docx",
+            generation_params_json=generation_params_json,
+            existing_write_reservation=True,
+        )
+    except Exception:
+        db.session.rollback()
+        raise

@@ -19,6 +19,7 @@ from services.formal_artifact_integrity import (
     FormalArtifactIntegrityError,
     verified_artifact_snapshot,
 )
+from services.ordinary_artifact_provenance import ordinary_artifact_currentness
 from services.report_verbatim import generate_verbatim
 from services.report_formatted import generate_formatted_sheet
 from services.report_analysis import generate_analysis_xlsx, generate_analysis_csv
@@ -39,20 +40,24 @@ def _managed_download_etag(info) -> str:
 
 
 def _begin_formal_download_snapshot() -> None:
-    """Serialize formal-artifact validation until verified bytes are snapshotted."""
+    """Serialize artifact validation until verified bytes are snapshotted."""
     if db.session.new or db.session.dirty or db.session.deleted:
-        raise RuntimeError("formal artifact download requires a clean database session")
+        raise RuntimeError("artifact download requires a clean database session")
     db.session.rollback()
     if db.engine.dialect.name == "sqlite":
         db.session.execute(text("BEGIN IMMEDIATE"))
 
 
 def _output_file_item(generated_file: GeneratedFile) -> dict:
-    status = approved_analysis_artifact_currentness(generated_file)
+    formal_status = approved_analysis_artifact_currentness(generated_file)
+    ordinary_status = ordinary_artifact_currentness(generated_file)
     return {
         "obj": generated_file,
-        "formal_current": status.current,
-        "formal_reason": status.reason,
+        "formal_current": formal_status.current,
+        "formal_reason": formal_status.reason,
+        "ordinary_current": ordinary_status.current,
+        "ordinary_reason": ordinary_status.reason,
+        "ordinary_provenance_present": ordinary_status.provenance_present,
     }
 
 
@@ -189,22 +194,69 @@ def download(file_id):
             raise
     else:
         try:
-            expected_artifact_sha256 = generated_file_expected_sha256(gf)
-        except ValueError as exc:
-            abort(409, description=f"生成済みファイルのbytes整合性メタデータを検証できません: {exc}")
+            initial_currentness = ordinary_artifact_currentness(gf)
+        except Exception as exc:
+            abort(409, description=f"生成済みファイルのsource provenanceを検証できません: {exc}")
 
-        try:
-            opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
-        except (OSError, ValueError):
-            abort(404)
-
-        if expected_artifact_sha256 is not None:
+        if initial_currentness.provenance_present:
             try:
+                _begin_formal_download_snapshot()
+                db.session.expire_all()
+                gf = db.session.get(GeneratedFile, int(file_id))
+                if gf is None:
+                    db.session.rollback()
+                    abort(404)
+
+                currentness = ordinary_artifact_currentness(gf)
+                if not currentness.current:
+                    db.session.rollback()
+                    abort(409, description=(
+                        "この生成済みファイルは現在のcanonical dataに対する出力として検証できません: "
+                        + currentness.reason
+                    ))
+
+                expected_artifact_sha256 = generated_file_expected_sha256(gf)
+                if expected_artifact_sha256 is None:
+                    db.session.rollback()
+                    abort(409, description="source provenance付き生成済みファイルのartifact SHA-256がありません")
+                stored_path = str(gf.stored_path)
+                download_name = gf.original_filename or Path(stored_path).name
+                opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
                 opened = verified_artifact_snapshot(opened, expected_artifact_sha256)
+                db.session.commit()
             except FormalArtifactIntegrityError as exc:
+                db.session.rollback()
                 if opened is not None:
                     opened.close()
                 abort(409, description=f"生成済みファイルのbytes整合性を検証できません: {exc}")
+            except (OSError, ValueError):
+                db.session.rollback()
+                if opened is not None:
+                    opened.close()
+                abort(404)
+            except Exception:
+                db.session.rollback()
+                if opened is not None:
+                    opened.close()
+                raise
+        else:
+            try:
+                expected_artifact_sha256 = generated_file_expected_sha256(gf)
+            except ValueError as exc:
+                abort(409, description=f"生成済みファイルのbytes整合性メタデータを検証できません: {exc}")
+
+            try:
+                opened = open_managed_file_for_read(config.OUTPUT_DIR, gf.stored_path)
+            except (OSError, ValueError):
+                abort(404)
+
+            if expected_artifact_sha256 is not None:
+                try:
+                    opened = verified_artifact_snapshot(opened, expected_artifact_sha256)
+                except FormalArtifactIntegrityError as exc:
+                    if opened is not None:
+                        opened.close()
+                    abort(409, description=f"生成済みファイルのbytes整合性を検証できません: {exc}")
 
     info = opened.stat_result
     try:

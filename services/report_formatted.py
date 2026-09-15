@@ -23,6 +23,10 @@ from services.file_manager import (
     prepare_output_target,
     register_generated_file,
 )
+from services.ordinary_artifact_provenance import (
+    begin_ordinary_artifact_source_snapshot,
+    ordinary_artifact_generation_params,
+)
 
 
 _HEADER_FILL = PatternFill("solid", fgColor="1F3864")
@@ -71,198 +75,209 @@ def _effective_role(seg: Segment, assignment_map: dict[str, SpeakerAssignment]) 
 
 
 def generate_formatted_sheet(project_id: int) -> GeneratedFile:
-    project = Project.query.get(project_id)
-    if not project:
-        raise ValueError("project が見つかりません")
+    begin_ordinary_artifact_source_snapshot(project_id)
+    try:
+        project = db.session.get(Project, int(project_id))
+        if not project:
+            raise ValueError("project が見つかりません")
 
-    interviews = (
-        Interview.query
-        .filter_by(project_id=project_id)
-        .order_by(Interview.interview_date.asc(), Interview.id.asc())
-        .all()
-    )
-    interview_ids = [int(iv.id) for iv in interviews]
-    assignment_maps: dict[int, dict[str, SpeakerAssignment]] = {
-        int(iv.id): {} for iv in interviews
-    }
-    if interview_ids:
-        assignments = (
-            SpeakerAssignment.query
-            .filter(SpeakerAssignment.interview_id.in_(interview_ids))
+        interviews = (
+            Interview.query
+            .filter_by(project_id=project_id)
+            .order_by(Interview.interview_date.asc(), Interview.id.asc())
             .all()
         )
-        for assignment in assignments:
-            if assignment.speaker_label:
-                assignment_maps[int(assignment.interview_id)][assignment.speaker_label] = assignment
-
-    flows = sorted(project.interview_flows, key=lambda f: f.id or 0)
-    if not flows:
-        raise ValueError("インタビューフローが設定されていません")
-    multiple_flows = len(flows) > 1
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "整形シート"
-
-    base_headers = ("セクション", "質問コード", "質問テキスト")
-    for idx, label in enumerate(base_headers, start=1):
-        cell = ws.cell(1, idx, label)
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = _HEADER_FILL
-        cell.alignment = Alignment(wrap_text=True, horizontal="center")
-
-    col_offset = 4
-    for i, iv in enumerate(interviews):
-        text_col = col_offset + (i * 2)
-        flag_col = text_col + 1
-        label = _interview_label(iv)
-
-        c_text = ws.cell(1, text_col, f"{label}\n発話")
-        c_text.font = Font(bold=True, color="FFFFFF")
-        c_text.fill = _HEADER_FILL
-        c_text.alignment = Alignment(wrap_text=True, horizontal="center")
-
-        c_flag = ws.cell(
-            1,
-            flag_col,
-            f"{label}\nfavorite,quote,exclude,needs_review",
-        )
-        c_flag.font = Font(bold=True, color="FFFFFF")
-        c_flag.fill = _HEADER_FILL
-        c_flag.alignment = Alignment(wrap_text=True, horizontal="center")
-
-    max_col = 3 + (len(interviews) * 2)
-    row = 2
-    for flow in flows:
-        for section in flow.sections:
-            section_label = (
-                f"{flow.title} / {section.title}"
-                if multiple_flows
-                else section.title
+        interview_ids = [int(iv.id) for iv in interviews]
+        assignment_maps: dict[int, dict[str, SpeakerAssignment]] = {
+            int(iv.id): {} for iv in interviews
+        }
+        if interview_ids:
+            assignments = (
+                SpeakerAssignment.query
+                .filter(SpeakerAssignment.interview_id.in_(interview_ids))
+                .all()
             )
-            for q in section.questions:
-                ws.cell(row, 1, section_label)
-                ws.cell(row, 2, q.question_code)
-                ws.cell(row, 3, q.question_text).alignment = Alignment(wrap_text=True)
+            for assignment in assignments:
+                if assignment.speaker_label:
+                    assignment_maps[int(assignment.interview_id)][assignment.speaker_label] = assignment
 
-                if q.is_key_question:
+        flows = sorted(project.interview_flows, key=lambda f: int(f.id or 0))
+        if not flows:
+            raise ValueError("インタビューフローが設定されていません")
+        multiple_flows = len(flows) > 1
+        generation_params_json = ordinary_artifact_generation_params(
+            "formatted_sheet",
+            project_id,
+        )
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "整形シート"
+
+        base_headers = ("セクション", "質問コード", "質問テキスト")
+        for idx, label in enumerate(base_headers, start=1):
+            cell = ws.cell(1, idx, label)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = _HEADER_FILL
+            cell.alignment = Alignment(wrap_text=True, horizontal="center")
+
+        col_offset = 4
+        for i, iv in enumerate(interviews):
+            text_col = col_offset + (i * 2)
+            flag_col = text_col + 1
+            label = _interview_label(iv)
+
+            c_text = ws.cell(1, text_col, f"{label}\n発話")
+            c_text.font = Font(bold=True, color="FFFFFF")
+            c_text.fill = _HEADER_FILL
+            c_text.alignment = Alignment(wrap_text=True, horizontal="center")
+
+            c_flag = ws.cell(
+                1,
+                flag_col,
+                f"{label}\nfavorite,quote,exclude,needs_review",
+            )
+            c_flag.font = Font(bold=True, color="FFFFFF")
+            c_flag.fill = _HEADER_FILL
+            c_flag.alignment = Alignment(wrap_text=True, horizontal="center")
+
+        max_col = 3 + (len(interviews) * 2)
+        row = 2
+        for flow in flows:
+            for section in sorted(flow.sections, key=lambda item: (int(item.seq), int(item.id))):
+                section_label = (
+                    f"{flow.title} / {section.title}"
+                    if multiple_flows
+                    else section.title
+                )
+                for q in sorted(section.questions, key=lambda item: (int(item.seq), int(item.id))):
+                    ws.cell(row, 1, section_label)
+                    ws.cell(row, 2, q.question_code)
+                    ws.cell(row, 3, q.question_text).alignment = Alignment(wrap_text=True)
+
+                    if q.is_key_question:
+                        for col in range(1, max_col + 1):
+                            ws.cell(row, col).fill = _KEY_FILL
+
+                    for i, iv in enumerate(interviews):
+                        candidate_mappings = (
+                            UtteranceMapping.query
+                            .filter_by(question_id=q.id)
+                            .join(Segment, UtteranceMapping.segment_id == Segment.id)
+                            .filter(Segment.interview_id == iv.id)
+                            .order_by(Segment.seq.asc(), Segment.id.asc(), UtteranceMapping.id.asc())
+                            .all()
+                        )
+                        assignment_map = assignment_maps.get(int(iv.id), {})
+                        mappings = [
+                            mapping
+                            for mapping in candidate_mappings
+                            if _effective_role(mapping.segment, assignment_map) == "respondent"
+                        ]
+                        text_col = col_offset + (i * 2)
+                        flag_col = text_col + 1
+
+                        texts = "\n".join(f"・{m.segment.text}" for m in mappings)
+                        flags = "\n".join(
+                            f"・{_segment_flag_value_line(m.segment)}"
+                            for m in mappings
+                        )
+
+                        ws.cell(row, text_col, texts).alignment = Alignment(
+                            wrap_text=True, vertical="top"
+                        )
+                        ws.cell(row, flag_col, flags).alignment = Alignment(
+                            wrap_text=True, vertical="top"
+                        )
+
                     for col in range(1, max_col + 1):
-                        ws.cell(row, col).fill = _KEY_FILL
+                        ws.cell(row, col).border = _BORDER
+                    row += 1
 
-                for i, iv in enumerate(interviews):
-                    candidate_mappings = (
-                        UtteranceMapping.query
-                        .filter_by(question_id=q.id)
-                        .join(Segment, UtteranceMapping.segment_id == Segment.id)
-                        .filter(Segment.interview_id == iv.id)
-                        .order_by(Segment.seq.asc(), UtteranceMapping.id.asc())
-                        .all()
-                    )
-                    assignment_map = assignment_maps.get(int(iv.id), {})
-                    mappings = [
-                        mapping
-                        for mapping in candidate_mappings
-                        if _effective_role(mapping.segment, assignment_map) == "respondent"
-                    ]
-                    text_col = col_offset + (i * 2)
-                    flag_col = text_col + 1
+        ws.column_dimensions["A"].width = 26 if multiple_flows else 18
+        ws.column_dimensions["B"].width = 12
+        ws.column_dimensions["C"].width = 40
+        for i in range(len(interviews)):
+            text_col = col_offset + (i * 2)
+            flag_col = text_col + 1
+            ws.column_dimensions[get_column_letter(text_col)].width = 40
+            ws.column_dimensions[get_column_letter(flag_col)].width = 24
+        ws.freeze_panes = "D2"
 
-                    texts = "\n".join(f"・{m.segment.text}" for m in mappings)
-                    flags = "\n".join(
-                        f"・{_segment_flag_value_line(m.segment)}"
-                        for m in mappings
-                    )
+        ws2 = wb.create_sheet("未分類発言")
+        ws2.append([
+            "interview_id",
+            "参加者",
+            "実施日",
+            "segment_id",
+            "発言テキスト",
+            "開始時刻",
+            "speaker_label",
+            "favorite",
+            "quote",
+            "exclude",
+            "needs_review",
+            "mapping_state",
+        ])
+        for cell in ws2[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = _HEADER_FILL
 
-                    ws.cell(row, text_col, texts).alignment = Alignment(
-                        wrap_text=True, vertical="top"
-                    )
-                    ws.cell(row, flag_col, flags).alignment = Alignment(
-                        wrap_text=True, vertical="top"
-                    )
+        for iv in interviews:
+            p = iv.participant
+            code = p.participant_code if p and p.participant_code else "?"
+            date = iv.interview_date.isoformat() if iv.interview_date else ""
+            assignment_map = assignment_maps.get(int(iv.id), {})
+            for seg in sorted(iv.segments, key=lambda s: (int(s.seq), int(s.id or 0))):
+                if _effective_role(seg, assignment_map) != "respondent" or not _is_unclassified(seg):
+                    continue
+                flag_map = _segment_flag_map(seg)
+                mapping_state = "no_mapping" if not seg.utterance_mappings else "unclassified"
+                ws2.append([
+                    iv.id,
+                    code,
+                    date,
+                    seg.id,
+                    seg.text,
+                    _fmt_time(seg.start_sec) if seg.start_sec is not None else "",
+                    seg.speaker_label or "",
+                    "true" if flag_map["favorite"] else "false",
+                    "true" if flag_map["quote"] else "false",
+                    "true" if flag_map["exclude"] else "false",
+                    "true" if flag_map["needs_review"] else "false",
+                    mapping_state,
+                ])
 
-                for col in range(1, max_col + 1):
-                    ws.cell(row, col).border = _BORDER
-                row += 1
+        ws2.freeze_panes = "A2"
+        ws2.auto_filter.ref = ws2.dimensions
+        for col, width in {
+            "A": 12, "B": 14, "C": 12, "D": 12, "E": 60, "F": 12,
+            "G": 18, "H": 11, "I": 9, "J": 9, "K": 14, "L": 16,
+        }.items():
+            ws2.column_dimensions[col].width = width
+        for row_cells in ws2.iter_rows(min_row=2):
+            for cell in row_cells:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-    ws.column_dimensions["A"].width = 26 if multiple_flows else 18
-    ws.column_dimensions["B"].width = 12
-    ws.column_dimensions["C"].width = 40
-    for i in range(len(interviews)):
-        text_col = col_offset + (i * 2)
-        flag_col = text_col + 1
-        ws.column_dimensions[get_column_letter(text_col)].width = 40
-        ws.column_dimensions[get_column_letter(flag_col)].width = 24
-    ws.freeze_panes = "D2"
-
-    ws2 = wb.create_sheet("未分類発言")
-    ws2.append([
-        "interview_id",
-        "参加者",
-        "実施日",
-        "segment_id",
-        "発言テキスト",
-        "開始時刻",
-        "speaker_label",
-        "favorite",
-        "quote",
-        "exclude",
-        "needs_review",
-        "mapping_state",
-    ])
-    for cell in ws2[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = _HEADER_FILL
-
-    for iv in interviews:
-        p = iv.participant
-        code = p.participant_code if p and p.participant_code else "?"
-        date = iv.interview_date.isoformat() if iv.interview_date else ""
-        assignment_map = assignment_maps.get(int(iv.id), {})
-        for seg in sorted(iv.segments, key=lambda s: (s.seq, s.id or 0)):
-            if _effective_role(seg, assignment_map) != "respondent" or not _is_unclassified(seg):
-                continue
-            flag_map = _segment_flag_map(seg)
-            mapping_state = "no_mapping" if not seg.utterance_mappings else "unclassified"
-            ws2.append([
-                iv.id,
-                code,
-                date,
-                seg.id,
-                seg.text,
-                _fmt_time(seg.start_sec) if seg.start_sec is not None else "",
-                seg.speaker_label or "",
-                "true" if flag_map["favorite"] else "false",
-                "true" if flag_map["quote"] else "false",
-                "true" if flag_map["exclude"] else "false",
-                "true" if flag_map["needs_review"] else "false",
-                mapping_state,
-            ])
-
-    ws2.freeze_panes = "A2"
-    ws2.auto_filter.ref = ws2.dimensions
-    for col, width in {
-        "A": 12, "B": 14, "C": 12, "D": 12, "E": 60, "F": 12,
-        "G": 18, "H": 11, "I": 9, "J": 9, "K": 14, "L": 16,
-    }.items():
-        ws2.column_dimensions[col].width = width
-    for row_cells in ws2.iter_rows(min_row=2):
-        for cell in row_cells:
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"整形シート_{project.name}_{ts}.xlsx"
-    target = prepare_output_target(project_id, filename)
-    opened = open_output_target_for_write(target)
-    try:
-        wb.save(opened.stream)
-    finally:
-        opened.close()
-    return register_generated_file(
-        target,
-        project_id=project_id,
-        file_type="formatted_sheet",
-        file_format="xlsx",
-    )
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"整形シート_{project.name}_{ts}.xlsx"
+        target = prepare_output_target(project_id, filename)
+        opened = open_output_target_for_write(target)
+        try:
+            wb.save(opened.stream)
+        finally:
+            opened.close()
+        return register_generated_file(
+            target,
+            project_id=project_id,
+            file_type="formatted_sheet",
+            file_format="xlsx",
+            generation_params_json=generation_params_json,
+            existing_write_reservation=True,
+        )
+    except Exception:
+        db.session.rollback()
+        raise
 
 
 def _fmt_time(sec: float) -> str:
