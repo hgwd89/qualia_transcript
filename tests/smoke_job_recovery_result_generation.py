@@ -40,10 +40,19 @@ def main() -> int:
             from models import db
             from models.analysis import AIAnalysis
             from models.interview import Interview
+            from models.interview_flow import (
+                InterviewFlow,
+                InterviewFlowQuestion,
+                InterviewFlowSection,
+            )
             from models.processing_job import ProcessingJob
             from models.project import Project
-            from models.segment import Segment, UtteranceMapping
+            from models.segment import Segment, UtteranceMapping, UtteranceMappingProvenance
             import services.job_recovery as recovery
+            from services.mapping_source_provenance import (
+                capture_mapping_source_provenance,
+                serialize_mapping_source_provenance,
+            )
             from services.processing_result_guard import (
                 find_completed_analysis_for_job,
                 find_completed_mapping_count_for_job,
@@ -59,9 +68,32 @@ def main() -> int:
                 db.session.add(project)
                 db.session.flush()
 
+                mapping_flow = InterviewFlow(project_id=project.id, title="Mapping recovery flow")
+                db.session.add(mapping_flow)
+                db.session.flush()
+                mapping_section = InterviewFlowSection(
+                    flow_id=mapping_flow.id,
+                    title="Mapping recovery section",
+                    seq=0,
+                )
+                db.session.add(mapping_section)
+                db.session.flush()
+                mapping_question = InterviewFlowQuestion(
+                    section_id=mapping_section.id,
+                    question_code="Q1",
+                    question_text="Mapping recovery question",
+                    seq=0,
+                )
+                db.session.add(mapping_question)
+                db.session.flush()
+
                 current_analysis_interview = Interview(project_id=project.id, status="analyzed")
                 old_analysis_interview = Interview(project_id=project.id, status="analyzed")
-                mapping_interview = Interview(project_id=project.id, status="mapped")
+                mapping_interview = Interview(
+                    project_id=project.id,
+                    flow_id=mapping_flow.id,
+                    status="mapped",
+                )
                 db.session.add_all([
                     current_analysis_interview,
                     old_analysis_interview,
@@ -128,12 +160,20 @@ def main() -> int:
                 db.session.flush()
                 mapping = UtteranceMapping(
                     segment_id=segment.id,
+                    question_id=mapping_question.id,
                     mapped_by="ai",
                     confidence=1.0,
                     is_unclassified=False,
                     created_at=now - timedelta(minutes=1),
                 )
                 db.session.add(mapping)
+                db.session.flush()
+                db.session.add(UtteranceMappingProvenance(
+                    mapping_id=mapping.id,
+                    source_provenance_json=serialize_mapping_source_provenance(
+                        capture_mapping_source_provenance(mapping_interview.id)
+                    ),
+                ))
                 db.session.commit()
 
                 current_analysis_job_id = int(current_analysis_job.id)
@@ -147,7 +187,7 @@ def main() -> int:
                     and find_completed_analysis_for_job(old_analysis_job) is None,
                 )
                 failures += check(
-                    "mapping reconciliation uses current attempt started_at",
+                    "mapping reconciliation uses current attempt started_at and current provenance",
                     find_completed_mapping_count_for_job(mapping_job) == 1,
                 )
 
@@ -182,7 +222,7 @@ def main() -> int:
                     f"status={old_after.status!r} error={old_after.error_message!r}",
                 )
                 failures += check(
-                    "dead worker with current-attempt committed mapping recovers succeeded",
+                    "dead worker with current-attempt proven mapping recovers succeeded",
                     mapping_job_id in recovered_ids
                     and mapping_after.status == "succeeded"
                     and mapping_result.get("mapped_count") == 1

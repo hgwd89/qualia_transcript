@@ -54,6 +54,12 @@ class UtteranceMapping(db.Model):
 
     segment  = db.relationship("Segment",               back_populates="utterance_mappings")
     question = db.relationship("InterviewFlowQuestion", back_populates="utterance_mappings")
+    source_provenance = db.relationship(
+        "UtteranceMappingProvenance",
+        back_populates="mapping",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
     def to_dict(self):
         return {
@@ -64,3 +70,19 @@ class UtteranceMapping(db.Model):
             "confidence": self.confidence,
             "is_unclassified": self.is_unclassified,
         }
+
+
+class UtteranceMappingProvenance(db.Model):
+    """Generation proof for one AI mapping row without rewriting legacy mappings."""
+
+    __tablename__ = "utterance_mapping_provenance"
+
+    mapping_id = db.Column(
+        db.Integer,
+        db.ForeignKey("utterance_mappings.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_provenance_json = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    mapping = db.relationship("UtteranceMapping", back_populates="source_provenance")

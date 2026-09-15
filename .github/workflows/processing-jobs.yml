@@ -44,6 +44,9 @@ jobs:
       - name: Run mapping result scope regression
         run: python tests/smoke_mapping_result_scope.py
 
+      - name: Run mapping source provenance regression
+        run: python tests/smoke_mapping_source_provenance.py
+
       - name: Run analysis metadata input fencing regression
         run: python tests/smoke_analysis_metadata_input_fencing.py
 
