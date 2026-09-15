@@ -7,6 +7,7 @@ from models.analysis import AIAnalysis
 from models.interview import Interview, Transcription
 from models.segment import Segment, UtteranceMapping
 from models.processing_job import ProcessingJob
+from services.mapping_source_provenance import validate_current_ai_mapping_batch
 
 
 _SUPERSEDED_MESSAGE = "superseded by a later transcription attempt"
@@ -101,11 +102,12 @@ def _attempt_result_anchor(job: ProcessingJob):
 
 
 def find_completed_mapping_count_for_job(job: ProcessingJob) -> int | None:
-    """Return a mapping result committed by the current durable attempt.
+    """Return a current mapping generation committed by this durable attempt.
 
-    Mapping replacement and interview status are committed atomically. Restrict
-    recovery to rows created after the current attempt started so a retry cannot
-    silently adopt mappings from an older attempt.
+    Timestamp ownership alone is insufficient: a worker may die after mapping
+    commit and canonical segment/question inputs may then change before recovery.
+    Crash-window adoption therefore requires both current-attempt timestamps and
+    a coherent source-provenance proof matching today's canonical research input.
     """
     anchor = _attempt_result_anchor(job)
     if job.job_type != "map" or job.interview_id is None or anchor is None:
@@ -115,17 +117,26 @@ def find_completed_mapping_count_for_job(job: ProcessingJob) -> int | None:
     if not interview or interview.status not in {"mapped", "analyzed", "done"}:
         return None
 
-    count = (
+    attempt_count = (
         UtteranceMapping.query
         .join(Segment, UtteranceMapping.segment_id == Segment.id)
         .filter(
             Segment.interview_id == int(job.interview_id),
             Segment.speaker_role == "respondent",
+            UtteranceMapping.mapped_by == "ai",
             UtteranceMapping.created_at >= anchor,
         )
         .count()
     )
-    return int(count) if count > 0 else None
+    if attempt_count <= 0:
+        return None
+
+    current, _reason, generation_count = validate_current_ai_mapping_batch(
+        int(job.interview_id)
+    )
+    if not current or int(generation_count) != int(attempt_count):
+        return None
+    return int(attempt_count)
 
 
 def find_completed_analysis_for_scope(
