@@ -196,7 +196,7 @@ def main() -> int:
                     failures += check(
                         "final readiness accepts current provenance-backed ordinary artifacts",
                         not any(
-                            item.get("code") == "ordinary_artifact_currentness_invalid"
+                            item.get("code") == "ordinary_artifact_currentness_audit_error"
                             for item in report.get("blockers", [])
                         )
                         and report.get("info", {})
@@ -258,10 +258,14 @@ def main() -> int:
                         project_id=project_id,
                     )
                     failures += check(
-                        "final readiness blocks stale provenance-backed ordinary artifacts",
-                        any(
-                            item.get("code") == "ordinary_artifact_currentness_invalid"
+                        "final readiness preserves stale ordinary history as an explicit warning",
+                        not any(
+                            item.get("code") == "ordinary_artifact_currentness_audit_error"
                             for item in report.get("blockers", [])
+                        )
+                        and any(
+                            item.get("code") == "ordinary_artifact_source_stale"
+                            for item in report.get("warnings", [])
                         )
                         and report.get("info", {})
                         .get("ordinary_artifact_source_currentness", {})
