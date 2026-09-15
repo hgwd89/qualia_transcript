@@ -37,7 +37,7 @@ If segment membership/text/order, selected flow, or consumed question identity/t
 
 `services/mapping_input_guard.py` is the ORM-side acceptance boundary for mapping-dependent analysis input.
 
-For an interview with mapping data, the current respondent set must have exactly one mapping row per respondent segment. A non-null `question_id` must belong to the interview's currently selected flow. Unsupported `mapped_by` values, partial coverage, or duplicate rows fail closed.
+For an interview with mapping data, every current respondent segment must have mapping coverage. A non-null `question_id` must belong to the interview's currently selected flow. Historical duplicate rows are tolerated only when every row for the same segment represents the same effective question assignment; conflicting duplicates that assign the same segment to different questions fail closed. This preserves the existing deterministic segment-level deduplication contract without allowing ambiguous classification input.
 
 Human review and AI provenance have different semantics:
 
@@ -56,7 +56,7 @@ Per-participant analysis is not mapping-dependent and is not subject to this map
 
 `services/mapping_input_readiness_sqlite.py` reconstructs the same mapping manifest and currentness rules from the caller-owned read-only SQLite snapshot. The final production-readiness entry point executes that check inside the same transaction used by the existing hardened readiness audit.
 
-Any mapped interview whose downstream mapping input is incomplete, duplicate, cross-flow, unsupported, provenance-missing, mixed-generation, or stale is a `mapping_input_currentness_invalid` blocker. Untouched interviews with no mapping state remain governed by the existing unmapped/readiness signals and are not falsely promoted into mapping blockers.
+Any mapped interview whose downstream mapping input is incomplete, conflicting-duplicate, cross-flow, unsupported, provenance-missing, mixed-generation, or stale is a `mapping_input_currentness_invalid` blocker. Semantically identical historical duplicates remain accepted because they collapse to the same segment/question input. Untouched interviews with no mapping state remain governed by the existing unmapped/readiness signals and are not falsely promoted into mapping blockers.
 
 Project-scoped readiness filters canonical `main` rows by the selected project while retaining the same snapshot/change-detection guarantees.
 
@@ -95,7 +95,8 @@ Missing, mixed, stale, or incomplete provenance causes recovery to return no com
 - source drift makes AI mapping stale;
 - stale mapping is rejected before mapping-dependent analysis provider work;
 - removing the remaining AI sidecar invalidates existing analysis currentness even when mapping rows and source text are otherwise unchanged;
-- partial, duplicate, and cross-flow mappings fail closed;
+- partial and cross-flow mappings fail closed;
+- semantically identical historical duplicates remain accepted while conflicting duplicates fail closed;
 - ORM and read-only SQLite currentness agree.
 
 `tests/smoke_mapping_input_readiness.py` verifies both database-wide and project-scoped final readiness block stale mapping input.
