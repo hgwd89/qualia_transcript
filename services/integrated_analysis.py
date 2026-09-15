@@ -19,6 +19,8 @@ from models.participant import Participant
 from models.segment import Segment
 from models.segment_flag import SegmentFlag
 from models.speaker_assignment import SpeakerAssignment
+from services.analysis_source_provenance import analysis_source_provenance_status
+from services.semantic_source_provenance import semantic_analysis_source_provenance_status
 
 
 AI_SUMMARY_SCHEMA = {
@@ -97,16 +99,27 @@ def _parse_json(text: str | None) -> dict[str, Any]:
         return {}
 
 
-def _latest_semantic_analysis(interview_id: int) -> AIAnalysis | None:
-    return (
+def _latest_current_semantic_analysis(
+    interview_id: int,
+) -> tuple[AIAnalysis | None, list[str]]:
+    rows = (
         AIAnalysis.query
         .filter_by(interview_id=interview_id, analysis_type="semantic_clusters")
         .order_by(AIAnalysis.id.desc())
-        .first()
+        .all()
     )
+    skipped: list[str] = []
+    for row in rows:
+        current, reason = semantic_analysis_source_provenance_status(row)
+        if current:
+            return row, skipped
+        skipped.append(f"semantic analysis-{row.id} skipped: {reason}")
+    return None, skipped
 
 
-def _latest_per_question_analyses(interview_id: int) -> list[AIAnalysis]:
+def _latest_current_per_question_analyses(
+    interview_id: int,
+) -> tuple[list[AIAnalysis], list[str]]:
     rows = (
         AIAnalysis.query
         .filter_by(interview_id=interview_id, analysis_type="per_question")
@@ -114,16 +127,19 @@ def _latest_per_question_analyses(interview_id: int) -> list[AIAnalysis]:
         .all()
     )
     latest_by_qid: dict[int, AIAnalysis] = {}
-    no_qid_rows: list[AIAnalysis] = []
+    skipped: list[str] = []
     for row in rows:
-        if row.question_id is None:
-            no_qid_rows.append(row)
+        if row.question_id is not None and int(row.question_id) in latest_by_qid:
             continue
-        if row.question_id not in latest_by_qid:
-            latest_by_qid[row.question_id] = row
-    selected = [latest_by_qid[k] for k in sorted(latest_by_qid.keys())]
-    selected.extend(no_qid_rows)
-    return selected
+        current, reason = analysis_source_provenance_status(row)
+        if not current:
+            skipped.append(f"per_question analysis-{row.id} skipped: {reason}")
+            continue
+        if row.question_id is None:
+            skipped.append(f"per_question analysis-{row.id} skipped: question_id is missing")
+            continue
+        latest_by_qid[int(row.question_id)] = row
+    return [latest_by_qid[k] for k in sorted(latest_by_qid.keys())], skipped
 
 
 def _collect_flag_map(interview_id: int) -> dict[int, set[str]]:
@@ -273,7 +289,8 @@ def _build_no_ai_result(
         "unresolved_labels": unresolved_labels,
     }
 
-    semantic_analysis = _latest_semantic_analysis(interview_id)
+    semantic_analysis, skipped_semantic = _latest_current_semantic_analysis(interview_id)
+    cautions.extend(skipped_semantic)
     semantic_payload = _parse_json(semantic_analysis.content_json if semantic_analysis else None)
     cluster_summaries = semantic_payload.get("cluster_summaries") if isinstance(semantic_payload, dict) else []
     if not isinstance(cluster_summaries, list):
@@ -307,7 +324,8 @@ def _build_no_ai_result(
             "source_segment_quotes": src_quotes,
         })
 
-    per_question_rows = _latest_per_question_analyses(interview_id)
+    per_question_rows, skipped_per_question = _latest_current_per_question_analyses(interview_id)
+    cautions.extend(skipped_per_question)
     question_insights: list[dict[str, Any]] = []
     unresolved_questions: list[str] = []
     question_findings_without_traceability = 0
@@ -486,7 +504,7 @@ def _build_no_ai_result(
             "integrator_model": "none",
             "source_models": {
                 "semantic_clusters": semantic_analysis.model_used if semantic_analysis else "none",
-                "per_question": "existing_saved_analyses",
+                "per_question": "existing_current_analyses",
             },
         },
         "created_at": datetime.now(timezone.utc).isoformat(),
