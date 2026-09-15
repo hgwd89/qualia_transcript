@@ -55,6 +55,24 @@ A mapping durable job may crash after the mapping transaction commits but before
 
 Missing, mixed, stale, or incomplete provenance causes recovery to return no completed result and forces normal retry behavior instead of silently adopting an invalid generation.
 
+## Final production readiness
+
+The final professional-readiness audit validates persisted mapping provenance again from its caller-owned, single SQLite read snapshot. For interviews in `mapped`, `analyzed`, or `done` state, every AI mapping still present must be provable against the current canonical `mapping-input-v1` manifest.
+
+Delivery is blocked when any of the following is true:
+
+- AI mappings exist but `utterance_mapping_provenance` is unavailable;
+- an AI mapping has missing, malformed, incomplete, or unsupported provenance;
+- current AI mappings for one interview contain multiple provenance generations;
+- stored project/interview/flow scope no longer matches canonical scope;
+- the persisted SHA-256 no longer matches current respondent segment or flow-question input;
+- an AI mapping references a segment that is no longer a respondent source input;
+- provenance sidecar rows are orphaned from their mapping rows.
+
+Human overrides are deliberately compatible with this contract. If a reviewer changes one mapping to `mapped_by="human"`, that row no longer requires AI provenance. Remaining AI mappings must still carry one current source proof. Final readiness therefore does not require AI mappings to cover the entire respondent set, while crash-window recovery remains stricter because it is specifically adopting a complete machine-generated result transaction.
+
+Project-scoped final readiness validates only AI mappings belonging to that project. The check runs inside the same SQLite read transaction used by the hardened readiness audit, so mapping currentness cannot be evaluated against a different database generation from the rest of the delivery gate.
+
 ## Regression coverage
 
 `tests/smoke_mapping_source_provenance.py` is providerless and uses a temporary SQLite database. It verifies:
@@ -67,4 +85,13 @@ Missing, mixed, stale, or incomplete provenance causes recovery to return no com
 - crash-window recovery rejects stale or provenance-missing generations;
 - the provenance sidecar schema is created normally.
 
-The regression runs permanently in `Durable Processing Jobs` on Windows and Ubuntu and in `scripts/check_processing_jobs.ps1`.
+`tests/smoke_mapping_provenance_readiness.py` verifies the delivery gate separately:
+
+- current proven AI mappings pass mapping-readiness validation;
+- the final hardened readiness entry point actually executes the mapping check;
+- post-generation segment or question edits block delivery;
+- missing and mixed provenance block delivery;
+- a human override may coexist with remaining current AI mappings;
+- missing provenance-sidecar schema with AI mappings blocks delivery.
+
+The generation regression runs permanently in `Durable Processing Jobs` on Windows and Ubuntu and in `scripts/check_processing_jobs.ps1`. The final-readiness regression runs permanently in `Safe Smoke Check` on Windows and Ubuntu.
