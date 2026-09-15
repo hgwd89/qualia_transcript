@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from sqlalchemy import and_, or_, text
 
 from models import db
 from models.interview import Interview
-from models.interview_flow import InterviewFlow, InterviewFlowQuestion, InterviewFlowSection
+from models.interview_flow import InterviewFlow
 from models.processing_job import ProcessingJob
 from models.project import Project
 from services.job_recovery import recover_stale_jobs
