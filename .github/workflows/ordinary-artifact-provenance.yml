@@ -37,3 +37,6 @@ jobs:
 
       - name: Run ordinary artifact provenance regression
         run: python tests/smoke_ordinary_artifact_provenance.py
+
+      - name: Run ordinary artifact provenance downgrade regression
+        run: python tests/smoke_ordinary_artifact_provenance_downgrade.py
