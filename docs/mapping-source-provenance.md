@@ -6,6 +6,8 @@ An AI `UtteranceMapping` is only research-valid for the exact canonical input ge
 
 Every new AI mapping generation therefore records a deterministic source fingerprint and revalidates it before canonical replacement.
 
+That proof is also a downstream-input contract. A persisted mapping-dependent AI analysis must not treat the mere existence of `UtteranceMapping` rows as proof that those classifications are still valid. Per-question, cross-participant, and integrated analysis require the mapping state they consume to be current before provider work and whenever analysis source provenance is revalidated later.
+
 ## Exact source manifest
 
 `mapping-input-v1` fingerprints only fields that affect the mapping provider input, candidate membership, or deterministic ordering:
@@ -30,6 +32,33 @@ The mapping worker:
 6. only then replaces the previous mapping set and commits the new mappings plus provenance.
 
 If segment membership/text/order, selected flow, or consumed question identity/text/order changes while provider work is in flight, the worker fails closed before deleting existing mappings.
+
+## Downstream mapping-input currentness
+
+`services/mapping_input_guard.py` is the ORM-side acceptance boundary for mapping-dependent analysis input.
+
+For an interview with mapping data, the current respondent set must have exactly one mapping row per respondent segment. A non-null `question_id` must belong to the interview's currently selected flow. Unsupported `mapped_by` values, partial coverage, or duplicate rows fail closed.
+
+Human review and AI provenance have different semantics:
+
+- `mapped_by="human"` and historical `mapped_by="manual"` rows are canonical human decisions and do not require provider provenance;
+- every remaining `mapped_by="ai"` row must have a provenance sidecar;
+- all remaining AI rows must share one coherent source generation;
+- that generation must still match the current `mapping-input-v1` manifest.
+
+Mixed human/AI mapping is therefore valid when the human overrides are canonical and the remaining AI classifications still belong to one current proven generation. Human override does not force an unnecessary remap of unrelated, still-current AI rows.
+
+`services/analysis_source_provenance.py` applies this guard inside `_mapped_respondent_segments()`. This is deliberate: the same helper builds mapping-dependent provider prompts and their long-lived `analysis-input-v1` provenance. Stale/unproven mapping therefore blocks provider work before a new canonical `AIAnalysis` is created, and the same condition later makes an existing mapping-dependent analysis stale at approval/formal-export currentness checks.
+
+Per-participant analysis is not mapping-dependent and is not subject to this mapping gate.
+
+## Production-readiness contract
+
+`services/mapping_input_readiness_sqlite.py` reconstructs the same mapping manifest and currentness rules from the caller-owned read-only SQLite snapshot. The final production-readiness entry point executes that check inside the same transaction used by the existing hardened readiness audit.
+
+Any mapped interview whose downstream mapping input is incomplete, duplicate, cross-flow, unsupported, provenance-missing, mixed-generation, or stale is a `mapping_input_currentness_invalid` blocker. Untouched interviews with no mapping state remain governed by the existing unmapped/readiness signals and are not falsely promoted into mapping blockers.
+
+Project-scoped readiness filters canonical `main` rows by the selected project while retaining the same snapshot/change-detection guarantees.
 
 ## Storage and historical compatibility
 
@@ -57,14 +86,18 @@ Missing, mixed, stale, or incomplete provenance causes recovery to return no com
 
 ## Regression coverage
 
-`tests/smoke_mapping_source_provenance.py` is providerless and uses a temporary SQLite database. It verifies:
+`tests/smoke_mapping_source_provenance.py` is providerless and verifies mapping save/recovery provenance.
 
-- source mutation during the provider window fails before canonical replacement and preserves the previous mapping;
-- a valid AI generation persists a current proof;
-- segment edits after completion make the generation stale;
-- question edits after completion make the generation stale;
-- crash-window recovery accepts a current proven generation;
-- crash-window recovery rejects stale or provenance-missing generations;
-- the provenance sidecar schema is created normally.
+`tests/smoke_mapping_input_currentness.py` is providerless and verifies:
 
-The regression runs permanently in `Durable Processing Jobs` on Windows and Ubuntu and in `scripts/check_processing_jobs.ps1`.
+- a complete current AI generation is accepted;
+- mixed human/current-AI mapping remains valid;
+- source drift makes AI mapping stale;
+- stale mapping is rejected before mapping-dependent analysis provider work;
+- removing the remaining AI sidecar invalidates existing analysis currentness even when mapping rows and source text are otherwise unchanged;
+- partial, duplicate, and cross-flow mappings fail closed;
+- ORM and read-only SQLite currentness agree.
+
+`tests/smoke_mapping_input_readiness.py` verifies both database-wide and project-scoped final readiness block stale mapping input.
+
+The provider/input regression runs permanently in `Durable Processing Jobs` on Windows and Ubuntu and in `scripts/check_processing_jobs.ps1`. The final-readiness regression runs permanently in both Windows and Ubuntu jobs of `Safe Smoke Check`.
