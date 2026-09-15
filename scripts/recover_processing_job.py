@@ -37,6 +37,7 @@ def _read_job(job_id: int) -> dict | None:
     con = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
+        con.execute("PRAGMA query_only=ON")
         row = con.execute(
             """
             SELECT id, project_id, interview_id, job_type, status,
@@ -64,6 +65,34 @@ def _parse_dt(value) -> datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _dt_token(value) -> str | None:
+    parsed = _parse_dt(value)
+    return parsed.isoformat() if parsed is not None else None
+
+
+def _recovery_generation_token_from_row(row: dict) -> dict:
+    """Capture the exact durable active generation the operator inspected."""
+    worker_pid = row.get("worker_pid")
+    return {
+        "status": str(row.get("status") or ""),
+        "attempt_count": int(row.get("attempt_count") or 0),
+        "worker_pid": int(worker_pid) if worker_pid is not None else None,
+        "created_at": _dt_token(row.get("created_at")),
+        "started_at": _dt_token(row.get("started_at")),
+    }
+
+
+def _recovery_generation_token_from_job(job) -> dict:
+    worker_pid = getattr(job, "worker_pid", None)
+    return {
+        "status": str(getattr(job, "status", "") or ""),
+        "attempt_count": int(getattr(job, "attempt_count", 0) or 0),
+        "worker_pid": int(worker_pid) if worker_pid is not None else None,
+        "created_at": _dt_token(getattr(job, "created_at", None)),
+        "started_at": _dt_token(getattr(job, "started_at", None)),
+    }
 
 
 def _pid_liveness_from_row(row: dict) -> bool | None:
@@ -107,6 +136,7 @@ def _display_payload(row: dict) -> dict:
     pid_liveness = _pid_liveness_from_row(row)
     payload["worker_pid_alive"] = pid_liveness
     payload["automatic_recovery_reason"] = _stale_reason_from_row(row)
+    payload["recovery_generation"] = _recovery_generation_token_from_row(row)
 
     if row.get("status") in {"pending", "running"} and row.get("worker_pid"):
         if pid_liveness is True:
@@ -127,15 +157,16 @@ def _display_payload(row: dict) -> dict:
     return payload
 
 
-def _apply_recovery(job_id: int) -> int:
+def _apply_recovery(job_id: int, expected_generation: dict) -> int:
     from app import create_app
     from models import db
     from models.processing_job import ProcessingJob
-    from services.job_recovery import mark_job_failed
+    from services.job_recovery import mark_job_failed_if_unchanged
 
     # Explicit recovery is a live-database write and create_app() may itself run
-    # idempotent migrations. This nested runtime acquisition stays in the same
-    # shared mode when main() already holds the reader reservation.
+    # idempotent migrations. The caller keeps the reader reservation, while this
+    # nested worker reservation excludes maintenance. Workers remain concurrent,
+    # so both the inspected generation token and the service CAS are required.
     try:
         with runtime_lock("worker"):
             app = create_app()
@@ -147,8 +178,29 @@ def _apply_recovery(job_id: int) -> int:
                 if job.status not in {"pending", "running"}:
                     print(f"No change: job is already terminal ({job.status}).")
                     return 0
-                mark_job_failed(job, "operator explicitly recovered active job")
-                print(f"job_id={job.id} marked failed; retry is now available")
+
+                current_generation = _recovery_generation_token_from_job(job)
+                if current_generation != expected_generation:
+                    print("Refusing recovery write: active job generation changed after inspection.")
+                    print(json.dumps({
+                        "inspected_generation": expected_generation,
+                        "current_generation": current_generation,
+                    }, ensure_ascii=False, indent=2))
+                    return 4
+
+                current, changed = mark_job_failed_if_unchanged(
+                    job,
+                    "operator explicitly recovered active job",
+                )
+                if not changed:
+                    print("Refusing recovery write: active job generation changed during recovery commit.")
+                    print(json.dumps({
+                        "inspected_generation": expected_generation,
+                        "current_generation": _recovery_generation_token_from_job(current),
+                    }, ensure_ascii=False, indent=2))
+                    return 4
+
+                print(f"job_id={current.id} marked failed; retry is now available")
                 return 0
     except RuntimeLockError as exc:
         print(f"Refusing recovery write while maintenance is active: {exc}")
@@ -183,7 +235,8 @@ def main() -> int:
             if not args.yes:
                 print("Refusing write: --apply requires --yes.")
                 return 2
-            return _apply_recovery(args.job_id)
+            inspected_generation = _recovery_generation_token_from_row(row)
+            return _apply_recovery(args.job_id, inspected_generation)
     except RuntimeLockError as exc:
         print(f"Refusing job inspection while maintenance is active: {exc}")
         return 3
