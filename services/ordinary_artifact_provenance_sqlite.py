@@ -427,9 +427,18 @@ def ordinary_artifact_currentness_sqlite(
         return SQLiteOrdinaryArtifactCurrentness(False, False, "generated-file generation metadata is invalid")
     if not isinstance(params, dict):
         return SQLiteOrdinaryArtifactCurrentness(False, False, "generated-file generation metadata is invalid")
+    provenance_declared = ORDINARY_PROVENANCE_KEY in params
     expected = params.get(ORDINARY_PROVENANCE_KEY)
     if not isinstance(expected, dict):
-        return SQLiteOrdinaryArtifactCurrentness(False, False, "ordinary artifact source provenance is missing")
+        return SQLiteOrdinaryArtifactCurrentness(
+            False,
+            provenance_declared,
+            (
+                "ordinary artifact source provenance is invalid"
+                if provenance_declared
+                else "ordinary artifact source provenance is missing"
+            ),
+        )
     if expected.get("version") != ORDINARY_PROVENANCE_VERSION:
         return SQLiteOrdinaryArtifactCurrentness(False, True, "ordinary artifact source provenance version is missing or unsupported")
     expected_hash = str(expected.get("sha256") or "")
@@ -438,10 +447,11 @@ def ordinary_artifact_currentness_sqlite(
     if str(expected.get("file_type") or "") != str(file_type):
         return SQLiteOrdinaryArtifactCurrentness(False, True, "ordinary artifact file_type provenance mismatch")
     try:
-        if int(expected.get("project_id") or -1) != int(project_id):
-            return SQLiteOrdinaryArtifactCurrentness(False, True, "ordinary artifact project provenance mismatch")
+        expected_project_id = int(expected.get("project_id"))
     except (TypeError, ValueError):
         return SQLiteOrdinaryArtifactCurrentness(False, True, "ordinary artifact project provenance is invalid")
+    if expected_project_id != int(project_id):
+        return SQLiteOrdinaryArtifactCurrentness(False, True, "ordinary artifact project provenance mismatch")
 
     expected_interview = expected.get("interview_id")
     try:
