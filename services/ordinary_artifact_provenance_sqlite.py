@@ -85,6 +85,38 @@ def _participant_manifest(
     return payload
 
 
+def _verbatim_referenced_participants(
+    con: sqlite3.Connection,
+    interview_id: int,
+) -> list[dict]:
+    rows = con.execute(
+        """
+        SELECT p.id, p.participant_code, p.display_name
+        FROM participants p
+        WHERE p.id IN (
+            SELECT participant_id FROM interviews
+            WHERE id=? AND participant_id IS NOT NULL
+            UNION
+            SELECT participant_id FROM segments
+            WHERE interview_id=? AND participant_id IS NOT NULL
+            UNION
+            SELECT participant_id FROM speaker_assignments
+            WHERE interview_id=? AND participant_id IS NOT NULL
+        )
+        ORDER BY p.id
+        """,
+        (int(interview_id), int(interview_id), int(interview_id)),
+    ).fetchall()
+    return [
+        {
+            "id": int(row["id"]),
+            "participant_code": str(row["participant_code"] or ""),
+            "display_name": str(row["display_name"] or ""),
+        }
+        for row in rows
+    ]
+
+
 def _speaker_assignment_manifest(
     con: sqlite3.Connection,
     interview_id: int,
@@ -311,6 +343,10 @@ def build_ordinary_artifact_source_manifest_sqlite(
             include_mappings=False,
             include_flags=True,
             include_assignments=True,
+        )
+        base["rendered_speaker_participants"] = _verbatim_referenced_participants(
+            con,
+            int(interview_id),
         )
         return base
 
