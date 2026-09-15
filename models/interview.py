@@ -20,8 +20,11 @@ class Interview(db.Model):
     project     = db.relationship("Project",       back_populates="interviews")
     participant = db.relationship("Participant",    back_populates="interviews")
     flow        = db.relationship("InterviewFlow",  back_populates="interviews")
+    # MediaFile.id is the durable registration sequence. Keep the relationship
+    # explicitly ordered so legacy/restored interviews with multiple media rows
+    # have one deterministic "latest registered media" generation everywhere.
     media_files = db.relationship("MediaFile",      back_populates="interview",
-                                  cascade="all, delete-orphan")
+                                  cascade="all, delete-orphan", order_by="MediaFile.id")
     segments    = db.relationship("Segment",        back_populates="interview",
                                   cascade="all, delete-orphan", order_by="Segment.seq")
     ai_analyses = db.relationship("AIAnalysis",     back_populates="interview",
