@@ -1,16 +1,14 @@
-"""Final professional-readiness entry point including generated-file ownership.
+"""Final professional-readiness entry point including GeneratedFile ownership.
 
-This wrapper preserves the hardened database-wide/project-scoped readiness audits
-and adds the cross-project GeneratedFile ownership checks that individual SQLite
-foreign keys cannot express. A separate read-only data-version watcher spans the
-entire composite audit so the v2 snapshot and ownership scan cannot be accepted
-from different database generations.
+The existing v2/project readiness audits own the SQLite read transaction and the
+final PRAGMA data_version change-detection window. This wrapper injects the
+cross-project GeneratedFile ownership check into that same transaction instead of
+opening a second connection after the hardened audit has completed.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -30,12 +28,11 @@ from services.runtime_lock import RuntimeLockError, runtime_lock
 
 def _append_generated_file_ownership(
     report: dict,
-    db_path: Path,
+    con,
     *,
     project_id: int | None,
 ) -> None:
-    con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
+    """Append ownership findings from the caller-owned readiness snapshot."""
     try:
         ownership = inspect_generated_file_ownership(con, project_id=project_id)
     except Exception as exc:
@@ -45,8 +42,6 @@ def _append_generated_file_ownership(
             "context": {"error": f"{type(exc).__name__}: {exc}"},
         })
         return
-    finally:
-        con.close()
 
     report.setdefault("blockers", []).extend(ownership.blockers)
     report.setdefault("warnings", []).extend(ownership.warnings)
@@ -68,16 +63,6 @@ def _dedupe(items: list[dict]) -> list[dict]:
     return result
 
 
-def _open_change_watcher(db_path: Path) -> tuple[sqlite3.Connection, int]:
-    con = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
-    try:
-        version = int(con.execute("PRAGMA data_version").fetchone()[0])
-    except Exception:
-        con.close()
-        raise
-    return con, version
-
-
 def audit_final(
     db_path: Path,
     output_dir: Path,
@@ -86,14 +71,32 @@ def audit_final(
     *,
     project_id: int | None = None,
 ) -> dict:
-    watcher = None
-    start_data_version = None
-    end_data_version = None
-    watcher_error = None
+    """Run hardened readiness plus ownership in one SQLite read snapshot."""
+    original_runner = readiness_v2._run_base_audit_on_snapshot
+
+    def run_base_with_ownership(con, inner_db_path, inner_output_dir, inner_backup_dir):
+        report = original_runner(
+            con,
+            inner_db_path,
+            inner_output_dir,
+            inner_backup_dir,
+        )
+        _append_generated_file_ownership(
+            report,
+            con,
+            project_id=project_id,
+        )
+        return report
+
+    readiness_v2._run_base_audit_on_snapshot = run_base_with_ownership
     try:
-        watcher, start_data_version = _open_change_watcher(db_path)
         if project_id is None:
-            report = readiness_v2.audit(db_path, output_dir, backup_dir, upload_dir)
+            report = readiness_v2.audit(
+                db_path,
+                output_dir,
+                backup_dir,
+                upload_dir,
+            )
         else:
             report = project_readiness.audit_project(
                 db_path,
@@ -102,43 +105,8 @@ def audit_final(
                 int(project_id),
                 upload_dir,
             )
-
-        _append_generated_file_ownership(report, db_path, project_id=project_id)
-        try:
-            end_data_version = int(watcher.execute("PRAGMA data_version").fetchone()[0])
-        except Exception as exc:
-            watcher_error = f"{type(exc).__name__}: {exc}"
     finally:
-        if watcher is not None:
-            watcher.close()
-
-    info = report.setdefault("info", {})
-    info["final_audit_data_version_start"] = start_data_version
-    info["final_audit_data_version_end"] = end_data_version
-    info["database_changed_during_final_ownership_audit"] = (
-        start_data_version is not None
-        and end_data_version is not None
-        and start_data_version != end_data_version
-    )
-    if watcher_error is not None or start_data_version is None or end_data_version is None:
-        report.setdefault("blockers", []).append({
-            "code": "final_database_change_detection_failed",
-            "message": "Could not prove that the database remained unchanged through the composite readiness and GeneratedFile ownership audit",
-            "context": {
-                "error": watcher_error,
-                "data_version_start": start_data_version,
-                "data_version_end": end_data_version,
-            },
-        })
-    elif start_data_version != end_data_version:
-        report.setdefault("blockers", []).append({
-            "code": "database_changed_during_final_ownership_audit",
-            "message": "Database changed while final readiness and GeneratedFile ownership checks were running; rerun against a quiescent dataset before professional delivery",
-            "context": {
-                "data_version_start": start_data_version,
-                "data_version_end": end_data_version,
-            },
-        })
+        readiness_v2._run_base_audit_on_snapshot = original_runner
 
     report["blockers"] = _dedupe(report.get("blockers", []))
     report["warnings"] = _dedupe(report.get("warnings", []))
@@ -146,14 +114,24 @@ def audit_final(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Final hardened production-readiness audit")
-    parser.add_argument("--project-id", type=int, help="Optional project-scoped business audit")
+    parser = argparse.ArgumentParser(
+        description="Final hardened production-readiness audit"
+    )
+    parser.add_argument(
+        "--project-id",
+        type=int,
+        help="Optional project-scoped business audit",
+    )
     parser.add_argument("--db", help="SQLite DB path; defaults to config.DATABASE_URI")
     parser.add_argument("--output-dir", help="outputs directory; defaults to config.OUTPUT_DIR")
     parser.add_argument("--backup-dir", help="backup directory; defaults to config.BACKUP_DIR")
     parser.add_argument("--upload-dir", help="uploads directory; defaults to config.UPLOAD_DIR")
     parser.add_argument("--json", action="store_true", help="print JSON report")
-    parser.add_argument("--strict", action="store_true", help="treat warnings as a failing exit status")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="treat warnings as a failing exit status",
+    )
     args = parser.parse_args()
 
     db_path = base_readiness._resolve_db_path(args.db)
